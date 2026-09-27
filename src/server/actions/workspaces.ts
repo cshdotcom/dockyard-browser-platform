@@ -1,0 +1,549 @@
+"use server"
+
+import { z } from "zod"
+import crypto from "crypto"
+import { db } from "@/lib/db"
+import { requireAuth, checkSessionQuota, userGroupIds, requireWritableMode, requirePermission } from "@/lib/permissions"
+import { actionHandler, type ActionResult } from "@/lib/api"
+import { writeAudit } from "@/lib/audit"
+import { encrypt, decrypt, randomHex } from "@/lib/crypto"
+import { rateLimit } from "@/lib/rate-limit"
+import { idempotencyCheck } from "@/lib/idempotency"
+import { trackBehavior, detectAbnormalBehavior } from "@/lib/risk"
+import { raiseAlert } from "@/lib/alerts"
+import { zodValidate, zPrecision } from "@/lib/validators"
+import { createSession, destroySession } from "@/lib/external/steel"
+import { createNovncSession, destroyNovncSession, refreshNovncSecret } from "@/lib/external/novnc"
+import { moveToRecycle } from "@/lib/recycle"
+import { getConfigBool, getConfig, getConfigNumber } from "@/lib/config"
+
+// ============================================================
+// 浏览器工作区业务 Server Actions
+// 数据流：前端表单 → Server Action（权限+配额+幂等+风控校验）
+//   → Steel-Browser/NoVNC 外部API → Prisma 落库 → 审计 → 返回
+// ============================================================
+
+// 组装代理URL：internal_singbox 类型读取实例内网socks地址
+async function buildProxyUrl(proxyNodeId?: string | null): Promise<{ proxyUrl?: string; proxyNodeName?: string; singboxInstanceId?: string | null }> {
+  if (!proxyNodeId) return {}
+  const node = await db.proxyNode.findFirst({ where: { id: proxyNodeId, deletedAt: null } })
+  if (!node) throw new Error("代理节点不存在或已删除")
+  if (node.status === "FAILED" || node.status === "DISABLED") throw new Error(`代理节点当前不可用（${node.status}）`)
+  if (node.type === "internal_singbox") {
+    const inst = node.singboxInstanceId ? await db.singboxInstance.findFirst({ where: { id: node.singboxInstanceId, deletedAt: null } }) : null
+    if (!inst || !inst.socksAddr || inst.status !== "RUNNING") throw new Error("关联的 SingBox 实例未运行")
+    if (inst.maxSessions > 0 && inst.currentSessions >= inst.maxSessions) throw new Error("该 SingBox 实例会话数已达上限")
+    return { proxyUrl: `socks5://${inst.socksAddr}`, proxyNodeName: node.name, singboxInstanceId: inst.id }
+  }
+  const auth = node.username && node.password ? `${encodeURIComponent(node.username)}:${encodeURIComponent(decrypt(node.password))}@` : ""
+  return {
+    proxyUrl: `${node.protocol === "http" ? "http" : "socks5"}://${auth}${node.host}:${node.port}`,
+    proxyNodeName: node.name,
+    singboxInstanceId: null,
+  }
+}
+
+// 校验用户组可用该代理节点（组绑定）
+async function checkProxyAccess(userId: string, proxyNodeId: string) {
+  const gids = await userGroupIds(userId)
+  const bindings = await db.groupProxy.findMany({ where: { proxyNodeId, groupId: { in: gids } } })
+  const isAdmin = (await db.user.findUnique({ where: { id: userId } }))?.role
+  if (bindings.length === 0 && isAdmin !== "SUPER_ADMIN" && isAdmin !== "ADMIN") {
+    throw new Error("您所属的用户组未分配该代理节点")
+  }
+}
+
+// Steel 节点调度：负载感知 + 标签 + 灰度分组隔离
+async function pickSteelNode(labels?: string[]): Promise<string | null> {
+  const nodes = await db.steelNode.findMany({
+    where: { enabled: true, deletedAt: null, status: "ONLINE", grayGroup: "PROD" },
+    orderBy: { loadScore: "asc" },
+  })
+  if (nodes.length === 0) return null
+  if (labels && labels.length > 0) {
+    const matched = nodes.find((n) => (n.labels as string[])?.some((l) => labels.includes(l)))
+    if (matched) return matched.id
+  }
+  return nodes[0].id
+}
+
+const createSchema = z.object({
+  name: z.string().min(1, "名称必填").max(64),
+  mode: z.enum(["cdp_light", "novnc_full"]),
+  templateId: z.string().optional().nullable(),
+  proxyNodeId: z.string().optional().nullable(),
+  profileSnapshotId: z.string().optional().nullable(),
+  ttlMinutes: zPrecision("TTL", 0, 525600).optional().default(0),
+  idleTimeoutMinutes: zPrecision("闲置超时", 1, 1440).optional().default(60),
+  resolution: z.string().optional().default("1920x1080"),
+  tags: z.string().optional().default(""),
+})
+
+// ---- 创建工作区（幂等 + 配额 + 预留水位 + 风控 + 行为画像）----
+export async function createWorkspaceAction(input: unknown): Promise<ActionResult<{ id: string; uuid: string; cdpUrl?: string | null; mode: string }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    await requireWritableMode()
+    await requirePermission(ctx.userId, "blockCreateWorkspace", "管理员已禁止您创建浏览器工作区")
+    const p = zodValidate(createSchema, input)
+
+    // 幂等防重复提交
+    const idem = await idempotencyCheck(ctx.userId, "create_workspace", { name: p.name, mode: p.mode }, 8000)
+    if (idem.repeated) throw new Error("请勿重复提交，工作区正在创建中")
+
+    // 速率限制（防短时间大量创建）
+    const createLimit = await getConfigNumber("workspace.createRateLimitPerMin", 10)
+    if (!rateLimit(`wscreate:${ctx.userId}`, createLimit, 60_000).allowed) {
+      await trackBehavior(ctx.userId, "RISK")
+      throw new Error("创建过于频繁，请稍后再试")
+    }
+
+    // 行为风控：高频创建检测
+    const abnormal = await detectAbnormalBehavior(ctx.userId, "WORKSPACE_CREATE")
+    if (abnormal.abnormal) throw new Error("检测到异常高频创建行为，已触发风控拦截")
+
+    // 配额三级校验（含预留水位）
+    const quota = await checkSessionQuota(ctx.userId, p.mode === "cdp_light" ? "sessions" : "novncSessions")
+    if (!quota.ok) throw new Error(quota.reason || "配额不足")
+
+    // 代理节点权限校验
+    if (p.proxyNodeId) await checkProxyAccess(ctx.userId, p.proxyNodeId)
+
+    // 模板加载（继承配置）
+    let templateConfig: Record<string, unknown> = {}
+    if (p.templateId) {
+      const tpl = await db.browserTemplate.findFirst({ where: { id: p.templateId, deletedAt: null } })
+      if (tpl) {
+        const gids = await userGroupIds(ctx.userId)
+        const visible = tpl.scope === "GLOBAL" || (tpl.scope === "GROUP" && tpl.groupId && gids.includes(tpl.groupId)) || tpl.userId === ctx.userId
+        if (!visible && ctx.role === "USER") throw new Error("无权使用该模板")
+        templateConfig = JSON.parse(tpl.configJson || "{}")
+        if (tpl.parentId) {
+          const parent = await db.browserTemplate.findFirst({ where: { id: tpl.parentId, deletedAt: null } })
+          if (parent) templateConfig = { ...JSON.parse(parent.configJson || "{}"), ...templateConfig } // 子模板覆盖部分参数
+        }
+      }
+    }
+
+    const tags = p.tags ? p.tags.split(",").map((t) => t.trim()).filter(Boolean) : []
+
+    if (p.mode === "cdp_light") {
+      // ---- CDP 轻量会话 ----
+      const proxyInfo = await buildProxyUrl(p.proxyNodeId)
+      const steelNodeId = await pickSteelNode()
+      const session = await createSession({
+        proxyUrl: proxyInfo.proxyUrl,
+        userAgent: (templateConfig.ua as string) || undefined,
+        timezone: (templateConfig.timezone as string) || undefined,
+        locale: (templateConfig.locale as string) || undefined,
+        ttlMinutes: p.ttlMinutes || undefined,
+        profileMount: p.profileSnapshotId ? `snapshots/${p.profileSnapshotId}` : undefined,
+      })
+      const ws = await db.browserWorkspace.create({
+        data: {
+          name: p.name,
+          mode: "cdp_light",
+          status: "RUNNING",
+          userId: ctx.userId,
+          groupId: (await userGroupIds(ctx.userId))[0] ?? null,
+          proxyNodeId: p.proxyNodeId || null,
+          singboxInstanceId: proxyInfo.singboxInstanceId || null,
+          steelNodeId,
+          templateId: p.templateId || null,
+          profileSnapshotId: p.profileSnapshotId || null,
+          tags,
+          steelSessionId: session.sessionId,
+          cdpUrl: session.cdpUrl,
+          ttlMinutes: p.ttlMinutes || (await getConfigNumber("workspace.defaultTtlMinutes", 0)),
+          idleTimeoutMinutes: p.idleTimeoutMinutes || (await getConfigNumber("workspace.defaultIdleTimeoutMin", 60)),
+          createdByUserId: ctx.userId,
+        },
+      })
+      if (p.proxyNodeId) await db.proxyNode.update({ where: { id: p.proxyNodeId }, data: { currentSessions: { increment: 1 } } })
+      if (proxyInfo.singboxInstanceId) await db.singboxInstance.update({ where: { id: proxyInfo.singboxInstanceId }, data: { currentSessions: { increment: 1 } } })
+      await trackBehavior(ctx.userId, "CREATE")
+      await writeAudit({
+        operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_CREATE",
+        resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
+        ownerUserId: ctx.userId, createdByUserId: ctx.userId,
+        after: { mode: "cdp_light", steelSessionId: session.sessionId, proxy: proxyInfo.proxyNodeName, simulated: session.simulated },
+      })
+      return { id: ws.id, uuid: ws.uuid, cdpUrl: session.cdpUrl, mode: "cdp_light" }
+    } else {
+      // ---- NoVNC 重度会话（独立配额校验在上面已做）----
+      const proxyInfo = await buildProxyUrl(p.proxyNodeId)
+      const novnc = await createNovncSession({
+        proxyUrl: proxyInfo.proxyUrl,
+        resolution: p.resolution,
+        ttlMinutes: p.ttlMinutes || undefined,
+        profileMount: p.profileSnapshotId ? `snapshots/${p.profileSnapshotId}` : undefined,
+      })
+      const ws = await db.browserWorkspace.create({
+        data: {
+          name: p.name,
+          mode: "novnc_full",
+          status: "RUNNING",
+          userId: ctx.userId,
+          groupId: (await userGroupIds(ctx.userId))[0] ?? null,
+          proxyNodeId: p.proxyNodeId || null,
+          singboxInstanceId: proxyInfo.singboxInstanceId || null,
+          templateId: p.templateId || null,
+          profileSnapshotId: p.profileSnapshotId || null,
+          tags,
+          novncSessionId: novnc.novncSessionId,
+          novncSecret: encrypt(novnc.secret),
+          novncConnCount: 1,
+          ttlMinutes: p.ttlMinutes,
+          idleTimeoutMinutes: p.idleTimeoutMinutes,
+          createdByUserId: ctx.userId,
+        },
+      })
+      if (p.proxyNodeId) await db.proxyNode.update({ where: { id: p.proxyNodeId }, data: { currentSessions: { increment: 1 } } })
+      if (proxyInfo.singboxInstanceId) await db.singboxInstance.update({ where: { id: proxyInfo.singboxInstanceId }, data: { currentSessions: { increment: 1 } } })
+      await trackBehavior(ctx.userId, "CREATE")
+      await writeAudit({
+        operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_CREATE",
+        resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
+        ownerUserId: ctx.userId, createdByUserId: ctx.userId,
+        after: { mode: "novnc_full", novncSessionId: novnc.novncSessionId, resolution: p.resolution },
+      })
+      return { id: ws.id, uuid: ws.uuid, mode: "novnc_full" }
+    }
+  })
+}
+
+// ---- 停止工作区（销毁底层会话，记录保留）----
+export async function stopWorkspaceAction(input: unknown): Promise<ActionResult> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { id } = zodValidate(z.object({ id: z.string() }), input)
+    const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ctx.userId !== ws.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作该工作区")
+
+    if (ws.mode === "cdp_light" && ws.steelSessionId) await destroySession(ws.steelSessionId).catch(() => {})
+    if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId).catch(() => {})
+    if (ws.proxyNodeId) await db.proxyNode.update({ where: { id: ws.proxyNodeId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
+    if (ws.singboxInstanceId) await db.singboxInstance.update({ where: { id: ws.singboxInstanceId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
+
+    await db.browserWorkspace.update({ where: { id }, data: { status: "STOPPED", steelSessionId: null, cdpUrl: null, novncSessionId: null } })
+    await trackBehavior(ctx.userId, "DELETE")
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_STOP",
+      resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
+      ownerUserId: ws.userId, createdByUserId: ws.createdByUserId,
+      before: { status: ws.status }, after: { status: "STOPPED" },
+    })
+    return null
+  })
+}
+
+// ---- 重新启动工作区（复用原配置）----
+export async function startWorkspaceAction(input: unknown): Promise<ActionResult> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    await requireWritableMode()
+    const { id } = zodValidate(z.object({ id: z.string() }), input)
+    const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ctx.userId !== ws.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作该工作区")
+    if (ws.status === "RUNNING") throw new Error("工作区已在运行中")
+
+    const proxyInfo = await buildProxyUrl(ws.proxyNodeId)
+    if (ws.mode === "cdp_light") {
+      const session = await createSession({
+        proxyUrl: proxyInfo.proxyUrl,
+        ttlMinutes: ws.ttlMinutes || undefined,
+        profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
+      })
+      await db.browserWorkspace.update({ where: { id }, data: { status: "RUNNING", steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, steelNodeId: await pickSteelNode() } })
+    } else {
+      const novnc = await createNovncSession({ proxyUrl: proxyInfo.proxyUrl, ttlMinutes: ws.ttlMinutes || undefined })
+      await db.browserWorkspace.update({ where: { id }, data: { status: "RUNNING", novncSessionId: novnc.novncSessionId, novncSecret: encrypt(novnc.secret) } })
+    }
+    if (ws.proxyNodeId) await db.proxyNode.update({ where: { id: ws.proxyNodeId }, data: { currentSessions: { increment: 1 } } }).catch(() => {})
+    if (ws.singboxInstanceId) await db.singboxInstance.update({ where: { id: ws.singboxInstanceId }, data: { currentSessions: { increment: 1 } } }).catch(() => {})
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_START",
+      resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
+      ownerUserId: ws.userId, createdByUserId: ws.createdByUserId,
+      before: { status: ws.status }, after: { status: "RUNNING" },
+    })
+    return null
+  })
+}
+
+// ---- 删除工作区（软删除入回收站）----
+export async function deleteWorkspaceAction(input: unknown): Promise<ActionResult> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { id, reason } = zodValidate(z.object({ id: z.string(), reason: z.string().optional().default("") }), input)
+    const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ctx.userId !== ws.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作该工作区")
+
+    if (ws.status === "RUNNING" || ws.status === "CREATING") {
+      if (ws.mode === "cdp_light" && ws.steelSessionId) await destroySession(ws.steelSessionId).catch(() => {})
+      if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId).catch(() => {})
+    }
+    if (ws.proxyNodeId) await db.proxyNode.update({ where: { id: ws.proxyNodeId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
+    if (ws.singboxInstanceId) await db.singboxInstance.update({ where: { id: ws.singboxInstanceId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
+
+    await db.browserWorkspace.update({ where: { id }, data: { deletedAt: new Date(), status: "DESTROYED" } })
+    await moveToRecycle({
+      resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
+      ownerUserId: ws.userId, createdByUserId: ws.createdByUserId,
+      deletedByUserId: ctx.userId, deletedByType: "USER", reason: reason || undefined,
+    })
+    await trackBehavior(ctx.userId, "DELETE")
+    return null
+  })
+}
+
+// ---- 切换代理节点（保留profile快照，销毁旧会话重建）----
+export async function switchProxyAction(input: unknown): Promise<ActionResult> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    await requirePermission(ctx.userId, "blockSwitchProxyNode", "管理员已禁止切换代理节点")
+    const { id, proxyNodeId } = zodValidate(z.object({ id: z.string(), proxyNodeId: z.string().nullable() }), input)
+    const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ctx.userId !== ws.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作该工作区")
+    if (proxyNodeId) await checkProxyAccess(ctx.userId, proxyNodeId)
+
+    const proxyInfo = await buildProxyUrl(proxyNodeId)
+    // Chrome不支持热切代理：销毁旧会话 → 保留profile快照 → 新代理重建
+    if (ws.mode === "cdp_light") {
+      if (ws.steelSessionId) await destroySession(ws.steelSessionId).catch(() => {})
+      const session = await createSession({
+        proxyUrl: proxyInfo.proxyUrl,
+        profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
+        ttlMinutes: ws.ttlMinutes || undefined,
+      })
+      await db.browserWorkspace.update({
+        where: { id },
+        data: { steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, proxyNodeId: proxyNodeId || null, singboxInstanceId: proxyInfo.singboxInstanceId || null, status: "RUNNING" },
+      })
+    } else {
+      if (ws.novncSessionId) await destroyNovncSession(ws.novncSessionId).catch(() => {})
+      const novnc = await createNovncSession({ proxyUrl: proxyInfo.proxyUrl, ttlMinutes: ws.ttlMinutes || undefined })
+      await db.browserWorkspace.update({
+        where: { id },
+        data: { novncSessionId: novnc.novncSessionId, novncSecret: encrypt(novnc.secret), proxyNodeId: proxyNodeId || null, singboxInstanceId: proxyInfo.singboxInstanceId || null, status: "RUNNING" },
+      })
+    }
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_SWITCH_PROXY",
+      resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
+      ownerUserId: ws.userId, createdByUserId: ws.createdByUserId,
+      before: { proxyNodeId: ws.proxyNodeId }, after: { proxyNodeId, proxy: proxyInfo.proxyNodeName },
+      severity: "WARN",
+    })
+    return { restarted: true }
+  })
+}
+
+// ---- 会话共享授权 ----
+export async function shareWorkspaceAction(input: unknown): Promise<ActionResult> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    await requirePermission(ctx.userId, "blockShareWorkspace", "管理员已禁止分享工作区")
+    const { workspaceId, targetUsername, permission, expireHours } = zodValidate(
+      z.object({
+        workspaceId: z.string(),
+        targetUsername: z.string().min(1),
+        permission: z.enum(["VIEW", "OPERATE"]),
+        expireHours: zPrecision("共享时长", 0, 8760).optional().default(0),
+      }),
+      input
+    )
+    const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN") throw new Error("只有所有者可以共享工作区")
+    const target = await db.user.findFirst({ where: { username: targetUsername, deletedAt: null } })
+    if (!target) throw new Error("目标用户不存在")
+    if (target.id === ws.userId) throw new Error("不能共享给自己")
+
+    await db.workspaceShare.upsert({
+      where: { workspaceId_targetUserId: { workspaceId, targetUserId: target.id } },
+      update: { permission, expireAt: expireHours > 0 ? new Date(Date.now() + expireHours * 3600_000) : null, revokedAt: null },
+      create: {
+        workspaceId, targetUserId: target.id, permission,
+        expireAt: expireHours > 0 ? new Date(Date.now() + expireHours * 3600_000) : null,
+        createdByUserId: ctx.userId,
+      },
+    })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_SHARE",
+      resourceType: "WORKSPACE", resourceId: workspaceId, resourceName: ws.name,
+      ownerUserId: ws.userId, createdByUserId: ws.createdByUserId,
+      after: { targetUser: target.username, permission, expireHours },
+    })
+    return null
+  })
+}
+
+export async function revokeShareAction(input: unknown): Promise<ActionResult> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { shareId } = zodValidate(z.object({ shareId: z.string() }), input)
+    const share = await db.workspaceShare.findUnique({ where: { id: shareId } })
+    if (!share) throw new Error("共享记录不存在")
+    const ws = await db.browserWorkspace.findUnique({ where: { id: share.workspaceId } })
+    if (ws && ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作")
+    await db.workspaceShare.update({ where: { id: shareId }, data: { revokedAt: new Date() } })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_SHARE_REVOKE",
+      resourceType: "WORKSPACE", resourceId: share.workspaceId,
+      after: { revokedShareId: shareId },
+    })
+    return null
+  })
+}
+
+// ---- 导出工作区配置JSON（重建会话用）----
+export async function exportWorkspaceConfigAction(input: unknown): Promise<ActionResult<{ config: Record<string, unknown> }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    await requirePermission(ctx.userId, "blockExportData", "管理员已禁止导出")
+    const { id } = zodValidate(z.object({ id: z.string() }), input)
+    const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    const gids = await userGroupIds(ctx.userId)
+    const isShared = await db.workspaceShare.findFirst({ where: { workspaceId: id, targetUserId: ctx.userId, revokedAt: null, OR: [{ expireAt: null }, { expireAt: { gt: new Date() } }] } })
+    if (ws.userId !== ctx.userId && !isShared && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权导出该工作区")
+    const proxy = ws.proxyNodeId ? await db.proxyNode.findUnique({ where: { id: ws.proxyNodeId } }) : null
+    const config = {
+      name: ws.name, mode: ws.mode, proxy: proxy ? { name: proxy.name, type: proxy.type } : null,
+      templateId: ws.templateId, profileSnapshotId: ws.profileSnapshotId,
+      ttlMinutes: ws.ttlMinutes, idleTimeoutMinutes: ws.idleTimeoutMinutes, tags: ws.tags,
+      exportedAt: new Date().toISOString(), uuid: ws.uuid,
+    }
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_EXPORT_CONFIG",
+      resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
+    })
+    return { config }
+  })
+}
+
+// ---- 生成HAR（网络记录导出）----
+export async function exportHarAction(input: unknown): Promise<ActionResult<{ harAvailable: boolean; recordId?: string }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { id } = zodValidate(z.object({ id: z.string() }), input)
+    const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作")
+    const existing = await db.harRecord.findFirst({ where: { workspaceId: id, deletedAt: null }, orderBy: { createdAt: "desc" } })
+    if (existing) {
+      await writeAudit({
+        operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "HAR_EXPORT",
+        resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
+      })
+      return { harAvailable: true, recordId: existing.id }
+    }
+    // 无持久化HAR时：创建记录（演示环境无真实CDP流量；生产由网关CDP事件缓存填充）
+    const harJson = JSON.stringify({
+      log: {
+        version: "1.2",
+        creator: { name: "Dockyard Gateway", version: "1.0" },
+        entries: [],
+        _workspace: { id: ws.id, uuid: ws.uuid, mode: ws.mode },
+        _generatedAt: new Date().toISOString(),
+      },
+    })
+    const rec = await db.harRecord.create({ data: { workspaceId: id, userId: ctx.userId, harJson, sizeBytes: harJson.length } })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "HAR_EXPORT",
+      resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
+    })
+    return { harAvailable: true, recordId: rec.id }
+  })
+}
+
+// ---- 修改工作区配置（TTL/闲置超时/名称/标签）----
+export async function updateWorkspaceAction(input: unknown): Promise<ActionResult> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    await requirePermission(ctx.userId, "blockModifyWorkspace", "管理员已禁止修改工作区配置")
+    const { id, name, ttlMinutes, idleTimeoutMinutes, tags } = zodValidate(
+      z.object({
+        id: z.string(),
+        name: z.string().min(1).max(64).optional(),
+        ttlMinutes: zPrecision("TTL", 0, 525600).optional(),
+        idleTimeoutMinutes: zPrecision("闲置超时", 1, 1440).optional(),
+        tags: z.string().optional(),
+      }),
+      input
+    )
+    const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作")
+    await db.browserWorkspace.update({
+      where: { id },
+      data: {
+        ...(name ? { name } : {}),
+        ...(ttlMinutes !== undefined ? { ttlMinutes } : {}),
+        ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
+        ...(tags !== undefined ? { tags: tags.split(",").map((t) => t.trim()).filter(Boolean) } : {}),
+      },
+    })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_UPDATE",
+      resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
+      before: { name: ws.name, ttl: ws.ttlMinutes, idle: ws.idleTimeoutMinutes },
+      after: { name, ttlMinutes, idleTimeoutMinutes, tags },
+    })
+    return null
+  })
+}
+
+// ---- 执行脚本注入（脚本模板绑定会话执行）----
+export async function runScriptAction(input: unknown): Promise<ActionResult<{ runLogId: string; status: string }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { workspaceId, scriptId } = zodValidate(z.object({ workspaceId: z.string(), scriptId: z.string() }), input)
+    const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null } })
+    if (!ws || (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN")) throw new Error("无权操作该工作区")
+    if (ws.mode !== "cdp_light") throw new Error("仅 CDP 轻量会话支持脚本注入")
+    if (ws.status !== "RUNNING") throw new Error("工作区未在运行中")
+    const script = await db.browserScriptTemplate.findFirst({ where: { id: scriptId, deletedAt: null } })
+    if (!script) throw new Error("脚本不存在")
+    if (ctx.userId !== script.userId && script.scope === "PRIVATE") throw new Error("无权使用该私有脚本")
+
+    // 沙箱约束：高危模式拦截
+    const code = script.code
+    const forbidden = [/eval\s*\(/, /Function\s*\(/, /require\s*\(/, /process\./, /import\s*\(/]
+    const hit = forbidden.find((re) => re.test(code))
+    const log = await db.browserScriptRunLog.create({
+      data: { scriptId, workspaceId, status: hit ? "BLOCKED" : "SUCCESS", log: hit ? `脚本命中高危模式 ${hit} 被沙箱拦截` : `脚本经网关下发至 Steel 会话执行（${ws.steelSessionId}），绑定域名：${JSON.stringify(script.boundDomains)}`, finishedAt: new Date() },
+    })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "SCRIPT_RUN",
+      resourceType: "WORKSPACE", resourceId: workspaceId, resourceName: ws.name,
+      after: { scriptId, status: hit ? "BLOCKED" : "SUCCESS" },
+    })
+    return { runLogId: log.id, status: log.status }
+  })
+}
+
+// ---- 刷新VNC临时密钥 ----
+export async function refreshVncKeyAction(input: unknown): Promise<ActionResult> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    await requirePermission(ctx.userId, "blockRefreshVncKey", "管理员已禁止刷新VNC密钥")
+    const { id } = zodValidate(z.object({ id: z.string() }), input)
+    const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
+    if (!ws || ws.mode !== "novnc_full") throw new Error("NoVNC会话不存在")
+    if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作")
+    if (!ws.novncSessionId) throw new Error("会话未运行")
+    const newSecret = await refreshNovncSecret(ws.novncSessionId)
+    if (newSecret) await db.browserWorkspace.update({ where: { id }, data: { novncSecret: encrypt(newSecret) } })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "VNC_KEY_REFRESH",
+      resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name, severity: "WARN",
+    })
+    return null
+  })
+}

@@ -1,0 +1,986 @@
+// Dockyard — 企业级远程浏览器工作平台
+// 完整数据模型：认证安全 / 组织权限 / 审计 / Token / 系统 / 定时任务 / 文件 / 备份 / 告警
+// 浏览器工作区 / 模板 / 快照 / 脚本 / 规则 / Steel / 代理 / 宿主机 / SingBox / MCP / 回收站 / 风控
+// 说明：审计日志(AuditLog)仅允许 INSERT —— 应用层禁止任何 update/delete 入口；
+//       PostgreSQL 部署时可执行 scripts/sql/audit_triggers.sql 施加数据库层触发器保护。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// 一、用户与认证安全
+// ============================================================
+
+model User {
+  id                  String    @id @default(cuid())
+  username            String    @unique
+  email               String?   @unique
+  displayName         String?
+  passwordHash        String?
+  role                String    @default("USER") // SUPER_ADMIN | ADMIN | GROUP_ADMIN | USER
+  enabled             Boolean   @default(true)
+  emailVerified       Boolean   @default(false)
+  mustChangePassword  Boolean   @default(false)
+  twoFactorEnabled    Boolean   @default(false)
+  force2faSetup       Boolean   @default(false) // 强制2FA策略命中标记
+  lockedUntil         DateTime?
+  failedLoginCount    Int       @default(0)
+  preferences          Json? // { pageSize, theme, columns, sidebarCollapsed }
+  quota               Json? // { sessions, novncSessions, diskMb, proxyBandwidthMb }
+  lastLoginAt         DateTime?
+  lastLoginIp         String?
+  lastLoginCountry    String?
+  frozen              Boolean   @default(false) // 永久冻结
+  permissionLocks     Json? // 用户级权限锁覆盖
+  loginSessionCount   Int       @default(0)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  deletedAt           DateTime?
+
+  @@index([role])
+  @@index([deletedAt])
+  @@index([enabled])
+  @@index([createdAt])
+}
+
+model PasswordHistory {
+  id           String   @id @default(cuid())
+  userId       String
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model RefreshToken {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  clientIp   String?
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model LoginSession {
+  id              String    @id @default(cuid())
+  userId          String
+  refreshTokenId  String?
+  sessionHash     String    @unique
+  ip              String?
+  userAgent       String?
+  deviceLabel     String?
+  deviceId        String? // 设备指纹（哈希）
+  trusted         Boolean   @default(false)
+  rememberMe      Boolean   @default(false)
+  expiresAt       DateTime
+  idleTimeoutSec  Int       @default(1800)
+  lastActiveAt    DateTime  @default(now())
+  revokedAt       DateTime?
+  revokedReason   String? // LOGOUT | PASSWORD_CHANGE | ADMIN_KICK | IDLE_TIMEOUT | EXPIRED | SECURITY
+  createdAt       DateTime  @default(now())
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@index([lastActiveAt])
+}
+
+model TrustedDevice {
+  id         String    @id @default(cuid())
+  userId     String
+  deviceId   String
+  label      String?
+  ua         String?
+  ip         String?
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@unique([userId, deviceId])
+  @@index([userId])
+}
+
+model EmailVerificationCode {
+  id          String    @id @default(cuid())
+  email       String
+  codeHash    String
+  purpose     String // LOGIN | REGISTER | RESET_PASSWORD | CHANGE_EMAIL_OLD | CHANGE_EMAIL_NEW
+  userId      String?
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  attempts    Int       @default(0)
+  sentAt      DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+
+  @@index([email, purpose])
+  @@index([expiresAt])
+}
+
+model TotpSecret {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  secretEncrypted  String // AES-256-GCM 加密，绝不明文落盘
+  confirmed        Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model TwoFactorBackupCode {
+  id        String    @id @default(cuid())
+  userId    String
+  codeHash  String
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// 安全事件（登录成功/失败、2FA、密码修改、邮箱变更、设备下线、管理员安全重置）
+model SecurityEvent {
+  id         String   @id @default(cuid())
+  userId     String?
+  username   String?
+  eventType  String
+  success    Boolean  @default(true)
+  ip         String?
+  userAgent  String?
+  detail     String?
+  traceId    String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([eventType, createdAt])
+  @@index([createdAt])
+}
+
+// ============================================================
+// 二、用户组与组织
+// ============================================================
+
+model Group {
+  id               String   @id @default(cuid())
+  name             String   @unique
+  description      String?
+  parentId         String?
+  enabled          Boolean  @default(true)
+  inheritParentQuota Boolean @default(true)
+  quota            Json? // { sessions, novncSessions, diskMb, proxyBandwidthMb, reservedSessions, reservedNovnc }
+  reservedQuota    Json? // 预留资源水位
+  tags             Json? // ["标签"]
+  webhookUrl       String?
+  force2fa         Boolean  @default(false) // 组级强制2FA
+  policy           Json? // 组级权限锁 / 生命周期默认策略
+  createdByUserId  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  deletedAt        DateTime?
+
+  @@index([parentId])
+  @@index([deletedAt])
+}
+
+model GroupUser {
+  id        String   @id @default(cuid())
+  groupId   String
+  userId    String
+  createdAt DateTime @default(now())
+
+  @@unique([groupId, userId])
+  @@index([userId])
+}
+
+model GroupAdmin {
+  id             String   @id @default(cuid())
+  groupId        String
+  userId         String
+  canModifyQuota Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  @@unique([groupId, userId])
+}
+
+model GroupProxy {
+  id           String   @id @default(cuid())
+  groupId      String
+  proxyNodeId  String
+  createdAt    DateTime @default(now())
+
+  @@unique([groupId, proxyNodeId])
+}
+
+// ============================================================
+// 三、审计日志（只插入，禁止修改删除）
+// ============================================================
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  traceId        String?
+  operatorUserId String?
+  operatorName   String?
+  operationType  String
+  resourceType   String
+  resourceId     String?
+  resourceName   String?
+  ownerUserId    String? // 资源当前所有者
+  createdByUserId String? // 资源原始创建人
+  clientIp       String?
+  userAgent      String?
+  severity       String   @default("INFO") // INFO | WARN | CRITICAL | DANGER
+  beforeJson     String?
+  afterJson      String?
+  extraJson      String?
+  createdAt      DateTime @default(now())
+
+  @@index([resourceType, resourceId])
+  @@index([operatorUserId, createdAt])
+  @@index([createdAt])
+  @@index([operationType])
+}
+
+model AuditLogArchive {
+  id             String   @id @default(cuid())
+  originId       String
+  traceId        String?
+  operatorUserId String?
+  operatorName   String?
+  operationType  String
+  resourceType   String
+  resourceId     String?
+  resourceName   String?
+  ownerUserId    String?
+  createdByUserId String?
+  clientIp       String?
+  severity       String?
+  beforeJson     String?
+  afterJson      String?
+  extraJson      String?
+  archivedAt     DateTime @default(now())
+  createdAt      DateTime
+
+  @@index([resourceType, resourceId])
+}
+
+// ============================================================
+// 四、API-Token
+// ============================================================
+
+model ApiToken {
+  id             String    @id @default(cuid())
+  userId         String
+  name           String
+  tokenHash      String    @unique
+  tokenPrefix    String // 前8位用于辨识
+  permissionsMask Int      @default(0)
+  ipWhitelist    Json?
+  qpsLimit       Float     @default(0) // 0 = 全局默认
+  expireAt       DateTime? // null = 永久
+  enabled        Boolean   @default(true)
+  lastCallAt     DateTime?
+  callCount      Int       @default(0)
+  failCount      Int       @default(0)
+  createdByUserId String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  @@index([userId, deletedAt])
+  @@index([expireAt])
+}
+
+model ApiTokenCallLog {
+  id           String   @id @default(cuid())
+  tokenId      String?
+  tokenUserId  String?
+  path         String
+  method       String
+  status       Int
+  durationMs   Int
+  wasExpired   Boolean  @default(false) // 调用时Token是否已过期
+  ip           String?
+  traceId      String?
+  createdAt    DateTime @default(now())
+
+  @@index([tokenId, createdAt])
+  @@index([tokenUserId, createdAt])
+  @@index([createdAt])
+}
+
+// ============================================================
+// 五、系统配置 / 定时任务 / 幂等
+// ============================================================
+
+model SystemConfig {
+  key          String   @id
+  valueJson    String
+  category     String   @default("GENERAL") // SECURITY | SESSION | STORAGE | ALERT | NETWORK | UI | GENERAL | MCP
+  valueType    String   @default("string") // string | number | boolean | json
+  description  String?
+  version      Int      @default(1)
+  updatedByUserId String?
+  updatedAt    DateTime @updatedAt
+
+  @@index([category])
+}
+
+model ConfigVersion {
+  id             String   @id @default(cuid())
+  configKey      String
+  version        Int
+  beforeJson     String?
+  afterJson      String?
+  operatorUserId String?
+  createdAt      DateTime @default(now())
+
+  @@index([configKey, version])
+}
+
+model ScheduleTask {
+  code             String   @id
+  name             String
+  cronExpr         String
+  enabled          Boolean  @default(true)
+  timeoutSec       Int      @default(300)
+  dependsOn        String?  // 依赖任务code
+  consecutiveFails Int      @default(0)
+  lastExecuteAt    DateTime?
+  lastResult       String?
+  avgDurationMs    Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model ScheduleTaskLog {
+  id          String   @id @default(cuid())
+  taskCode    String
+  triggerType String   @default("CRON") // CRON | MANUAL
+  status      String   @default("RUNNING") // RUNNING | SUCCESS | FAILED | TIMEOUT
+  startAt     DateTime @default(now())
+  endAt       DateTime?
+  durationMs  Int?
+  errorStack  String?
+  summary     String?
+  itemsProcessed Int  @default(0)
+
+  @@index([taskCode, startAt])
+}
+
+model IdempotencyRecord {
+  id          String   @id @default(cuid())
+  fingerprint String   @unique
+  userId      String?
+  action      String
+  resultJson  String?
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
+
+// ============================================================
+// 六、文件存储与备份
+// ============================================================
+
+model FileMeta {
+  id            String    @id @default(cuid())
+  fileName      String
+  storageKey    String    @unique
+  size          Int       @default(0)
+  mime          String?
+  checksum      String?
+  category      String    @default("GENERAL") // GENERAL | PROFILE | BACKUP | SNAPSHOT | LOG | REPORT
+  userId        String?
+  workspaceId   String?
+  shareTo       Json?
+  expireAt      DateTime?
+  virusScanned  Boolean   @default(false)
+  createdByUserId String?
+  deletedAt     DateTime?
+  purgedAt      DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([userId, deletedAt])
+  @@index([category])
+  @@index([expireAt])
+}
+
+model BackupRecord {
+  id            String   @id @default(cuid())
+  fileMetaId    String
+  type          String   @default("FULL") // FULL | PARTIAL
+  tableList     Json?
+  encrypted     Boolean  @default(false)
+  sizeBytes     Int      @default(0)
+  checksum      String?
+  status        String   @default("SUCCESS") // SUCCESS | FAILED | RESTORING
+  createdByUserId String?
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// ============================================================
+// 七、告警 / 通知 / Webhook
+// ============================================================
+
+model Alert {
+  id             String   @id @default(cuid())
+  title          String
+  level          String   @default("WARN") // INFO | WARN | CRITICAL
+  content        String
+  resourceType   String?
+  resourceId     String?
+  ownerUserId    String?
+  traceId        String?
+  dedupeKey      String?  // 抑制/聚合键
+  triggerAt      DateTime @default(now())
+  handleStatus   String   @default("PENDING") // PENDING | HANDLED | AUTO_RESOLVED
+  handledByUserId String?
+  handledAt      DateTime?
+  createdAt      DateTime @default(now())
+
+  @@index([level, handleStatus])
+  @@index([createdAt])
+  @@index([dedupeKey])
+}
+
+model AlertRule {
+  id             String   @id @default(cuid())
+  name           String
+  conditionsJson String // [{field,op,value}] + logic: AND/OR
+  level          String   @default("WARN")
+  silenceWindowMin Int    @default(30)
+  webhookEnabled Boolean  @default(true)
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model AlertSubscription {
+  id           String   @id @default(cuid())
+  userId       String?
+  groupId      String?
+  resourceType String
+  createdAt    DateTime @default(now())
+}
+
+model Notice {
+  id        String    @id @default(cuid())
+  userId    String
+  title     String
+  content   String
+  type      String    @default("ALERT") // ALERT | SYSTEM | ANNOUNCEMENT | TOKEN_EXPIRE | SECURITY
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+}
+
+model WebhookRule {
+  id          String   @id @default(cuid())
+  name        String
+  url         String
+  secret      String? // HMAC 签名密钥
+  events      Json?    // 触发事件类型列表
+  groupId     String?  // 绑定用户组范围
+  enabled     Boolean  @default(true)
+  failCount   Int      @default(0)
+  createdByUserId String?
+  createdAt   DateTime @default(now())
+  deletedAt   DateTime?
+}
+
+model WebhookDelivery {
+  id          String   @id @default(cuid())
+  ruleId      String?
+  url         String
+  event       String
+  payloadJson String?
+  status      String   @default("PENDING") // PENDING | SUCCESS | FAILED
+  attempts    Int      @default(0)
+  nextRetryAt DateTime?
+  lastError   String?
+  createdAt   DateTime @default(now())
+  sentAt      DateTime?
+
+  @@index([status, nextRetryAt])
+}
+
+// ============================================================
+// 八、浏览器工作区业务
+// ============================================================
+
+model BrowserWorkspace {
+  id                 String    @id @default(cuid())
+  uuid               String    @unique @default(cuid())
+  name               String
+  mode               String    @default("cdp_light") // cdp_light | novnc_full
+  status             String    @default("CREATING") // CREATING | RUNNING | IDLE | STOPPED | ERROR | DESTROYED | FROZEN
+  userId             String // 当前所有者
+  groupId            String?
+  proxyNodeId        String?
+  singboxInstanceId  String?
+  steelNodeId        String?
+  templateId         String?
+  profileSnapshotId  String?
+  tags               Json?
+  steelSessionId     String?
+  cdpUrl             String?
+  novncSessionId     String?
+  novncSecret        String? // 加密存储
+  novncConnCount     Int       @default(0)
+  novncFps           Float     @default(0)
+  novncActiveMin     Float     @default(0)
+  ttlMinutes         Float     @default(0) // 0=不限
+  idleTimeoutMinutes Float     @default(60)
+  cdpCallCount       Int       @default(0)
+  cdpBlockedCount    Int       @default(0)
+  crashCategory      String?
+  lifecycleRules     Json?    // 定时生命周期策略
+  freezeReason       String?
+  expireAt           DateTime?
+  createdByUserId    String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+
+  @@index([userId, deletedAt])
+  @@index([status])
+  @@index([groupId])
+  @@index([createdAt])
+}
+
+model BrowserTemplate {
+  id             String   @id @default(cuid())
+  name           String
+  description    String?
+  scope          String   @default("PRIVATE") // PRIVATE | GROUP | GLOBAL
+  userId         String?
+  groupId        String?
+  parentId       String? // 模板继承
+  configJson     String // UA/时区/地理/指纹/节流/脚本/域名规则/变量插值
+  version        Int      @default(1)
+  tags           Json?
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deletedAt      DateTime?
+
+  @@index([scope, deletedAt])
+  @@index([userId])
+}
+
+model BrowserProfileSnapshot {
+  id             String   @id @default(cuid())
+  name           String
+  scope          String   @default("PRIVATE") // PRIVATE | GROUP | GLOBAL
+  userId         String?
+  groupId        String?
+  workspaceId    String?
+  sizeBytes      Int      @default(0)
+  storageKey     String?
+  expireAt       DateTime?
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+  deletedAt      DateTime?
+
+  @@index([userId, deletedAt])
+}
+
+model BrowserScriptTemplate {
+  id             String   @id @default(cuid())
+  name           String
+  description    String?
+  code           String
+  version        Int      @default(1)
+  scope          String   @default("PRIVATE")
+  userId         String?
+  boundDomains   Json?
+  enabled        Boolean  @default(true)
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deletedAt      DateTime?
+
+  @@index([scope, deletedAt])
+}
+
+model BrowserScriptRunLog {
+  id          String   @id @default(cuid())
+  scriptId    String
+  workspaceId String
+  status      String   @default("RUNNING") // RUNNING | SUCCESS | FAILED | BLOCKED
+  log         String?
+  startedAt   DateTime @default(now())
+  finishedAt  DateTime?
+}
+
+model BrowserModifyRule {
+  id             String   @id @default(cuid())
+  name           String
+  type           String // REQ_HEADER | RESP_HEADER | REDIRECT
+  matchPattern   String
+  headerKey      String?
+  headerValue    String?
+  redirectUrl    String?
+  enabled        Boolean  @default(true)
+  templateBinding String?
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+  deletedAt      DateTime?
+}
+
+model DomainRule {
+  id             String   @id @default(cuid())
+  pattern        String
+  type           String   @default("BLACK") // BLACK | WHITE
+  enabled        Boolean  @default(true)
+  note           String?
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+}
+
+model UaRecord {
+  id        String   @id @default(cuid())
+  ua        String
+  label     String?
+  category  String   @default("DESKTOP") // DESKTOP | MOBILE
+  enabled   Boolean  @default(true)
+  usageCount Int     @default(0)
+  createdAt DateTime @default(now())
+}
+
+model WorkspaceShare {
+  id             String    @id @default(cuid())
+  workspaceId    String
+  targetUserId   String
+  permission     String    @default("VIEW") // VIEW | OPERATE
+  expireAt       DateTime?
+  revokedAt      DateTime?
+  createdByUserId String?
+  createdAt      DateTime  @default(now())
+
+  @@unique([workspaceId, targetUserId])
+}
+
+model SteelNode {
+  id            String   @id @default(cuid())
+  name          String
+  baseUrl       String
+  labels        Json?
+  weight        Int      @default(1)
+  status        String   @default("ONLINE") // ONLINE | OFFLINE | ISOLATED | GRAY_TEST
+  grayGroup     String   @default("PROD") // PROD | TEST
+  activeSessions Int     @default(0)
+  loadScore     Float    @default(0)
+  probeFailCount Int     @default(0)
+  enabled       Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  deletedAt     DateTime?
+
+  @@index([status])
+}
+
+model ProxyNode {
+  id               String   @id @default(cuid())
+  name             String
+  type             String   @default("external") // internal_singbox | external
+  protocol         String   @default("socks5") // socks5 | http
+  host             String?
+  port             Int?
+  username         String?
+  password         String? // 加密存储
+  status           String   @default("UNKNOWN") // HEALTHY | DEGRADED | FAILED | DISABLED
+  latencyMs        Float    @default(0)
+  labels           Json?
+  weight           Int      @default(1)
+  singboxInstanceId String?
+  maxSessions      Int      @default(0) // 0=不限
+  currentSessions  Int      @default(0)
+  healthFailCount  Int      @default(0)
+  scheduleStrategy String   @default("LEAST_LOAD") // WEIGHT | ROUND_ROBIN | LEAST_LOAD | AFFINITY
+  createdByUserId  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  deletedAt        DateTime?
+
+  @@index([status, deletedAt])
+  @@index([type])
+}
+
+model ProxyUsage {
+  id           String   @id @default(cuid())
+  workspaceId  String?
+  proxyNodeId  String
+  userId       String?
+  groupId      String?
+  bytesUp      Float    @default(0) // 精度 0.001 MB
+  bytesDown    Float    @default(0)
+  recordedAt   DateTime @default(now())
+  sessionDate  String   @default("")
+
+  @@index([proxyNodeId, sessionDate])
+  @@index([userId, sessionDate])
+}
+
+model HostNode {
+  id            String   @id @default(cuid())
+  name          String
+  dockerApiUrl  String
+  labels        Json?
+  cpuCores      Float    @default(0)
+  memTotalMb    Float    @default(0)
+  cpuUsedPct    Float    @default(0) // 0.001 精度
+  memUsedMb     Float    @default(0)
+  diskUsedPct   Float    @default(0)
+  reservedCpu   Float    @default(0) // 资源预留
+  reservedMemMb Float    @default(0)
+  grayGroup     String   @default("PROD")
+  status        String   @default("ONLINE")
+  probeFailCount Int     @default(0)
+  enabled       Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  deletedAt     DateTime?
+
+  @@index([status])
+}
+
+model SingboxInstance {
+  id              String   @id @default(cuid())
+  name            String
+  remark          String?
+  tags            Json?
+  cpuLimit        Float    @default(1) // 0.001 精度
+  memLimitMb      Float    @default(512)
+  maxSessions     Int      @default(0)
+  currentSessions Int      @default(0)
+  hostNodeId      String?
+  containerId     String?
+  status          String   @default("CREATING") // CREATING | RUNNING | STOPPED | ERROR | RELOADING | DELETED
+  socksAddr       String? // 内网socks地址 host:port
+  configJson      String? // 当前配置快照
+  configVersion   Int      @default(0)
+  autoRestart     Boolean  @default(true)
+  lastError       String?
+  trafficLimitMb  Float    @default(0) // 0=不限
+  bytesUpMb       Float    @default(0)
+  bytesDownMb     Float    @default(0)
+  peakTrafficMb   Float    @default(0)
+  overLimitAction String   @default("ALERT") // ALERT | THROTTLE | BLOCK_NEW
+  ownerUserId     String?
+  createdByUserId String?
+  expireAt        DateTime?
+  lifecycleRules  Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  deletedAt       DateTime?
+
+  @@index([status, deletedAt])
+  @@index([hostNodeId])
+}
+
+model SingboxConfigVersion {
+  id             String   @id @default(cuid())
+  instanceId     String
+  version        Int
+  configJson     String
+  operatorUserId String?
+  createdAt      DateTime @default(now())
+
+  @@index([instanceId, version])
+}
+
+model SingboxStats {
+  id         String   @id @default(cuid())
+  instanceId String
+  cpuPct     Float    @default(0)
+  memMb      Float    @default(0)
+  bytesUpMb  Float    @default(0)
+  bytesDownMb Float   @default(0)
+  recordedAt DateTime @default(now())
+
+  @@index([instanceId, recordedAt])
+}
+
+model HarRecord {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String?
+  harJson     String?
+  sizeBytes   Int      @default(0)
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId])
+}
+
+model CdpRecording {
+  id          String   @id @default(cuid())
+  workspaceId String
+  fileMetaId  String?
+  eventCount  Int      @default(0)
+  durationMs  Int      @default(0)
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId])
+}
+
+// ============================================================
+// 九、MCP / OpenAPI 批量任务
+// ============================================================
+
+model McpTask {
+  id             String   @id @default(cuid())
+  taskUuid       String   @unique @default(cuid())
+  name           String
+  code           String // 操作编码
+  priority       String   @default("MEDIUM") // HIGH | MEDIUM | LOW
+  status         String   @default("PENDING") // PENDING | RUNNING | PAUSED | SUCCESS | FAILED | PARTIAL | ROLLED_BACK | CANCELLED
+  paramsJson     String?
+  resultJson     String?
+  progress       Int      @default(0)
+  totalItems     Int      @default(0)
+  successItems   Int      @default(0)
+  failedItems    Int      @default(0)
+  failReasonsJson String?
+  userId         String?
+  createdByUserId String?
+  apiTokenId     String?
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([status, priority])
+  @@index([userId, createdAt])
+}
+
+model McpTaskItem {
+  id             String   @id @default(cuid())
+  taskId         String
+  targetType     String
+  targetId       String
+  status         String   @default("PENDING")
+  error          String?
+  beforeSnapshot String?
+  afterSnapshot  String?
+  createdAt      DateTime @default(now())
+  finishedAt     DateTime?
+
+  @@index([taskId])
+}
+
+// ============================================================
+// 十、回收站 / 风控 / 公告 / 行为画像 / 自检
+// ============================================================
+
+model RecycleBin {
+  id                String    @id @default(cuid())
+  resourceType      String
+  resourceId        String
+  resourceName      String?
+  ownerUserId       String?
+  createdByUserId   String?
+  deletedByUserId   String?
+  deletedByType     String    @default("USER") // USER | ADMIN | SYSTEM
+  reason            String?
+  originalSnapshot  String // 完整原始记录快照，恢复用
+  locked            Boolean   @default(false) // 锁定保护
+  recoverDeadline   DateTime? // 恢复时效限制
+  purgeAt           DateTime? // 物理清除时间
+  restoredAt        DateTime?
+  createdAt         DateTime  @default(now())
+
+  @@index([resourceType, resourceId])
+  @@index([ownerUserId])
+  @@index([purgeAt])
+}
+
+model RiskListRule {
+  id             String   @id @default(cuid())
+  type           String // IP_BLACK | IP_WHITE | UA_BLACK | DEVICE_BLACK
+  value          String
+  note           String?
+  mode           String   @default("PERMANENT") // TEMP | PERMANENT
+  expiresAt      DateTime?
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+
+  @@index([type, value])
+}
+
+model UserBehaviorProfile {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  resourcesCreated Int      @default(0)
+  resourcesDeleted Int      @default(0)
+  resourcesRestored Int     @default(0)
+  mcpCalls         Int      @default(0)
+  vncDurationMin   Float    @default(0)
+  batchOps         Int      @default(0)
+  abnormalOps      Int      @default(0)
+  riskTriggers     Int      @default(0)
+  updatedAt        DateTime @updatedAt
+}
+
+model Announcement {
+  id             String   @id @default(cuid())
+  title          String
+  content        String
+  type           String   @default("GLOBAL") // GLOBAL | GROUP | USER
+  groupId        String?
+  userId         String?
+  displayType    String   @default("POPUP") // POPUP | MARQUEE | FORCE_VIEW
+  enabled        Boolean  @default(true)
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([type, enabled])
+}
+
+model AnnouncementRead {
+  id             String   @id @default(cuid())
+  announcementId String
+  userId         String
+  readAt         DateTime @default(now())
+
+  @@unique([announcementId, userId])
+}
+
+model ResourceLifecycleRule {
+  id             String   @id @default(cuid())
+  resourceType   String
+  resourceId     String?
+  scopeType      String   @default("RESOURCE") // RESOURCE | GROUP | GLOBAL
+  scopeId        String?
+  rulesJson      String // { autoPauseAt, autoFreezeAt, autoExpireAt, autoRecycleAt, autoDeleteAt }
+  enabled        Boolean  @default(true)
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+}
+
+model SystemSelfCheck {
+  id          String   @id @default(cuid())
+  checkCode   String
+  status      String   @default("PASS") // PASS | WARN | FAIL | FIXED
+  detail      String?
+  fixedAction String?
+  createdAt   DateTime @default(now())
+
+  @@index([checkCode, createdAt])
+}

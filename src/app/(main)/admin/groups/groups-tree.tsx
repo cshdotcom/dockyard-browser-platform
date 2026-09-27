@@ -1,0 +1,312 @@
+"use client"
+
+// 用户组树形渲染：缩进层级 + 展开折叠 + 行操作（编辑/组员/组管理员/代理/复制/权限锁/删除）
+
+import * as React from "react"
+import { useRouter } from "next/navigation"
+import { toast } from "sonner"
+import { ChevronDown, ChevronRight, FileDown, FileUp, MoreHorizontal, Plus } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { ConfirmDialog } from "@/components/shared/confirm"
+import { deleteGroupAction } from "@/server/actions/groups"
+import { GroupFormDialog } from "./group-form"
+import {
+  MembersDialog, AdminsDialog, ProxiesDialog, LocksDialog, CopyGroupDialog, ImportGroupsDialog,
+  type UserOption, type ProxyOption,
+} from "./group-dialogs"
+
+export interface AdminGroupNode {
+  id: string
+  name: string
+  description: string | null
+  parentId: string | null
+  enabled: boolean
+  inheritParentQuota: boolean
+  quota: Record<string, number | null> | null
+  reservedQuota: Record<string, number | null> | null
+  tags: string[]
+  force2fa: boolean
+  policy: Record<string, unknown> | null
+  userCount: number
+  proxyBindings: string[]
+  members: { userId: string; username: string }[]
+  admins: { userId: string; username: string; canModifyQuota: boolean }[]
+  proxies: { id: string; name: string; status: string }[]
+  createdAt: string
+  children: AdminGroupNode[]
+}
+
+interface GroupsTreeProps {
+  roots: AdminGroupNode[]
+  allNodes: AdminGroupNode[]
+  lockKeys: string[]
+  userOptions: UserOption[]
+  proxyOptions: ProxyOption[]
+}
+
+export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOptions }: GroupsTreeProps) {
+  const router = useRouter()
+  const [expanded, setExpanded] = React.useState<Set<string>>(() => new Set(roots.map((r) => r.id)))
+  const [busyId, setBusyId] = React.useState("")
+
+  // 弹窗状态
+  const [formOpen, setFormOpen] = React.useState(false)
+  const [formMode, setFormMode] = React.useState<"create" | "edit">("create")
+  const [formParentId, setFormParentId] = React.useState<string | null>(null)
+  const [editingGroup, setEditingGroup] = React.useState<AdminGroupNode | null>(null)
+
+  const [membersGroup, setMembersGroup] = React.useState<AdminGroupNode | null>(null)
+  const [adminsGroup, setAdminsGroup] = React.useState<AdminGroupNode | null>(null)
+  const [proxiesGroup, setProxiesGroup] = React.useState<AdminGroupNode | null>(null)
+  const [locksGroup, setLocksGroup] = React.useState<AdminGroupNode | null>(null)
+  const [copyGroup, setCopyGroup] = React.useState<AdminGroupNode | null>(null)
+  const [deleteGroup, setDeleteGroup] = React.useState<AdminGroupNode | null>(null)
+  const [importOpen, setImportOpen] = React.useState(false)
+
+  const toggleExpand = (id: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const expandAll = () => setExpanded(new Set(allNodes.map((n) => n.id)))
+  const collapseAll = () => setExpanded(new Set())
+
+  const doDelete = async () => {
+    if (!deleteGroup) return
+    setBusyId(deleteGroup.id)
+    try {
+      const res = await deleteGroupAction({ id: deleteGroup.id })
+      if (res.code === 0) {
+        toast.success("用户组已删除")
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } finally {
+      setBusyId("")
+      setDeleteGroup(null)
+    }
+  }
+
+  // ---- 递归树节点渲染 ----
+  const renderNode = (node: AdminGroupNode, depth: number) => {
+    const hasChildren = node.children.length > 0
+    const isOpen = expanded.has(node.id)
+    const quota = node.quota
+    const lockCount = Object.values(((node.policy as Record<string, unknown> | null)?.permissionLocks as Record<string, boolean> | undefined) || {}).filter(Boolean).length
+
+    return (
+      <div key={node.id}>
+        <div
+          className="group flex items-center gap-2 rounded-lg border bg-card px-3 py-2.5 hover:bg-muted/50 transition-colors"
+          style={{ marginLeft: depth * 24 }}
+        >
+          <button
+            type="button"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-muted"
+            onClick={() => hasChildren && toggleExpand(node.id)}
+            aria-label={hasChildren ? (isOpen ? "折叠" : "展开") : "无子组"}
+            disabled={!hasChildren}
+          >
+            {hasChildren ? (
+              isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />
+            ) : (
+              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40" />
+            )}
+          </button>
+
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="font-medium truncate">{node.name}</span>
+              {!node.enabled && <Badge variant="outline">已禁用</Badge>}
+              {node.force2fa && <Badge variant="destructive" className="text-[10px]">强制2FA</Badge>}
+              {lockCount > 0 && <Badge variant="secondary" className="text-[10px]">权限锁×{lockCount}</Badge>}
+              {node.tags.slice(0, 3).map((t) => (
+                <Badge key={t} variant="outline" className="text-[10px] max-w-24 truncate">{t}</Badge>
+              ))}
+            </div>
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+              <span>成员 {node.userCount}</span>
+              <span>子组 {node.children.length}</span>
+              {quota && (quota.sessions != null || quota.novncSessions != null || quota.diskMb != null) && (
+                <span>
+                  配额 {quota.sessions ?? "-"}会话/{quota.novncSessions ?? "-"}NoVNC
+                  {quota.diskMb != null ? `/${quota.diskMb}MB` : ""}
+                </span>
+              )}
+              {node.inheritParentQuota && node.parentId && <span>继承父组</span>}
+              {node.proxyBindings.length > 0 && (
+                <span className="truncate max-w-48" title={node.proxyBindings.join(", ")}>
+                  代理：{node.proxyBindings.join("、")}
+                </span>
+              )}
+              <span className="hidden sm:inline">创建于 {node.createdAt}</span>
+            </div>
+            {node.description && (
+              <p className="mt-0.5 text-xs text-muted-foreground/80 truncate max-w-md">{node.description}</p>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {node.admins.length > 0 && (
+              <Badge variant="secondary" className="hidden md:inline-flex text-[10px] max-w-40 truncate" title={node.admins.map((a) => a.username).join(", ")}>
+                管理：{node.admins.map((a) => a.username).join("、")}
+              </Badge>
+            )}
+            <Button
+              size="sm" variant="outline"
+              onClick={() => { setMembersGroup(node) }}
+            >
+              组员
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="h-8 w-8">
+                  <MoreHorizontal className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuItem onClick={() => { setEditingGroup(node); setFormMode("edit"); setFormOpen(true) }}>
+                  编辑组
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setMembersGroup(node) }}>组员管理</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setAdminsGroup(node) }}>组管理员</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setProxiesGroup(node) }}>代理绑定</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setLocksGroup(node) }}>权限锁</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setCopyGroup(node) }}>复制组</DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => {
+                    setFormMode("create")
+                    setFormParentId(node.id)
+                    setEditingGroup(null)
+                    setFormOpen(true)
+                  }}
+                >
+                  <Plus className="mr-1.5 h-4 w-4" /> 创建子组
+                </DropdownMenuItem>
+                <DropdownMenuItem variant="destructive" onClick={() => setDeleteGroup(node)}>
+                  删除组
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </div>
+
+        {isOpen && hasChildren && (
+          <div className="mt-1.5 space-y-1.5">
+            {node.children.map((c) => renderNode(c, depth + 1))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* 顶部操作栏 */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" className="bg-teal-600 hover:bg-teal-700" onClick={() => { setFormMode("create"); setFormParentId(null); setEditingGroup(null); setFormOpen(true) }}>
+          <Plus className="mr-1 h-4 w-4" /> 新建用户组
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
+          <FileUp className="mr-1 h-4 w-4" /> 导入JSON
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => window.open("/api/export/groups", "_blank")}>
+          <FileDown className="mr-1 h-4 w-4" /> 导出JSON
+        </Button>
+        <div className="ml-auto flex items-center gap-1">
+          <Button size="sm" variant="ghost" onClick={expandAll}>全部展开</Button>
+          <Button size="sm" variant="ghost" onClick={collapseAll}>全部折叠</Button>
+        </div>
+      </div>
+
+      {/* 树 */}
+      <div className="space-y-1.5">
+        {allNodes.length === 0 && (
+          <div className="rounded-lg border bg-card py-12 text-center text-sm text-muted-foreground">
+            暂无用户组，点击「新建用户组」创建第一个组织节点
+          </div>
+        )}
+        {roots.map((r) => renderNode(r, 0))}
+      </div>
+
+      {/* 新建/编辑弹窗 */}
+      <GroupFormDialog
+        open={formOpen}
+        onOpenChange={setFormOpen}
+        mode={formMode}
+        group={formMode === "edit" ? editingGroup : null}
+        defaultParentId={formMode === "create" ? formParentId : undefined}
+        allNodes={allNodes.map((n) => ({ id: n.id, name: n.name, parentId: n.parentId }))}
+      />
+
+      {/* 组员管理 */}
+      <MembersDialog
+        open={!!membersGroup}
+        onOpenChange={(v) => !v && setMembersGroup(null)}
+        group={membersGroup ? { id: membersGroup.id, name: membersGroup.name } : null}
+        members={membersGroup?.members || []}
+        userOptions={userOptions}
+      />
+
+      {/* 组管理员 */}
+      <AdminsDialog
+        open={!!adminsGroup}
+        onOpenChange={(v) => !v && setAdminsGroup(null)}
+        group={adminsGroup ? { id: adminsGroup.id, name: adminsGroup.name } : null}
+        admins={adminsGroup?.admins || []}
+        userOptions={userOptions}
+      />
+
+      {/* 代理绑定 */}
+      <ProxiesDialog
+        open={!!proxiesGroup}
+        onOpenChange={(v) => !v && setProxiesGroup(null)}
+        group={proxiesGroup ? { id: proxiesGroup.id, name: proxiesGroup.name } : null}
+        proxies={proxiesGroup?.proxies || []}
+        proxyOptions={proxyOptions}
+      />
+
+      {/* 权限锁 */}
+      <LocksDialog
+        open={!!locksGroup}
+        onOpenChange={(v) => !v && setLocksGroup(null)}
+        group={locksGroup ? { id: locksGroup.id, name: locksGroup.name } : null}
+        lockKeys={lockKeys}
+        currentLocks={
+          ((locksGroup?.policy as Record<string, unknown> | null)?.permissionLocks as Record<string, boolean> | undefined) || {}
+        }
+      />
+
+      {/* 复制 */}
+      <CopyGroupDialog
+        open={!!copyGroup}
+        onOpenChange={(v) => !v && setCopyGroup(null)}
+        group={copyGroup ? { id: copyGroup.id, name: copyGroup.name } : null}
+      />
+
+      {/* 删除确认 */}
+      <ConfirmDialog
+        open={!!deleteGroup}
+        onOpenChange={(v) => !v && setDeleteGroup(null)}
+        title="删除用户组"
+        description={`确认删除用户组 ${deleteGroup?.name || ""}？\n· 组内有成员 / 子组 / 代理绑定 / 运行中会话时将被拒绝\n· 通过校验后软删除并清理组管理员与代理绑定`}
+        requirePhrase="DELETE"
+        destructive
+        onConfirm={doDelete}
+      />
+
+      {/* 导入JSON */}
+      <ImportGroupsDialog open={importOpen} onOpenChange={setImportOpen} />
+    </div>
+  )
+}

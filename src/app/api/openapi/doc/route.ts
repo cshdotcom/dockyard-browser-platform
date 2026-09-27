@@ -1,0 +1,118 @@
+import { NextRequest, NextResponse } from "next/server"
+import { MCP_OPERATIONS } from "@/server/mcp/engine"
+
+// OpenAPI 3.0 标准化接口文档自动生成：可直接被第三方平台/AI客户端/运维系统对接
+// 同时输出 MCP 工具描述（tools/list 兼容）
+export async function GET() {
+  const paths: Record<string, unknown> = {
+    "/api/mcp": {
+      post: {
+        summary: "MCP 工具调用网关（批量任务）",
+        tags: ["MCP"],
+        security: [{ ApiKeyAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["code"],
+                properties: {
+                  code: { type: "string", description: "操作编码，见 /api/openapi/doc x-mcp-operations" },
+                  params: { type: "object", description: "操作参数" },
+                  targets: { type: "array", items: { type: "string" }, description: "批量目标资源ID列表" },
+                  priority: { type: "string", enum: ["HIGH", "MEDIUM", "LOW"] },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "统一返回结构 { code, msg, data, traceId }；data 含 taskUuid/progress/successItems/failedItems",
+          },
+        },
+      },
+      get: {
+        summary: "MCP 操作目录 / 任务列表",
+        tags: ["MCP"],
+        security: [{ ApiKeyAuth: [] }],
+        parameters: [
+          { name: "view", in: "query", schema: { type: "string", enum: ["ops", "tasks", "task"] } },
+          { name: "uuid", in: "query", schema: { type: "string" }, description: "view=task 时必填" },
+        ],
+      },
+    },
+    "/api/openapi/resources": {
+      get: {
+        summary: "资源查询（统一归属字段输出）",
+        tags: ["OpenAPI"],
+        security: [{ ApiKeyAuth: [] }],
+        parameters: [
+          {
+            name: "resource",
+            in: "query",
+            required: true,
+            schema: { type: "string", enum: ["workspaces", "singbox", "users", "tokens", "recycle", "alerts"] },
+          },
+        ],
+        responses: {
+          "200": {
+            description: "资源列表：每条含 ownerUserId/ownerUserName/createdByUserId/createdByUserName/userGroupId/userGroupName",
+          },
+        },
+      },
+    },
+    "/api/metrics": {
+      get: {
+        summary: "Prometheus 格式指标暴露（访问密钥校验）",
+        tags: ["OpenAPI"],
+        security: [{ MetricsKey: [] }],
+      },
+    },
+  }
+
+  const spec = {
+    openapi: "3.0.3",
+    info: {
+      title: "Dockyard 浏览器工作平台 OpenAPI",
+      version: "1.0.0",
+      description:
+        "企业级远程浏览器工作平台对外接口。统一网关：单域名+单WebSocket+单API入口；APIKey隔离全部资源（APIKey=租户，UUID=资源，Token=用户，SessionID=客户端，DeviceID=设备 五重隔离）。鉴权：请求头 x-api-key。所有响应 { code, msg, data, traceId }。",
+    },
+    servers: [{ url: "/", description: "统一网关入口（与Web控制台同域）" }],
+    components: {
+      securitySchemes: {
+        ApiKeyAuth: { type: "apiKey", in: "header", name: "x-api-key" },
+        MetricsKey: { type: "apiKey", in: "query", name: "key" },
+      },
+      schemas: {
+        ApiResponse: {
+          type: "object",
+          properties: {
+            code: { type: "integer", description: "0=成功" },
+            msg: { type: "string" },
+            data: { type: "object", nullable: true },
+            traceId: { type: "string", format: "uuid" },
+          },
+        },
+      },
+    },
+    security: [{ ApiKeyAuth: [] }],
+    paths,
+    "x-mcp-operations": MCP_OPERATIONS.map((op) => ({
+      code: op.code,
+      description: op.description,
+      batch: op.batch,
+      danger: !!op.danger,
+      requiredPermission: op.perm === 8 ? "ADMIN" : op.perm === 4 ? "EXECUTE" : op.perm === 2 ? "WRITE" : "READ",
+      inputSchema: op.schema,
+    })),
+    "x-rate-limits": {
+      perKeyPerSecond: "mcp.perKeyPerSecond 配置（默认20）",
+      perKeyPerMinute: "默认300",
+      perKeyPerHour: "默认5000",
+    },
+  }
+  return NextResponse.json(spec)
+}

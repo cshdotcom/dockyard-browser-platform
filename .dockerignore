@@ -1,0 +1,17 @@
+node_modules
+.next
+db/*.db
+db/*.db-journal
+storage
+dev.log
+server.log
+.git
+agent-ctx
+examples
+tests
+download
+upload
+skills
+.zscripts
+tmp-cookies.txt
+*.log
