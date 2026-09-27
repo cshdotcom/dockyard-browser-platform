@@ -70,3 +70,4 @@ examples/
 mini-services/*/node_modules
 prisma/dev.db
 .env
+tool-results/
