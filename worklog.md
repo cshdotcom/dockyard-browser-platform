@@ -131,3 +131,16 @@ Work Log:
 
 Stage Summary:
 - LiveDesk 全链路（票据→网关桥→RFB→画布→输入→剪贴板）双通道实测通过；防退出三重自愈+文件系统硬隔离落地；源码待推送 GitHub
+
+---
+Task ID: 3-final
+Agent: main
+Task: 收尾 — 服务恢复 + 推送确认
+
+Work Log:
+- 恢复被误伤的 ws-hub（bun --hot index.ts 与 vnc-bridge 同模式被 pkill 波及）；三进程全绿（app:200 / ws-hub:200 / bridge:health ok）
+- 最终链路复验：详情页已连接 + 隔离面板 + 剪贴板全部就绪；截图存 verify/final-state.png
+- git push 成功：742e1ff..82c56d5 main -> main（cshdotcom/dockyard-browser-platform）
+
+Stage Summary:
+- 本轮全部交付物已验证并推送；CI（lint + 双镜像构建）将随 push 自动触发
