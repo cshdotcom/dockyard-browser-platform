@@ -187,7 +187,7 @@ function TwoFactorPanel({ data, force }: { data: SecurityTabData; force: boolean
           {!enabled && setupData && (
             <div className="grid md:grid-cols-2 gap-6 rounded-lg border p-4">
               <div className="flex flex-col items-center justify-center gap-3">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
+                
                 <img src={setupData.qrDataUrl} alt="TOTP 二维码" className="rounded-lg border p-2 bg-white" width={220} height={220} />
                 <p className="text-xs text-muted-foreground">扫描二维码添加验证器</p>
               </div>

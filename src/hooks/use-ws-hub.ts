@@ -20,7 +20,10 @@ export function useWsHub(opts?: {
   const socketRef = useRef<Socket | null>(null)
   const [connected, setConnected] = useState(false)
   const handlersRef = useRef(opts)
-  handlersRef.current = opts
+
+  useEffect(() => {
+    handlersRef.current = opts
+  }, [opts])
 
   useEffect(() => {
     const socket = io("/?XTransformPort=3003", {

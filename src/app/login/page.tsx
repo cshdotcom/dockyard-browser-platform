@@ -2,6 +2,8 @@ import { Suspense } from "react"
 import { getConfig } from "@/lib/config"
 import { LoginForm } from "./login-form"
 
+export const dynamic = "force-dynamic"
+
 export const metadata = { title: "登录" }
 
 export default async function LoginPage({

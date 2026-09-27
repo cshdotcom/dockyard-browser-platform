@@ -1,6 +1,8 @@
 import { getConfig, getConfigBool } from "@/lib/config"
 import { RegisterForm } from "./register-form"
 
+export const dynamic = "force-dynamic"
+
 export const metadata = { title: "注册 - Dockyard" }
 
 export default async function RegisterPage() {

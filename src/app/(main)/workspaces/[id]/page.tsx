@@ -22,22 +22,23 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
     notFound()
   }
 
-  const [proxyNode, singbox, owner, creator, shares, shareTargets, scripts, harRecords, runLogs, snap, novncHealth] = await Promise.all([
+  const [proxyNode, singbox, owner, creator, shares, scripts, harRecords, runLogs, snap] = await Promise.all([
     ws.proxyNodeId ? db.proxyNode.findUnique({ where: { id: ws.proxyNodeId } }) : null,
     ws.singboxInstanceId ? db.singboxInstance.findUnique({ where: { id: ws.singboxInstanceId } }) : null,
     db.user.findUnique({ where: { id: ws.userId }, select: { username: true, displayName: true, email: true } }),
     ws.createdByUserId ? db.user.findUnique({ where: { id: ws.createdByUserId }, select: { username: true, displayName: true } }) : null,
     db.workspaceShare.findMany({ where: { workspaceId: id, revokedAt: null } }),
-    db.user.findMany({ where: { id: { in: shares.map((s) => s.targetUserId) } }, select: { id: true, username: true, displayName: true } }),
     db.browserScriptTemplate.findMany({
-      where: { deletedAt: null, enabled: true, OR: [{ scope: "GLOBAL" }, ...(gids.length ? [{ scope: "GROUP", groupId: { in: gids } }] : []), { userId: ctx.userId }] },
+      where: { deletedAt: null, enabled: true, OR: [{ scope: "GLOBAL" }, { userId: ctx.userId }] },
       select: { id: true, name: true, description: true, scope: true },
     }),
     db.harRecord.findMany({ where: { workspaceId: id, deletedAt: null }, orderBy: { createdAt: "desc" }, take: 5 }),
     db.browserScriptRunLog.findMany({ where: { workspaceId: id }, orderBy: { startedAt: "desc" }, take: 10 }),
     ws.profileSnapshotId ? db.browserProfileSnapshot.findUnique({ where: { id: ws.profileSnapshotId } }) : null,
-    Promise.resolve(null),
   ])
+  const shareTargets = shares.length > 0
+    ? await db.user.findMany({ where: { id: { in: shares.map((s) => s.targetUserId) } }, select: { id: true, username: true, displayName: true } })
+    : []
 
   const shareMap = new Map(shareTargets.map((u) => [u.id, u]))
 
