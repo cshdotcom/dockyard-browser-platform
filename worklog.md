@@ -110,3 +110,24 @@ Work Log:
 
 Stage Summary:
 - 平台全部功能真实实现、双通道验证通过、CI绿、镜像构建中
+
+---
+Task ID: 3
+Agent: main
+Task: LiveDesk 品牌化 VNC + 硬隔离防退出浏览器容器 + 全用户管控收口
+
+Work Log:
+- 新增 mini-services/vnc-bridge（Bun，端口3005）：HMAC票据鉴权（60s单次防重放）+ WS↔RFB(TCP)双向中转 + 只读票据服务端丢帧 + 演示RFB 3.8引擎（640x400 raw帧流/键鼠回显/指针准星/绽放环/QEMU扩展剪贴板 UTF-8+zlib 中文往返）
+- 修复 noVNC 集成三处坑：①动态import异步间隙丢失版本横幅（先import再建WS）②RFB在目标内自建画布（改容器div挂载+rfb.focus）③剪贴板方法名1.7改名 clipboardPasteFrom
+- 桥实现 QEMU 扩展剪贴板协议（Caps/Request/Notify/Provide + node:zlib inflateSync Z_SYNC_FLUSH finishFlush 对齐 pako 全量刷新流）——中文剪贴板浏览器实测完整往返
+- workspaces actions：getVncTicketAction（五重隔离票据签发+只读降级+审计）、restartBrowserProcessAction（USR1→supervisor同Profile秒级拉起，30s限速）；创建/启动/切代理均携带硬隔离规格落库 hardeningJson+containerRef
+- docker.ts：buildBrowserHostConfig 硬隔离（ReadOnlyRootfs/CapDrop=ALL/no-new-privileges/唯一本人Profile卷 noexec/下载目录noexec tmpfs/Pids/禁swap/RestartPolicy=always/dockyard-sessions隔离网络）+ ensureSessionNetwork + createIsolatedBrowserContainer + resolveContainerIp + restartBrowserProcessInContainer(docker exec)
+- tasks engine novnc_health 改造为防退出看门狗：崩溃会话同Profile/同代理自动重建（连续3轮失败才转ERROR+告警）
+- LiveDesk 查看器组件（src/components/vnc/live-desk-viewer.tsx）：驾驶舱风格工具栏/状态胶囊(fps/KB/s遥测)/自动重连(退避+重新取票)/停顿看门狗/水印/品牌签名截图/剪贴板双通道抽屉/触屏-鼠标记忆/键鼠HUD/全屏；工作区详情页集成 + 会话管控卡 + 安全隔离面板(6项防护可视化)
+- docker/browser：硬隔离浏览器镜像（debian+chromium+xvfb+x11vnc+中文字体，supervisor.sh 防退出死循环+USR1热重启）+ docker-browser.yml CI（多架构GHCR）
+- start.sh/healthcheck.sh 集成 VNC 桥（共享密钥自动生成注入两侧/三进程统一托管优雅退出/端口自检）
+- 环境修复：.env 缺 AUTH_SECRET 导致 NextAuth cookie 与中间件 getToken 密钥不一致（登录循环）；db push 重建后补跑 seed；dev 服务器崩溃后手动恢复
+- 端到端验证：登录→建NoVNC工作区→详情页自动连接（36帧/5s，桥协议测试36帧+中文回环+401防重放）→键盘3键/鼠标2事件直达服务端→扩展剪贴板24字符中文往返→断开/重连（新票据）→隔离面板6项全渲染→管理员工控页7项强制操作；VLM 截图双轮确认画面/HUD/面板；lint 零错误
+
+Stage Summary:
+- LiveDesk 全链路（票据→网关桥→RFB→画布→输入→剪贴板）双通道实测通过；防退出三重自愈+文件系统硬隔离落地；源码待推送 GitHub

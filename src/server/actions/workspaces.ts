@@ -13,7 +13,9 @@ import { trackBehavior, detectAbnormalBehavior } from "@/lib/risk"
 import { raiseAlert } from "@/lib/alerts"
 import { zodValidate, zPrecision } from "@/lib/validators"
 import { createSession, destroySession } from "@/lib/external/steel"
-import { createNovncSession, destroyNovncSession, refreshNovncSecret } from "@/lib/external/novnc"
+import { createNovncSession, destroyNovncSession, refreshNovncSecret, novncDialTarget, restartNovncBrowser, type NovncSession } from "@/lib/external/novnc"
+import { browserHardeningSummary, restartBrowserProcessInContainer, type BrowserHardeningInfo } from "@/lib/external/docker"
+import { ENV } from "@/lib/env"
 import { moveToRecycle } from "@/lib/recycle"
 import { getConfigBool, getConfig, getConfigNumber } from "@/lib/config"
 
@@ -172,12 +174,26 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
     } else {
       // ---- NoVNC 重度会话（独立配额校验在上面已做）----
       const proxyInfo = await buildProxyUrl(p.proxyNodeId)
+      // 隔离Profile键：绑定“用户对应的配置的浏览器”，闪退/重建后自动还原同一环境
+      const profileKey = p.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
       const novnc = await createNovncSession({
         proxyUrl: proxyInfo.proxyUrl,
         resolution: p.resolution,
         ttlMinutes: p.ttlMinutes || undefined,
         profileMount: p.profileSnapshotId ? `snapshots/${p.profileSnapshotId}` : undefined,
+        userId: ctx.userId,
+        profileKey,
+        cpuLimit: (templateConfig.cpuLimit as number) || undefined,
+        memLimitMb: (templateConfig.memLimitMb as number) || undefined,
+        startUrl: (templateConfig.startUrl as string) || undefined,
+        labels: { "dockyard.owner": ctx.userId, "dockyard.profile-key": profileKey },
       })
+      const hardening = novnc.hardening || browserHardeningSummary({
+        image: ENV.browserImage, cpuLimit: (templateConfig.cpuLimit as number) || 1, memLimitMb: (templateConfig.memLimitMb as number) || 1024,
+        pidsLimit: 256, network: "dockyard-sessions", profileDir: null,
+      })
+      const hardeningSnapshot = { ...hardening, profileKey, provisioned: novnc.simulated ? "simulated" : "live" } as BrowserHardeningInfo & { profileKey: string; provisioned: string }
+      const hardeningJsonInput = JSON.parse(JSON.stringify(hardeningSnapshot)) as Record<string, unknown>
       const ws = await db.browserWorkspace.create({
         data: {
           name: p.name,
@@ -193,6 +209,8 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           novncSessionId: novnc.novncSessionId,
           novncSecret: encrypt(novnc.secret),
           novncConnCount: 1,
+          containerRef: novnc.containerName || null,
+          hardeningJson: hardeningJsonInput,
           ttlMinutes: p.ttlMinutes,
           idleTimeoutMinutes: p.idleTimeoutMinutes,
           createdByUserId: ctx.userId,
@@ -258,8 +276,24 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
       })
       await db.browserWorkspace.update({ where: { id }, data: { status: "RUNNING", steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, steelNodeId: await pickSteelNode() } })
     } else {
-      const novnc = await createNovncSession({ proxyUrl: proxyInfo.proxyUrl, ttlMinutes: ws.ttlMinutes || undefined })
-      await db.browserWorkspace.update({ where: { id }, data: { status: "RUNNING", novncSessionId: novnc.novncSessionId, novncSecret: encrypt(novnc.secret) } })
+      const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
+      const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
+      const novnc = await createNovncSession({
+        proxyUrl: proxyInfo.proxyUrl,
+        ttlMinutes: ws.ttlMinutes || undefined,
+        profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
+        userId: ws.userId,
+        profileKey,
+        labels: { "dockyard.owner": ws.userId, "dockyard.profile-key": profileKey },
+      })
+      await db.browserWorkspace.update({
+        where: { id },
+        data: {
+          status: "RUNNING", novncSessionId: novnc.novncSessionId, novncSecret: encrypt(novnc.secret),
+          containerRef: novnc.containerName || null,
+          hardeningJson: novnc.hardening ? (JSON.parse(JSON.stringify({ ...novnc.hardening, profileKey, provisioned: "live" })) as Record<string, unknown>) : prevHardening,
+        },
+      })
     }
     if (ws.proxyNodeId) await db.proxyNode.update({ where: { id: ws.proxyNodeId }, data: { currentSessions: { increment: 1 } } }).catch(() => {})
     if (ws.singboxInstanceId) await db.singboxInstance.update({ where: { id: ws.singboxInstanceId }, data: { currentSessions: { increment: 1 } } }).catch(() => {})
@@ -326,10 +360,24 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
       })
     } else {
       if (ws.novncSessionId) await destroyNovncSession(ws.novncSessionId).catch(() => {})
-      const novnc = await createNovncSession({ proxyUrl: proxyInfo.proxyUrl, ttlMinutes: ws.ttlMinutes || undefined })
+      const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
+      const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
+      const novnc = await createNovncSession({
+        proxyUrl: proxyInfo.proxyUrl,
+        ttlMinutes: ws.ttlMinutes || undefined,
+        profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
+        userId: ws.userId,
+        profileKey,
+        labels: { "dockyard.owner": ws.userId, "dockyard.profile-key": profileKey },
+      })
       await db.browserWorkspace.update({
         where: { id },
-        data: { novncSessionId: novnc.novncSessionId, novncSecret: encrypt(novnc.secret), proxyNodeId: proxyNodeId || null, singboxInstanceId: proxyInfo.singboxInstanceId || null, status: "RUNNING" },
+        data: {
+          novncSessionId: novnc.novncSessionId, novncSecret: encrypt(novnc.secret),
+          containerRef: novnc.containerName || null,
+          hardeningJson: novnc.hardening ? (JSON.parse(JSON.stringify({ ...novnc.hardening, profileKey, provisioned: "live" })) as Record<string, unknown>) : prevHardening,
+          proxyNodeId: proxyNodeId || null, singboxInstanceId: proxyInfo.singboxInstanceId || null, status: "RUNNING",
+        },
       })
     }
     await writeAudit({
@@ -545,5 +593,121 @@ export async function refreshVncKeyAction(input: unknown): Promise<ActionResult>
       resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name, severity: "WARN",
     })
     return null
+  })
+}
+
+// ============================================================
+// LiveDesk VNC 连接票据：所有者/共享/管理员 → HMAC 票据（60s 单次有效）
+// 五重隔离：WorkspaceUUID + 票据HMAC + 只读降级 + 桥侧防重放 + 桥侧只读丢帧
+// ============================================================
+
+// 解析当前用户对工作区的 VNC 访问权限（OPERATE=可交互 / VIEW=只读镜像 / null=无权）
+async function resolveVncAccess(ctx: { userId: string; role: string }, ws: { id: string; userId: string; groupId: string | null }): Promise<"OPERATE" | "VIEW" | null> {
+  if (ws.userId === ctx.userId) return "OPERATE"
+  if (ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN") return "OPERATE"
+  const share = await db.workspaceShare.findFirst({
+    where: {
+      workspaceId: ws.id, targetUserId: ctx.userId, revokedAt: null,
+      OR: [{ expireAt: null }, { expireAt: { gt: new Date() } }],
+    },
+  })
+  if (share) return share.permission === "OPERATE" ? "OPERATE" : "VIEW"
+  if (ctx.role === "GROUP_ADMIN" && ws.groupId) {
+    const gids = await userGroupIds(ctx.userId)
+    if (gids.includes(ws.groupId)) return "OPERATE"
+  }
+  return null
+}
+
+function b64url(buf: Buffer): string {
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+}
+
+// ---- 签发 VNC 连接票据（LiveDesk 客户端凭票据直连网关桥）----
+export async function getVncTicketAction(input: unknown): Promise<ActionResult<{
+  ticket: string
+  wsUrlQuery: string
+  bridge: { mode: string; port: number; url: string }
+  readonly: boolean
+  expiresInSec: number
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { id } = zodValidate(z.object({ id: z.string() }), input)
+
+    // 速率限制：防票据接口刷量
+    if (!rateLimit(`vncTicket:${ctx.userId}`, 30, 60_000).allowed) throw new Error("取票过于频繁，请稍后再试")
+
+    const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
+    if (!ws || ws.mode !== "novnc_full") throw new Error("NoVNC 会话不存在")
+    if (!ws.novncSessionId) throw new Error("会话未运行")
+    if (ws.status !== "RUNNING" && ws.status !== "IDLE") throw new Error(`会话当前不可连接（${ws.status}）`)
+
+    const access = await resolveVncAccess(ctx, ws)
+    if (!access) throw new Error("您无权访问该远程桌面")
+
+    // 全局开关：只读观察模式（管理员可强制全员只读）
+    const globalViewOnly = await getConfigBool("session.vncGlobalViewOnly", false)
+    const readonly = access === "VIEW" || globalViewOnly
+
+    // 解析拨号目标（真实容器IP / 池RFB端点 / 演示引擎）
+    const tgt = await novncDialTarget(ws.novncSessionId, ws.containerRef)
+    if (!tgt) throw new Error("远程桌面通道暂不可用，请稍后重试或联系管理员")
+
+    const expSec = 60
+    const payload = { v: ws.id, ro: readonly ? 1 : 0, exp: Math.floor(Date.now() / 1000) + expSec, n: crypto.randomBytes(16).toString("hex"), tgt }
+    const payloadB64 = b64url(Buffer.from(JSON.stringify(payload), "utf8"))
+    const sig = b64url(crypto.createHmac("sha256", ENV.vncBridgeSecret).update(payloadB64).digest())
+    const ticket = `${payloadB64}.${sig}`
+
+    await trackBehavior(ctx.userId, "LOGIN") // 轻量活跃度记录
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "VNC_TICKET_ISSUE",
+      resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
+      after: { access, readonly, target: tgt.k },
+    })
+    return {
+      ticket,
+      wsUrlQuery: `vnc=${encodeURIComponent(ws.id)}&ticket=${encodeURIComponent(ticket)}`,
+      bridge: { mode: ENV.vncBridgePublic, port: ENV.vncBridgePort, url: ENV.vncBridgeUrl },
+      readonly,
+      expiresInSec: expSec,
+    }
+  })
+}
+
+// ---- 防退出运维：容器内浏览器进程级重启（同一Profile 1 秒内拉起）----
+// 用户浏览器卡死时的自救按钮；管理员对任意用户会话同样可执行（见 admin-workspaces 强制重启）
+export async function restartBrowserProcessAction(input: unknown): Promise<ActionResult<{ restarted: boolean; simulated: boolean }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { id } = zodValidate(z.object({ id: z.string() }), input)
+    const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
+    if (!ws || ws.mode !== "novnc_full") throw new Error("NoVNC 会话不存在")
+    if (ws.status !== "RUNNING" && ws.status !== "IDLE") throw new Error("会话未在运行中")
+
+    const access = await resolveVncAccess(ctx, ws)
+    if (access !== "OPERATE") throw new Error("仅所有者或管理员可重启浏览器进程")
+
+    // 限速：同一会话 30 秒内仅允许一次进程重启
+    if (!rateLimit(`vncRestart:${ws.id}`, 1, 30_000).allowed) throw new Error("操作过于频繁，请等待 30 秒后重试")
+
+    let result: { restarted: boolean; simulated: boolean }
+    if (ws.containerRef) {
+      // 自托管：向 supervisor 发 USR1 → 杀浏览器子进程 → 主循环同一 Profile 立即拉起
+      result = await restartBrowserProcessInContainer(ws.containerRef)
+    } else if (ws.novncSessionId) {
+      // 池集群：委托池侧重启；模拟模式同样走适配器
+      const r = await restartNovncBrowser(ws.novncSessionId)
+      result = { restarted: r.restarted, simulated: !ws.containerRef && !(await import("@/lib/env")).externalAvailable.novnc && !(await import("@/lib/env")).externalAvailable.docker }
+    } else {
+      throw new Error("会话通道不存在")
+    }
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "BROWSER_PROCESS_RESTART",
+      resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
+      after: { containerRef: ws.containerRef, simulated: result.simulated }, severity: "WARN",
+    })
+    return result
   })
 }

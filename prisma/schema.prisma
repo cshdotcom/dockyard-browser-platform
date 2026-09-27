@@ -550,6 +550,8 @@ model BrowserWorkspace {
   lifecycleRules     Json?    // 定时生命周期策略
   freezeReason       String?
   expireAt           DateTime?
+  containerRef       String?  // 自托管硬隔离浏览器容器（name/id，防退出看门狗自愈目标）
+  hardeningJson      Json?    // 隔离防护快照（只读根FS/CapDrop/noexec下载/独立Profile卷/防退出循环）
   createdByUserId    String?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt

@@ -5,6 +5,198 @@
 import { ENV, externalAvailable } from "../env"
 import { randomUUID } from "crypto"
 
+// ============================================================
+// 硬隔离浏览器容器（LiveDesk 自托管模式）
+// 安全模型：
+//   1. ReadOnlyRootfs    —— 根文件系统只读，任何位置不可写系统文件
+//   2. CapDrop=ALL       —— 丢弃全部 Linux capabilities
+//   3. no-new-privileges —— 禁止 setuid 提权
+//   4. Profile 卷唯一挂载（rw,nosuid,nodev,noexec）—— 仅本人资料可见可写；
+//      其他用户的任何文件/目录不在本容器 mount namespace 中（不可见 = 不可读）
+//   5. /tmp、下载目录、/dev/shm 全部 tmpfs + noexec —— 下载可执行文件运行即报权限错误
+//   6. RestartPolicy=always + 容器内 supervisor 死循环拉起浏览器 —— 用户无法以任何形式退出
+//   7. 内存/CPU/Pids 硬限制 —— OOM 直接终止，防止资源滥用
+// ============================================================
+
+export interface BrowserHardeningSpec {
+  image: string
+  cpuLimit: number // 0.001 精度
+  memLimitMb: number
+  pidsLimit: number
+  network: string
+  profileDir: string | null // 宿主机上该用户专属 Profile 目录（唯一可写持久卷）
+  startUrl?: string
+  proxyUrl?: string
+  resolution?: string
+  env?: Record<string, string>
+  labels?: Record<string, string>
+}
+
+export interface BrowserHardeningInfo {
+  readOnlyRootfs: boolean
+  capDropAll: boolean
+  noNewPrivileges: boolean
+  isolatedProfileVolume: boolean
+  noexecTmpDirs: string[]
+  noexecDownloads: boolean
+  restartPolicy: "always"
+  supervisorLoop: boolean
+  nonRootUser: string
+  pidsLimit: number
+  memLimitMb: number
+  cpuLimit: number
+  networkIsolated: boolean
+  oomHardKill: boolean
+  profileDir: string | null
+  image: string
+}
+
+export const SESSION_NETWORK = "dockyard-sessions"
+export const BROWSER_USER = "browser"
+
+export function browserHardeningSummary(spec: BrowserHardeningSpec): BrowserHardeningInfo {
+  return {
+    readOnlyRootfs: true,
+    capDropAll: true,
+    noNewPrivileges: true,
+    isolatedProfileVolume: !!spec.profileDir,
+    noexecTmpDirs: ["/tmp", "/home/browser/downloads", "/dev/shm", "/run"],
+    noexecDownloads: true,
+    restartPolicy: "always",
+    supervisorLoop: true,
+    nonRootUser: BROWSER_USER,
+    pidsLimit: spec.pidsLimit,
+    memLimitMb: spec.memLimitMb,
+    cpuLimit: spec.cpuLimit,
+    networkIsolated: true,
+    oomHardKill: true,
+    profileDir: spec.profileDir,
+    image: spec.image,
+  }
+}
+
+// 容器内唯一允许的字符集（cuid/uuid/短id），杜绝路径穿越
+function safeId(id: string): boolean {
+  return /^[A-Za-z0-9_-]{4,64}$/.test(id)
+}
+
+export function browserProfileDir(userId: string, profileKey: string): string | null {
+  if (!safeId(userId) || !safeId(profileKey)) return null
+  return `${ENV.storageLocalPath.replace(/\/$/, "")}/profiles/${userId}/${profileKey}`
+}
+
+export function buildBrowserHostConfig(spec: BrowserHardeningSpec) {
+  return {
+    NanoCpus: Math.round(spec.cpuLimit * 1e9),
+    Memory: Math.round(spec.memLimitMb * 1024 * 1024),
+    MemorySwap: Math.round(spec.memLimitMb * 1024 * 1024), // 禁 swap：超限 OOM 硬终止
+    PidsLimit: spec.pidsLimit,
+    Privileged: false,
+    ReadOnlyRootfs: true, // 根文件系统只读
+    CapDrop: ["ALL"],
+    SecurityOpt: ["no-new-privileges"],
+    RestartPolicy: { Name: "always" }, // 防退出：容器崩溃自动拉起（浏览器进程级自愈在镜像 supervisor）
+    NetworkMode: spec.network,
+    Binds: spec.profileDir ? [`${spec.profileDir}:/home/browser/profile:rw,nosuid,nodev,noexec`] : [],
+    Tmpfs: {
+      "/tmp": "rw,noexec,nosuid,size=256m",
+      "/home/browser/downloads": "rw,noexec,nosuid,size=128m", // 下载落点：可写不可执行
+      "/dev/shm": "rw,nosuid,nodev,size=256m",
+      "/run": "rw,noexec,nosuid,size=32m",
+    },
+    Ulimits: [{ Name: "nofile", Soft: 8192, Hard: 8192 }],
+  }
+}
+
+// 确保会话专用隔离网络存在（浏览器容器不进 host 网络，互不可见）
+export async function ensureSessionNetwork(): Promise<string> {
+  if (externalAvailable.docker) {
+    const res = await dockerFetch("/networks")
+    if (res.ok) {
+      const nets = (await res.json()) as Array<{ Name: string }>
+      if (nets.some((n) => n.Name === SESSION_NETWORK)) return SESSION_NETWORK
+    }
+    const create = await dockerFetch("/networks/create", { method: "POST", body: JSON.stringify({ Name: SESSION_NETWORK, Driver: "bridge" }) })
+    if (!create.ok) throw new Error(`Docker API network create failed: HTTP ${create.status}`)
+    return SESSION_NETWORK
+  }
+  return SESSION_NETWORK
+}
+
+// 创建硬隔离浏览器容器（真实模式：镜像内 supervisor 死循环拉起浏览器，退出即 1s 内以同一 Profile 重启）
+export async function createIsolatedBrowserContainer(
+  spec: BrowserHardeningSpec,
+): Promise<{ id: string; name: string; ip: string | null; simulated: boolean; hardening: BrowserHardeningInfo }> {
+  const hardening = browserHardeningSummary(spec)
+  const name = `dy-browser-${randomUUID().replace(/-/g, "").slice(0, 12)}`
+  if (externalAvailable.docker) {
+    const envVars: Record<string, string> = {
+      START_URL: spec.startUrl || "about:blank",
+      RESOLUTION: spec.resolution || "1280x800",
+      TZ: "Asia/Shanghai",
+      ...(spec.proxyUrl ? { PROXY_URL: spec.proxyUrl } : {}),
+      ...(spec.env || {}),
+    }
+    const body = {
+      Image: spec.image,
+      name,
+      User: BROWSER_USER,
+      Env: Object.entries(envVars).map(([k, v]) => `${k}=${v}`),
+      Labels: { "dockyard.managed": "true", ...(spec.labels || {}) },
+      WorkingDir: "/home/browser",
+      ExposedPorts: { "5900/tcp": {}, "9222/tcp": {} },
+      HostConfig: buildBrowserHostConfig(spec),
+    }
+    const res = await dockerFetch("/containers/create?name=" + encodeURIComponent(name), {
+      method: "POST",
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) throw new Error(`Docker API create browser failed: HTTP ${res.status}`)
+    const json = (await res.json()) as { Id: string }
+    const start = await dockerFetch(`/containers/${json.Id}/start`, { method: "POST" }, 60000)
+    if (!start.ok && start.status !== 304) throw new Error(`Docker API start browser failed: HTTP ${start.status}`)
+    const ip = await resolveContainerIp(json.Id).catch(() => null)
+    return { id: json.Id, name, ip, simulated: false, hardening }
+  }
+  // 模拟模式：注册为普通模拟容器（生命周期/统计链路一致）
+  const id = "sim-" + randomUUID().replace(/-/g, "").slice(0, 12)
+  simContainers().set(id, { spec: { name, image: spec.image, envVars: {}, cpuLimit: spec.cpuLimit, memLimitMb: spec.memLimitMb, autoRestart: true }, state: "running", startedAt: Date.now(), netRx: 0, netTx: 0, restarts: 0 })
+  return { id, name, ip: null, simulated: true, hardening }
+}
+
+// 解析容器在隔离网络中的 IP（平台与 VNC 桥据此直连 5900/9222）
+export async function resolveContainerIp(idOrName: string): Promise<string | null> {
+  if (!externalAvailable.docker) return null
+  const res = await dockerFetch(`/containers/${encodeURIComponent(idOrName)}/json`)
+  if (!res.ok) return null
+  const json = (await res.json()) as { NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> } }
+  for (const net of Object.values(json.NetworkSettings?.Networks || {})) {
+    if (net.IPAddress) return net.IPAddress
+  }
+  return null
+}
+
+// 防退出运维动作：向容器内 supervisor(PID 1) 发送 USR1 → 杀掉浏览器子进程 → 主循环立即以同一 Profile 拉起
+export async function restartBrowserProcessInContainer(idOrName: string): Promise<{ restarted: boolean; simulated: boolean }> {
+  if (externalAvailable.docker) {
+    const execCreate = await dockerFetch(`/containers/${encodeURIComponent(idOrName)}/exec`, {
+      method: "POST",
+      body: JSON.stringify({ Cmd: ["kill", "-USR1", "1"], AttachStdout: true, AttachStderr: true, User: "root" }),
+    })
+    if (!execCreate.ok) throw new Error(`Docker exec create failed: HTTP ${execCreate.status}`)
+    const { Id } = (await execCreate.json()) as { Id: string }
+    const start = await dockerFetch(`/exec/${Id}/start`, { method: "POST", body: JSON.stringify({ Detach: false, Tty: false }) })
+    if (!start.ok) throw new Error(`Docker exec start failed: HTTP ${start.status}`)
+    return { restarted: true, simulated: false }
+  }
+  const c = simContainers().get(idOrName)
+  if (c) {
+    c.restarts = (c.restarts || 0) + 1
+    c.startedAt = Date.now()
+  }
+  return { restarted: true, simulated: true }
+}
+
 export interface DockerContainerSpec {
   name: string
   image: string

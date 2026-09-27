@@ -437,20 +437,59 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
     return { itemsProcessed: expired.count, summary: `清理${expired.count}条过期共享授权` }
   },
 
-  // 17. NoVNC会话健康探测与闲置回收
+  // 17. NoVNC会话健康探测 + 防退出自愈看门狗（崩溃自动重建同Profile会话）+ 闲置回收
   async novnc_health(log) {
     const vncSessions = await db.browserWorkspace.findMany({ where: { mode: "novnc_full", status: { in: ["RUNNING", "IDLE"] }, deletedAt: null, novncSessionId: { not: null } }, take: 200 })
     let n = 0
+    let recovered = 0
     const { getConfigNumber } = await import("@/lib/config")
     const idleMin = await getConfigNumber("session.novncIdleTimeoutMin", 30)
+    const maxRecoverFails = 3 // 连续 3 轮失败才判定不可恢复
     for (const ws of vncSessions) {
       const health = await novncHealth(ws.novncSessionId!).catch(() => null)
       if (!health || !health.alive) {
-        await destroyNovncSession(ws.novncSessionId!).catch(() => {})
-        await db.browserWorkspace.update({ where: { id: ws.id }, data: { status: "DESTROYED", crashCategory: "NoVNC会话断开僵死" } })
-        await raiseAlert({ title: `NoVNC会话异常已销毁：${ws.name}`, level: "WARN", content: "会话健康探测失败，已自动销毁释放资源", resourceType: "WORKSPACE", resourceId: ws.id, ownerUserId: ws.userId })
-        n++
+        // ---- 防退出自愈：崩溃会话自动以同一 Profile / 同一代理重建（用户无感知）----
+        const fails = (vncFailCounter().get(ws.id) || 0) + 1
+        vncFailCounter().set(ws.id, fails)
+        if (fails < maxRecoverFails) {
+          try {
+            await destroyNovncSession(ws.novncSessionId!).catch(() => {})
+            const { createNovncSession } = await import("@/lib/external/novnc")
+            const { encrypt } = await import("@/lib/crypto")
+            const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
+            const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${ws.id.slice(-16)}`
+            const rebuilt = await createNovncSession({
+              ttlMinutes: ws.ttlMinutes || undefined,
+              profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
+              userId: ws.userId,
+              profileKey,
+              labels: { "dockyard.owner": ws.userId, "dockyard.recovered": "true" },
+            })
+            await db.browserWorkspace.update({
+              where: { id: ws.id },
+              data: {
+                status: "RUNNING", crashCategory: `自愈重建#${fails}`,
+                novncSessionId: rebuilt.novncSessionId, novncSecret: encrypt(rebuilt.secret),
+                containerRef: rebuilt.containerName || null,
+                hardeningJson: rebuilt.hardening ? (JSON.parse(JSON.stringify({ ...rebuilt.hardening, profileKey, provisioned: "live" })) as Record<string, unknown>) : prevHardening,
+              },
+            })
+            recovered++
+            log(`防退出看门狗：${ws.name} 崩溃后已自动重建（第${fails}次，Profile=${profileKey.slice(0, 18)}…）`)
+            n++
+          } catch (e) {
+            log(`自愈重建失败：${ws.name} - ${e instanceof Error ? e.message : String(e)}`)
+          }
+        } else {
+          // 连续失败 → 判定不可恢复，释放资源并告警
+          vncFailCounter().delete(ws.id)
+          await destroyNovncSession(ws.novncSessionId!).catch(() => {})
+          await db.browserWorkspace.update({ where: { id: ws.id }, data: { status: "ERROR", crashCategory: "连续自愈失败(3轮)" } })
+          await raiseAlert({ title: `NoVNC会话自愈失败转ERROR：${ws.name}`, level: "ERROR", content: "防退出看门狗连续3轮重建失败，会话已转入错误态等待人工处置", resourceType: "WORKSPACE", resourceId: ws.id, ownerUserId: ws.userId })
+          n++
+        }
       } else {
+        vncFailCounter().delete(ws.id) // 恢复正常：清零失败计数
         const idleMs = Date.now() - health.lastInputAt
         if (idleMs > idleMin * 60_000 && ws.status === "RUNNING") {
           await destroyNovncSession(ws.novncSessionId!).catch(() => {})
@@ -461,8 +500,15 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
         }
       }
     }
-    return { itemsProcessed: n, summary: `检查${vncSessions.length}个VNC会话，回收${n}个` }
+    return { itemsProcessed: n, summary: `检查${vncSessions.length}个VNC会话：自愈重建${recovered}个，处置${n}个` }
   },
+}
+
+// 崩溃会话连续失败计数（内存态，进程级；任务由内存锁保证单实例执行）
+function vncFailCounter(): Map<string, number> {
+  const g = globalThis as unknown as { __dyVncFail?: Map<string, number> }
+  if (!g.__dyVncFail) g.__dyVncFail = new Map()
+  return g.__dyVncFail
 }
 
 // ---- 任务执行入口（内存锁 + 超时 + 连续失败告警）----

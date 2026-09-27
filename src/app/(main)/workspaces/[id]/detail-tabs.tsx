@@ -6,7 +6,8 @@ import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import {
   ArrowLeft, Globe, MonitorPlay, Share2, FileJson, Terminal, Clipboard, MousePointer2, Hand,
-  RefreshCw, ShieldCheck, Wifi, Loader2, Trash2, Lock, Play, StopCircle, Copy,
+  RefreshCw, ShieldCheck, Wifi, Loader2, Trash2, Lock, Play, StopCircle, Copy, Anchor,
+  RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon,
 } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -21,8 +22,9 @@ import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import {
   stopWorkspaceAction, startWorkspaceAction, deleteWorkspaceAction, shareWorkspaceAction,
   revokeShareAction, exportWorkspaceConfigAction, exportHarAction, runScriptAction,
-  refreshVncKeyAction, updateWorkspaceAction, switchProxyAction,
+  refreshVncKeyAction, updateWorkspaceAction, switchProxyAction, restartBrowserProcessAction,
 } from "@/server/actions/workspaces"
+import { LiveDeskViewer } from "@/components/vnc/live-desk-viewer"
 import { cn } from "@/lib/utils"
 
 export interface WorkspaceDetailData {
@@ -31,6 +33,7 @@ export interface WorkspaceDetailData {
   cdpCallCount: number; cdpBlockedCount: number
   novncConnCount: number; novncFps: number; novncActiveMin: number
   cdpUrl: string | null; steelSessionId: string | null; novncSessionId: string | null
+  containerRef: string | null; hardening: Record<string, unknown> | null
   createdAt: string; updatedAt: string
   proxyName: string | null; proxyType: string | null; proxyStatus: string | null
   singboxId: string | null; singboxName: string | null
@@ -229,169 +232,168 @@ export function WorkspaceDetail({
   )
 }
 
-// ================= NoVNC 远程桌面面板 =================
+// ================= NoVNC 远程桌面面板（LiveDesk 品牌化查看器） =================
 function VncPanel({ workspace, canOperate }: { workspace: WorkspaceDetailData; canOperate: boolean }) {
   const router = useRouter()
-  const [mode, setMode] = React.useState<"mouse" | "touch">(detectMode())
-  const [watermark, setWatermark] = React.useState(true)
-  const [clipboardOpen, setClipboardOpen] = React.useState(false)
-  const [clipboardText, setClipboardText] = React.useState("")
-  const [connected, setConnected] = React.useState(workspace.status === "RUNNING")
-
-  function detectMode(): "mouse" | "touch" {
-    if (typeof window === "undefined") return "mouse"
-    const isTouch = "ontouchstart" in window || navigator.maxTouchPoints > 0
-    return isTouch ? "touch" : "mouse"
-  }
-
-  // 会话参数持久化：记住输入模式（仅本地浏览器，不影响其他接入端）
-  React.useEffect(() => {
-    const saved = window.localStorage.getItem(`vnc-mode-${workspace.id}`)
-    if (saved === "mouse" || saved === "touch") setMode(saved)
-  }, [workspace.id])
-  React.useEffect(() => {
-    window.localStorage.setItem(`vnc-mode-${workspace.id}`, mode)
-  }, [mode, workspace.id])
+  const [busy, setBusy] = React.useState(false)
 
   const refreshKey = async () => {
-    const res = await refreshVncKeyAction({ id: workspace.id })
-    if (res.code === 0) { toast.success("VNC 临时密钥已刷新"); router.refresh() } else toast.error(res.msg)
+    setBusy(true)
+    try {
+      const res = await refreshVncKeyAction({ id: workspace.id })
+      if (res.code === 0) { toast.success("VNC 临时密钥已刷新"); router.refresh() } else toast.error(res.msg)
+    } finally { setBusy(false) }
   }
 
-  const sendClipboard = async () => {
-    // UTF-8 校验过滤非法控制字符后经后端代理通道投递
-    const cleaned = clipboardText.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
-    if (!cleaned) { toast.error("剪贴板内容为空"); return }
+  // 防退出运维：容器内浏览器进程级重启（同一 Profile 秒级拉起）
+  const restartBrowser = async () => {
+    setBusy(true)
     try {
-      const res = await fetch("/api/vnc-proxy/clipboard", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspaceId: workspace.id, text: cleaned.slice(0, 5000) }),
-      })
-      const json = await res.json()
-      if (json.code === 0) toast.success("剪贴板内容已投递到远程桌面")
-      else toast.error(json.msg)
-    } catch {
-      toast.error("剪贴板投递失败")
-    }
+      const res = await restartBrowserProcessAction({ id: workspace.id })
+      if (res.code === 0) {
+        toast.success(res.data?.simulated ? "已触发浏览器进程重启（模拟通道）" : "已触发浏览器进程重启，同一 Profile 秒级拉起")
+        router.refresh()
+      } else toast.error(res.msg)
+    } finally { setBusy(false) }
   }
 
   return (
     <div className="space-y-4">
+      <LiveDeskViewer
+        workspace={{
+          id: workspace.id, uuid: workspace.uuid, name: workspace.name, status: workspace.status,
+          novncSessionId: workspace.novncSessionId, ownerName: workspace.ownerName,
+          mySharePermission: workspace.mySharePermission, isOwner: workspace.isOwner, isAdmin: workspace.isAdmin,
+        }}
+      />
+
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base flex flex-wrap items-center gap-2">
-            <MonitorPlay className="h-4 w-4" /> 远程桌面
-            <Badge variant={connected ? "default" : "outline"} className={connected ? "bg-emerald-600 hover:bg-emerald-600" : ""}>
-              {connected ? "已连接" : "未连接"}
-            </Badge>
-            <Badge variant="secondary">{mode === "mouse" ? "鼠标模式" : "触屏模式"}</Badge>
+            <ShieldCheck className="h-4 w-4" /> 会话管控
           </CardTitle>
           <CardDescription>
-            NoVNC 会话经由平台统一网关代理中转（工作区UUID+专属密钥双因子校验），原始内网地址不暴露给浏览器。
-            {workspace.mySharePermission === "VIEW" && " 您仅有只读权限：仅可查看画面，键鼠输入被服务端拦截。"}
+            NoVNC 会话经平台统一网关中转（工作区 UUID + HMAC 单次票据双因子校验），原始内网地址不暴露给浏览器。
+            {workspace.mySharePermission === "VIEW" && " 您仅有只读权限：仅可查看画面，键鼠输入在服务端被拦截。"}
           </CardDescription>
         </CardHeader>
-        <CardContent>
-          {/* 工具栏 */}
-          <div className="flex flex-wrap items-center gap-2 mb-3 rounded-lg border bg-muted/40 p-2">
-            <div className="flex items-center rounded-md border bg-background p-0.5">
-              <button
-                type="button"
-                onClick={() => setMode("mouse")}
-                disabled={workspace.mySharePermission === "VIEW"}
-                className={cn("flex items-center gap-1 rounded px-2.5 py-1 text-xs", mode === "mouse" ? "bg-teal-600 text-white" : "text-muted-foreground")}
-                title="鼠标指针模式（PC默认）"
-              >
-                <MousePointer2 className="h-3.5 w-3.5" /> 鼠标
-              </button>
-              <button
-                type="button"
-                onClick={() => setMode("touch")}
-                disabled={workspace.mySharePermission === "VIEW"}
-                className={cn("flex items-center gap-1 rounded px-2.5 py-1 text-xs", mode === "touch" ? "bg-teal-600 text-white" : "text-muted-foreground")}
-                title="触屏模式（移动端默认，支持双指缩放）"
-              >
-                <Hand className="h-3.5 w-3.5" /> 触屏
-              </button>
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" onClick={refreshKey} disabled={!canOperate || busy}>
+              <RefreshCw className={cn("h-3.5 w-3.5 mr-1", busy && "animate-spin")} /> 刷新临时密钥
+            </Button>
+            <Button variant="outline" size="sm" onClick={restartBrowser} disabled={!canOperate || busy} title="容器内浏览器进程退出后由 supervisor 以同一 Profile 自动拉起；此按钮用于卡死时手动触发">
+              <RotateCcw className="h-3.5 w-3.5 mr-1" /> 重启浏览器进程
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              防退出：浏览器进程退出后 1 秒内自动以同一 Profile 拉起（supervisor 循环 + RestartPolicy=always + 看门狗自动重建）
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-4">
+            <div className="rounded-lg border bg-muted/30 p-2">
+              <div className="text-muted-foreground">接入客户端</div>
+              <div className="mt-1 font-semibold">{workspace.novncConnCount} 个</div>
             </div>
-            <Button variant="outline" size="sm" onClick={() => setClipboardOpen(!clipboardOpen)}>
-              <Clipboard className="h-3.5 w-3.5 mr-1" /> 剪贴板
-            </Button>
-            <Button variant="outline" size="sm" onClick={refreshKey} disabled={!canOperate}>
-              <RefreshCw className="h-3.5 w-3.5 mr-1" /> 刷新密钥
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => setConnected(!connected)} disabled={workspace.status !== "RUNNING"}>
-              {connected ? "断开" : "连接"}
-            </Button>
-            <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
-              <label className="flex items-center gap-1 cursor-pointer">
-                <input type="checkbox" checked={watermark} onChange={(e) => setWatermark(e.target.checked)} className="accent-teal-600" />
-                水印
-              </label>
-              <span>分辨率锁定 · 画质自适应</span>
+            <div className="rounded-lg border bg-muted/30 p-2">
+              <div className="text-muted-foreground">实时帧率</div>
+              <div className="mt-1 font-semibold">{Math.round(workspace.novncFps)} fps</div>
+            </div>
+            <div className="rounded-lg border bg-muted/30 p-2">
+              <div className="text-muted-foreground">活跃时长</div>
+              <div className="mt-1 font-semibold">{Math.round(workspace.novncActiveMin)} min</div>
+            </div>
+            <div className="rounded-lg border bg-muted/30 p-2">
+              <div className="text-muted-foreground">会话通道</div>
+              <div className="mt-1 font-mono text-[11px] font-semibold truncate">{workspace.novncSessionId?.slice(0, 16) || "-"}</div>
             </div>
           </div>
-
-          {/* 画面区域：真实部署时为 noVNC canvas 经 ws 代理；此处呈现连接画面与状态 */}
-          <div className="relative rounded-lg border overflow-hidden bg-slate-900" style={{ aspectRatio: "16/10" }}>
-            <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 gap-2">
-              {connected ? (
-                <>
-                  <MonitorPlay className="h-12 w-12 opacity-60" />
-                  <p className="text-sm">远程桌面会话 {workspace.novncSessionId?.slice(0, 14)}</p>
-                  <p className="text-xs opacity-70">画面经由统一网关 WS 通道传输（{workspace.novncConnCount} 客户端接入）</p>
-                  {mode === "touch" && <p className="text-xs opacity-70">触屏模式：单击=左键 · 长按=右键 · 双指缩放画面</p>}
-                </>
-              ) : (
-                <>
-                  <Lock className="h-10 w-10 opacity-50" />
-                  <p className="text-sm">未连接 · {workspace.status === "RUNNING" ? "点击工具栏「连接」接入" : "会话未运行"}</p>
-                </>
-              )}
-            </div>
-            {watermark && connected && (
-              <div className="absolute inset-0 pointer-events-none select-none flex items-center justify-center">
-                <span className="text-white/10 text-4xl font-bold rotate-[-20deg]">{workspace.ownerName} · {new Date().toLocaleDateString()}</span>
-              </div>
-            )}
-          </div>
-
-          {/* 剪贴板面板 */}
-          {clipboardOpen && (
-            <div className="mt-3 rounded-lg border p-3 space-y-2">
-              <p className="text-xs text-muted-foreground">
-                中文剪贴板中转：支持中文/全角/特殊符号完整读写；经后端代理通道 UTF-8 校验转发（双向，受管理员全局开关管控，上限5000字符）
-              </p>
-              <textarea
-                className="w-full rounded-md border bg-background p-2 text-sm min-h-20"
-                placeholder="粘贴要投递到远程桌板的文本…"
-                value={clipboardText}
-                onChange={(e) => setClipboardText(e.target.value)}
-              />
-              <div className="flex gap-2">
-                <Button size="sm" onClick={sendClipboard} disabled={!canOperate}>投递到远程桌面 →</Button>
-                <Button
-                  size="sm" variant="outline"
-                  onClick={async () => {
-                    try {
-                      const text = await navigator.clipboard.readText()
-                      setClipboardText(text)
-                      toast.success("已从本地剪贴板读取")
-                    } catch { toast.error("浏览器未授权剪贴板读取") }
-                  }}
-                >
-                  ← 读取本地剪贴板
-                </Button>
-              </div>
-            </div>
-          )}
         </CardContent>
       </Card>
+
+      <IsolationPanel hardening={workspace.hardening} containerRef={workspace.containerRef} />
     </div>
   )
 }
 
+// ================= 安全隔离面板（硬隔离 + 防退出可视化） =================
+function IsolationPanel({ hardening, containerRef }: { hardening: Record<string, unknown> | null; containerRef: string | null }) {
+  const h = hardening || {}
+  const items: { ok: boolean; icon: React.ReactNode; title: string; desc: string }[] = [
+    {
+      ok: h.readOnlyRootfs !== false,
+      icon: <LockKeyhole className="h-4 w-4" />,
+      title: "根文件系统只读",
+      desc: "容器以 ReadOnlyRootfs 运行，系统目录任何位置不可写入",
+    },
+    {
+      ok: h.capDropAll !== false,
+      icon: <Ban className="h-4 w-4" />,
+      title: "Capabilities 全部丢弃",
+      desc: "CapDrop=ALL + no-new-privileges，禁止 setuid 提权",
+    },
+    {
+      ok: h.isolatedProfileVolume !== false,
+      icon: <FolderLock className="h-4 w-4" />,
+      title: "仅挂载本人 Profile 卷",
+      desc: "唯一持久卷为该用户专属目录；其他用户的资料与文件不在容器命名空间内（不可见即不可读）",
+    },
+    {
+      ok: h.noexecDownloads !== false,
+      icon: <Ban className="h-4 w-4" />,
+      title: "下载目录 noexec",
+      desc: "下载的软件落至 noexec tmpfs，运行即报权限错误（Permission denied）",
+    },
+    {
+      ok: h.restartPolicy === "always",
+      icon: <InfinityIcon className="h-4 w-4" />,
+      title: "防退出：supervisor 循环",
+      desc: "浏览器关闭/崩溃后 1 秒内以同一 Profile 自动拉起；容器级 RestartPolicy=always",
+    },
+    {
+      ok: h.oomHardKill !== false,
+      icon: <Gauge className="h-4 w-4" />,
+      title: "资源硬限制",
+      desc: `CPU ${String(h.cpuLimit ?? "-")} 核 / 内存 ${String(h.memLimitMb ?? "-")}MB / Pids ${String(h.pidsLimit ?? "-")}，超限 OOM 硬终止`,
+    },
+  ]
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex flex-wrap items-center gap-2">
+          <ShieldCheck className="h-4 w-4" /> 安全隔离 · 防退出
+          {h.provisioned === "simulated" && <Badge variant="secondary">沙箱演示规格</Badge>}
+          {containerRef && (
+            <Badge className="bg-teal-600 hover:bg-teal-600">
+              <Anchor className="h-3 w-3 mr-1" /> 容器 {containerRef.slice(0, 20)}
+            </Badge>
+          )}
+        </CardTitle>
+        <CardDescription>
+          每个会话运行在独立硬隔离容器中：用户无法以任何形式退出浏览器（闪退后立即恢复同一配置环境）；
+          对其他用户资料与任何其他文件无读取权限；下载软件运行直接报权限错误。
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {items.map((it) => (
+            <div key={it.title} className={cn("flex gap-2 rounded-lg border p-2.5", it.ok ? "border-emerald-500/25 bg-emerald-500/[0.06]" : "border-slate-200 bg-muted/30")}>
+              <div className={cn("mt-0.5 shrink-0 rounded-md p-1.5", it.ok ? "bg-emerald-500/15 text-emerald-600" : "bg-muted text-muted-foreground")}>
+                {it.icon}
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1 text-xs font-semibold">
+                  {it.title}
+                  {it.ok && <ShieldCheck className="h-3 w-3 text-emerald-600" />}
+                </div>
+                <div className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">{it.desc}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
 // ================= CDP 控制面板 =================
 function CdpPanel({ workspace, canOperate }: { workspace: WorkspaceDetailData; canOperate: boolean }) {
   const [throttle, setThrottle] = React.useState({ download: 0, upload: 0, latency: 0 })

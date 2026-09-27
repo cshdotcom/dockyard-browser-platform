@@ -51,7 +51,19 @@
 ### 浏览器业务
 - 工作区生命周期（幂等防重/三级配额+预留水位/风控行为检测）
 - CDP 轻量会话：CDP指令网关转发（黑名单+限速）、HAR导出、网络节流（0.001精度）、脚本注入沙箱
-- NoVNC 重度会话：鼠标/触屏模式切换（自动识别+持久化）、中文剪贴板中转代理（UTF-8校验/字数上限/全局开关）、水印、连接密钥自动刷新、闲置回收、只读/可操作共享权限
+- **NoVNC 重度会话（LiveDesk）**：品牌化现代 RFB 查看器（@novnc/novnc 真实客户端）
+  - 单域名统一网关接入：HMAC 单次票据（60s 时效 + 防重放）→ VNC 网关桥 → 容器 RFB(TCP)
+  - 断线自动重连（退避重试，每次自动重新取票）+ 画面停顿看门狗（15s 无帧强制重连）
+  - 只读镜像双保险：客户端 viewOnly + 桥侧丢弃输入帧
+  - 实时遥测 HUD（帧率/带宽/键鼠回显，WebSocket 数据面仪表化）
+  - **中文剪贴板双通道**：RFB QEMU 扩展剪贴板协议（UTF-8 + zlib 全字符）+ 平台审计中转代理
+  - 归属水印（平铺斜置）/ 品牌签名截图 / 画质三档 / 触屏-鼠标模式记忆持久化
+- **硬隔离浏览器容器（防退出）**：
+  - 只读根文件系统 + CapDrop=ALL + no-new-privileges + 非 root 运行
+  - 唯一挂载本人 Profile 卷（其他用户资料不在容器命名空间内，任何形式不可读）
+  - 下载目录/tmpfs 全部 noexec：下载可执行软件运行即报权限错误
+  - 防退出三重自愈：镜像 supervisor 死循环（退出 1 秒内同一 Profile 拉起）+ RestartPolicy=always + 平台看门狗自动重建（连续 3 轮失败才转 ERROR）
+  - CPU/内存/Pids 硬限制（禁 swap，超限 OOM 硬终止）+ dockyard-sessions 隔离网络
 - Profile 快照：挂载/创建/过期/配额
 - 会话模板（私有/组/全局+继承+变量）、UA池、域名黑白名单、请求篡改规则
 - 会话共享授权（时效/撤销）、代理切换（保留快照重启）
@@ -97,32 +109,40 @@ bun run dev            # http://localhost:3000
 
 ### Docker 部署（host 网络模式 · CDP 端口可变）
 ```bash
-# host 模式：容器直接使用宿主机网络，CDP服务端口通过环境变量改变
+# host 模式：容器直接使用宿主机网络，CDP服务端口/VNC网关桥端口通过环境变量改变
 docker run -d --name dockyard --network host \
   -e PORT=3000 \
   -e CDP_SERVICE_PORT=9222 \
+  -e VNC_BRIDGE_PORT=3005 \
   -e AUTH_SECRET=请修改为随机值 \
   -e ENCRYPTION_KEY=请修改为32字节密钥 \
   -e CRON_SECRET=请修改 \
   -e ADMIN_PASSWORD=初始超管密码 \
+  -e DOCKER_API_URL=http://127.0.0.1:2375 \
+  -e BROWSER_IMAGE=ghcr.io/<owner>/dockyard-browser-platform-browser:latest \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v dockyard-data:/app/db \
   -v dockyard-storage:/app/storage \
   ghcr.io/<owner>/dockyard-browser-platform:latest
 ```
 
-镜像由 GitHub Actions 自动构建推送至 GHCR（`.github/workflows/docker-image.yml`）。
+镜像由 GitHub Actions 自动构建推送至 GHCR：
+- 平台主镜像：`.github/workflows/docker-image.yml`
+- 硬隔离浏览器镜像（supervisor 防退出）：`.github/workflows/docker-browser.yml`（`docker/browser/`）
 
-> 镜像为 **All-In-One 独立服务端完整包**：内置全部依赖、WS枢纽、数据库初始化与自检，启动脚本自动执行 `prisma db push` + 种子 + 目录/端口自检。
+> 镜像为 **All-In-One 独立服务端完整包**：内置全部依赖、WS枢纽、LiveDesk VNC 网关桥（票据HMAC鉴权）、数据库初始化与自检，启动脚本自动执行 `prisma db push` + 种子 + 目录/端口自检（主服务/WS枢纽/VNC桥三进程统一托管与优雅退出）。
 
 ### 外部服务对接（生产环境）
 | 环境变量 | 说明 | 缺省行为 |
 |---|---|---|
 | DOCKER_API_URL | Docker Engine HTTP API 地址 | 本地模拟容器模式 |
+| BROWSER_IMAGE | 自托管硬隔离浏览器镜像 | GHCR 官方 dockyard-browser |
 | STEEL_BROWSER_URL | Steel-Browser API（仅内网） | 模拟会话模式 |
 | NOVNC_POOL_URL | NoVNC 池 API（仅内网） | 模拟桌面模式 |
+| VNC_BRIDGE_PORT / VNC_BRIDGE_SECRET / VNC_BRIDGE_PUBLIC | LiveDesk VNC 网关桥（端口/HMAC密钥/接入形态 gateway\|port\|url） | 3005 / 启动时随机生成 / port |
 | SMTP_HOST/PORT/USER/PASS | 邮件服务 | 模拟邮件（服务端日志输出） |
 
-未配置外部服务时平台全链路可跑（模拟适配器），生产配置后即真实调度。
+未配置外部服务时平台全链路可跑（模拟适配器，含内置演示 RFB 帧缓冲引擎），生产配置后即真实调度。
 
 ### 定时任务（外部 cron）
 ```cron

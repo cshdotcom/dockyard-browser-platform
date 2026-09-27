@@ -48,6 +48,27 @@ export const ENV = {
   get appPort() {
     return Number(process.env.PORT || 3000)
   },
+  // ---- LiveDesk VNC 网关桥 ----
+  get vncBridgeSecret() {
+    // 与 mini-services/vnc-bridge 共享的 HMAC 签名密钥（生产由 start.sh 随机生成注入两侧）
+    return process.env.VNC_BRIDGE_SECRET || "dockyard-dev-vnc-secret"
+  },
+  get vncBridgePort() {
+    return Number(process.env.VNC_BRIDGE_PORT || 3005)
+  },
+  get vncBridgePublic() {
+    // gateway: 经平台统一域名反代（?XTransformPort=桥端口） | port: 同主机独立端口直连 | url: 自定义基地址
+    return (process.env.VNC_BRIDGE_PUBLIC || "gateway") as "gateway" | "port" | "url"
+  },
+  get vncBridgeUrl() {
+    return process.env.VNC_BRIDGE_URL || ""
+  },
+  get browserImage() {
+    return process.env.BROWSER_IMAGE || "ghcr.io/cshdotcom/dockyard-browser:latest" // 自托管硬隔离浏览器镜像
+  },
+  get browserVncPort() {
+    return Number(process.env.BROWSER_VNC_PORT || 5900)
+  },
 }
 
 // 外部服务是否可用（不可用时适配器自动降级为模拟模式，业务链路仍完整可跑）

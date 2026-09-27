@@ -1,0 +1,610 @@
+// ============================================================
+// Dockyard VNC 网关桥（LiveDesk Bridge）
+// 职责：浏览器端 WebSocket ←→ 远程浏览器容器 RFB(TCP) 双向转发
+//   - 单域名统一网关：经平台反向代理（?XTransformPort=3005）或独立端口
+//   - 票据鉴权：HMAC-SHA256 签名 + 60s 有效期 + 单次使用（nonce 防重放）
+//   - 只读票据：服务端丢弃键鼠/剪贴板输入帧（纵深防御，双保险）
+//   - 模拟模式：内置 RFB 3.8 演示帧缓冲引擎（无 Docker 环境全链路可验证）
+//   - 统计：每会话 帧数/字节/键鼠事件/剪贴板回环
+// ============================================================
+
+import { createHmac, timingSafeEqual } from "node:crypto"
+import { deflateSync, inflateSync, constants as zconst } from "node:zlib"
+import net from "node:net"
+
+const PORT = Number(process.env.VNC_BRIDGE_PORT || 3005)
+const SECRET = process.env.VNC_BRIDGE_SECRET || "dockyard-dev-vnc-secret"
+const DEMO_W = 640
+const DEMO_H = 400
+const FRAME_MS = 500 // 演示帧率：2fps 全帧 raw
+const BAND_ROWS = 100 // 每条矩形带 100 行 → 单消息 256KB，规避 WS 单消息上限
+
+// ---------------- 票据 ----------------
+// ticket = b64url(payloadJson) + "." + b64url(hmac(payloadB64))
+// payload: { v: workspaceId, ro: 0|1, exp: epochSec, n: nonce, tgt: {k:"demo"} | {k:"tcp",h,p} }
+
+type DialTarget = { k: "demo" } | { k: "tcp"; h: string; p: number }
+interface TicketPayload { v: string; ro: 0 | 1; exp: number; n: string; tgt: DialTarget }
+
+function b64url(buf: Buffer): string {
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+}
+function b64urlDecode(s: string): Buffer {
+  s = s.replace(/-/g, "+").replace(/_/g, "/")
+  while (s.length % 4 !== 0) s += "="
+  return Buffer.from(s, "base64")
+}
+export function signTicket(p: TicketPayload, secret = SECRET): string {
+  const payloadB = Buffer.from(JSON.stringify(p), "utf8")
+  const payloadB64 = b64url(payloadB)
+  const sig = b64url(createHmac("sha256", secret).update(payloadB64).digest())
+  return payloadB64 + "." + sig
+}
+function verifyTicket(ticket: string): TicketPayload | null {
+  const idx = ticket.lastIndexOf(".")
+  if (idx <= 0) return null
+  const payloadB64 = ticket.slice(0, idx)
+  const sig = ticket.slice(idx + 1)
+  let expect: Buffer
+  try {
+    expect = createHmac("sha256", SECRET).update(payloadB64).digest()
+  } catch {
+    return null
+  }
+  const got = b64urlDecode(sig)
+  const expectBuf = Buffer.from(expect)
+  const gotBuf = Buffer.from(got)
+  if (gotBuf.length !== expectBuf.length || !timingSafeEqual(gotBuf, expectBuf)) return null
+  let p: TicketPayload
+  try {
+    p = JSON.parse(b64urlDecode(payloadB64).toString("utf8")) as TicketPayload
+  } catch {
+    return null
+  }
+  if (typeof p.exp !== "number" || p.exp * 1000 < Date.now()) return null
+  if (!p.v || !p.tgt) return null
+  if (usedNonces.has(p.n)) return null // 单次使用：防重放
+  usedNonces.set(p.n, p.exp)
+  return p
+}
+const usedNonces = new Map<string, number>()
+setInterval(() => {
+  const now = Date.now() / 1000
+  for (const [n, exp] of usedNonces) if (exp < now) usedNonces.delete(n)
+}, 30_000).unref?.()
+
+// ---------------- 会话统计 ----------------
+interface SessStats {
+  frames: number; bytesIn: number; bytesOut: number
+  keys: number; pointers: number; clipRt: number
+  clients: number; startedAt: number; lastAt: number; mode: "demo" | "tcp"
+}
+const statsByWs = new Map<string, SessStats>()
+function statOf(v: string, mode: "demo" | "tcp"): SessStats {
+  let s = statsByWs.get(v)
+  if (!s) {
+    s = { frames: 0, bytesIn: 0, bytesOut: 0, keys: 0, pointers: 0, clipRt: 0, clients: 0, startedAt: Date.now(), lastAt: Date.now(), mode }
+    statsByWs.set(v, s)
+  }
+  s.clients++
+  return s
+}
+
+// ============================================================
+// 演示 RFB 引擎：RFB 3.8 / raw 编码 / 键鼠回显 / 剪贴板回环
+// ============================================================
+
+// 3x5 点阵字体（数字与基础符号 —— 仅演示帧缓冲使用）
+const FONT3x5: Record<string, string[]> = {
+  "0": ["111", "101", "101", "101", "111"],
+  "1": ["010", "110", "010", "010", "111"],
+  "2": ["111", "001", "111", "100", "111"],
+  "3": ["111", "001", "011", "001", "111"],
+  "4": ["101", "101", "111", "001", "001"],
+  "5": ["111", "100", "111", "001", "111"],
+  "6": ["111", "100", "111", "101", "111"],
+  "7": ["111", "001", "001", "010", "010"],
+  "8": ["111", "101", "111", "101", "111"],
+  "9": ["111", "101", "111", "001", "111"],
+  ":": ["000", "010", "000", "010", "000"],
+  ".": ["000", "000", "000", "000", "010"],
+  "-": ["000", "000", "111", "000", "000"],
+  " ": ["000", "000", "000", "000", "000"],
+}
+
+// 品牌锚形徽标 16x16
+const LOGO_ROWS = [
+  "................",
+  "......####......",
+  "......#..#......",
+  "......#..#......",
+  "..############..",
+  "..#...#..#...#..",
+  "..#...#..#...#..",
+  "..#...#..#...#..",
+  "...#..#..#..#...",
+  "....#.#..#.#....",
+  ".....##..##.....",
+  "......####......",
+  "......#..#......",
+  "......####......",
+  "................",
+  "................",
+]
+
+// ---- QEMU 扩展剪贴板协议常量（与 noVNC 对齐：UTF-8 中文全字符支持）----
+const CLIP_FORMAT_TEXT = 1
+const CLIP_ACTION_CAPS = 1 << 24
+const CLIP_ACTION_REQUEST = 1 << 25
+const CLIP_ACTION_PEEK = 1 << 26
+const CLIP_ACTION_NOTIFY = 1 << 27
+const CLIP_ACTION_PROVIDE = 1 << 28
+
+function u32be(v: number): Buffer {
+  const b = Buffer.alloc(4)
+  b.writeUInt32BE(v >>> 0, 0)
+  return b
+}
+
+class DemoRfbSession {
+  private buf = Buffer.alloc(0)
+  private closed = false
+  private pending = false
+  private lastSendAt = 0
+  private hsStage = 0 // 握手状态：0=待版本 1=待安全类型选择 2=待共享标志 3=协议消息
+  private fb = new Uint8Array(DEMO_W * DEMO_H * 4)
+  private ptr = { x: DEMO_W / 2, y: DEMO_H / 2, active: false }
+  private blooms: { x: number; y: number; r: number; hue: number; age: number }[] = []
+  private keysTotal = 0
+  private pointersTotal = 0
+  private remoteClipboard: string | null = null
+  private timer: ReturnType<typeof setInterval>
+  constructor(
+    private ws: { send(data: Uint8Array): void; close(): void },
+    private readonly: boolean,
+    private stats: SessStats,
+  ) {
+    this.timer = setInterval(() => this.tick(), FRAME_MS)
+    this.timer.unref?.()
+    // 1. 版本协商：服务端宣告 RFB 003.008
+    this.ws.send(Buffer.from("RFB 003.008\n", "ascii"))
+  }
+
+  onData(chunk: Buffer) {
+    if (this.closed) return
+    this.buf = this.buf.length === 0 ? chunk : Buffer.concat([this.buf, chunk])
+    if (this.buf.length > 512 * 1024) return this.ws.close() // 异常超大输入 → 断开
+    this.pumpHandshake()
+    if (this.closed || this.hsStage !== 3) return
+    this.pump()
+  }
+
+  // ---- RFB 3.8 接收侧握手状态机 ----
+  private pumpHandshake() {
+    if (this.hsStage === 0) {
+      if (this.buf.length < 12) return
+      this.buf = this.buf.subarray(12) // 客户端版本（内容不校验，以服务端宣告为准）
+      this.ws.send(Buffer.from([1, 1])) // 安全类型数量1：None(1)
+      this.hsStage = 1
+    }
+    if (this.hsStage === 1) {
+      if (this.buf.length < 1) return
+      const choice = this.buf[0]
+      this.buf = this.buf.subarray(1)
+      if (choice !== 1) { this.closed = true; return this.ws.close() } // 仅支持 None
+      const r = Buffer.alloc(4)
+      r.writeUInt32BE(0, 0) // 安全结果 OK
+      this.ws.send(r)
+      this.hsStage = 2
+    }
+    if (this.hsStage === 2) {
+      if (this.buf.length < 1) return
+      this.buf = this.buf.subarray(1) // ClientInit shared 标志（忽略，恒共享）
+      this.hsStage = 3
+      this.sendServerInit()
+    }
+  }
+
+  private sendServerInit() {
+    const name = Buffer.from("Dockyard LiveDesk · Isolated Sandbox Framebuffer", "utf8")
+    const head = Buffer.alloc(24)
+    head.writeUInt16BE(DEMO_W, 0)
+    head.writeUInt16BE(DEMO_H, 2)
+    // PixelFormat(16B)：32bpp / depth24 / LE / trueColor / max255×3 / shift16,8,0
+    head.writeUInt8(32, 4); head.writeUInt8(24, 5); head.writeUInt8(0, 6); head.writeUInt8(1, 7)
+    head.writeUInt16BE(255, 8); head.writeUInt16BE(255, 10); head.writeUInt16BE(255, 12)
+    head.writeUInt8(16, 14); head.writeUInt8(8, 15); head.writeUInt8(0, 16)
+    head.writeUInt32BE(name.length, 20)
+    this.ws.send(Buffer.concat([head, name]))
+    this.stats.lastAt = Date.now()
+    // 宣告扩展剪贴板能力：Text 格式 + 服务端支持的全部动作
+    // （Caps/Request/Notify/Provide —— 客户端据此走扩展通道：UTF-8 全字符 + zlib）
+    this.sendExtCut(CLIP_ACTION_CAPS | CLIP_ACTION_REQUEST | CLIP_ACTION_PEEK | CLIP_ACTION_NOTIFY | CLIP_ACTION_PROVIDE, CLIP_FORMAT_TEXT, u32be(0))
+  }
+
+  // ---- 扩展剪贴板：服务端→客户端 ServerCutText(extended) ----
+  private sendExtCut(action: number, formats: number, payload: Buffer) {
+    const data = Buffer.concat([u32be(action | formats), payload])
+    const head = Buffer.alloc(8)
+    head.writeUInt8(3, 0) // ServerCutText
+    head.writeInt32BE(-data.length, 4) // 负长度 = 扩展消息
+    this.ws.send(Buffer.concat([head, data]))
+  }
+
+  // 服务端→客户端提供文本（触发客户端 clipboard 事件回显）
+  private sendExtProvide(text: string) {
+    const utf8 = Buffer.from(text + "\0", "utf8")
+    const body = Buffer.concat([u32be(utf8.length), utf8])
+    this.sendExtCut(CLIP_ACTION_PROVIDE, CLIP_FORMAT_TEXT, deflateSync(body))
+  }
+
+  private pump() {
+    while (!this.closed && this.buf.length > 0) {
+      const t = this.buf[0]
+      if (t === 0) { // SetPixelFormat: 1 + 3pad + 16 + 3pad
+        if (this.buf.length < 20) return
+        this.buf = this.buf.subarray(20)
+      } else if (t === 2) { // SetEncodings: 1 + 1pad + 2 + 4n
+        if (this.buf.length < 4) return
+        const n = this.buf.readUInt16BE(2)
+        const need = 4 + 4 * n
+        if (this.buf.length < need) return
+        this.buf = this.buf.subarray(need)
+      } else if (t === 3) { // FramebufferUpdateRequest: 10
+        if (this.buf.length < 10) return
+        this.buf = this.buf.subarray(10)
+        this.pending = true
+      } else if (t === 4) { // KeyEvent: 1 + 1down + 2pad + 4keysym
+        if (this.buf.length < 8) return
+        const down = this.buf[1] === 1
+        const keysym = this.buf.readUInt32BE(4)
+        this.buf = this.buf.subarray(8)
+        if (!this.readonly && down) {
+          this.keysTotal++
+          this.stats.keys++
+          this.blooms.push({ x: 60 + Math.random() * (DEMO_W - 120), y: 80 + Math.random() * (DEMO_H - 160), r: 2, hue: (keysym * 47) % 360, age: 0 })
+          if (this.blooms.length > 24) this.blooms.shift()
+          this.kick()
+        }
+      } else if (t === 5) { // PointerEvent: 1mask + 2x + 2y
+        if (this.buf.length < 6) return
+        const x = this.buf.readUInt16BE(2)
+        const y = this.buf.readUInt16BE(4)
+        this.buf = this.buf.subarray(6)
+        if (!this.readonly) {
+          this.ptr = { x: Math.min(x, DEMO_W - 1), y: Math.min(y, DEMO_H - 1), active: true }
+          this.pointersTotal++
+          this.stats.pointers++
+          this.kick()
+        }
+      } else if (t === 6) { // ClientCutText：经典(latin1) 与 扩展(UTF-8+zlib) 双通道
+        if (this.buf.length < 8) return
+        const cutLen = this.buf.readInt32BE(4)
+        if (cutLen >= 0) {
+          // 经典：text 为 latin1（noVNC 兼容路径）
+          if (cutLen > 8192) return this.ws.close()
+          if (this.buf.length < 8 + cutLen) return
+          const text = this.buf.subarray(8, 8 + cutLen).toString("utf8")
+          this.buf = this.buf.subarray(8 + cutLen)
+          if (!this.readonly && text) {
+            this.stats.clipRt++
+            const reply = Buffer.from(`[LiveDesk] 已收到 ${text.length} 字符: ${text.slice(0, 64)}`, "utf8")
+            const head = Buffer.alloc(8)
+            head.writeUInt8(3, 0) // ServerCutText
+            head.writeUInt32BE(reply.length, 4)
+            this.ws.send(Buffer.concat([head, reply]))
+          }
+        } else {
+          // 扩展：负长度 → data = flags(4B) + payload(zlib)
+          const dataLen = -cutLen
+          if (dataLen > 65536) return this.ws.close()
+          if (this.buf.length < 8 + dataLen) return
+          const data = this.buf.subarray(8, 8 + dataLen)
+          this.buf = this.buf.subarray(8 + dataLen)
+          if (!this.readonly && data.length >= 4) {
+            const flags = data.readUInt32BE(0)
+            const actions = flags & 0xff000000
+            const formats = flags & 0xffff
+            const payload = Buffer.from(data.subarray(4))
+            if (actions === CLIP_ACTION_PROVIDE && formats & CLIP_FORMAT_TEXT) {
+              // 客户端提交文本（UTF-8 + zlib）：解压 → 回显服务端 Provide
+              // noVNC/pako 使用 Z_FULL_FLUSH 流（无终止块）→ finishFlush 到同步边界
+              try {
+                const raw = inflateSync(payload, { finishFlush: zconst.Z_SYNC_FLUSH })
+                if (raw.length >= 4) {
+                  const size = Math.min(raw.readUInt32BE(0), raw.length - 4)
+                  const text = raw.subarray(4, 4 + size).toString("utf8").replace(/\0+$/, "")
+                  if (text) {
+                    this.stats.clipRt++
+                    this.remoteClipboard = text
+                    this.sendExtProvide(`[LiveDesk] 已收到 ${text.length} 字符: ${text.slice(0, 128)}`)
+                  }
+                }
+              } catch { /* zlib 解压失败：忽略 */ }
+            } else if (actions === CLIP_ACTION_NOTIFY && formats & CLIP_FORMAT_TEXT) {
+              // 客户端宣告有文本 → 请求提供
+              this.sendExtCut(CLIP_ACTION_REQUEST, CLIP_FORMAT_TEXT, Buffer.alloc(0))
+            } else if (actions === CLIP_ACTION_PEEK) {
+              if (this.remoteClipboard) this.sendExtCut(CLIP_ACTION_NOTIFY, CLIP_FORMAT_TEXT, Buffer.alloc(0))
+            } else if (actions === CLIP_ACTION_REQUEST) {
+              if (this.remoteClipboard) this.sendExtProvide(this.remoteClipboard)
+            }
+            // Caps（客户端能力宣告）：连接时已协商，无需响应
+          }
+        }
+      } else {
+        return this.ws.close() // 未知消息类型：协议错误
+      }
+    }
+  }
+
+  private kick() {
+    if (this.hsStage !== 3) return
+    if (Date.now() - this.lastSendAt > 150) this.sendFrame()
+  }
+  private tick() {
+    if (this.closed || this.hsStage !== 3) return
+    if (this.pending || (this.lastSendAt > 0 && Date.now() - this.lastSendAt > 2500)) this.sendFrame()
+  }
+  private sendFrame() {
+    if (this.closed) return
+    this.pending = false
+    this.render(Date.now())
+    for (let y = 0; y < DEMO_H; y += BAND_ROWS) {
+      const h = Math.min(BAND_ROWS, DEMO_H - y)
+      const head = Buffer.alloc(12)
+      head.writeUInt8(0, 0) // FramebufferUpdate
+      head.writeUInt16BE(1, 2) // 1 rect
+      head.writeUInt16BE(0, 4) // x
+      head.writeUInt16BE(y, 6) // y
+      head.writeUInt16BE(DEMO_W, 8) // w
+      head.writeUInt16BE(h, 10) // h
+      // 编码 int32 BE 0 (raw) 追加在 rect 头后
+      const enc = Buffer.alloc(4)
+      enc.writeInt32BE(0, 0)
+      const data = Buffer.from(this.fb.buffer, this.fb.byteOffset + y * DEMO_W * 4, DEMO_W * h * 4)
+      const msg = Buffer.concat([head, enc, data])
+      this.ws.send(new Uint8Array(msg))
+    }
+    this.lastSendAt = Date.now()
+    this.stats.frames++
+    this.stats.lastAt = Date.now()
+  }
+
+  // ---- 演示帧渲染 ----
+  private render(t: number) {
+    const fb = this.fb
+    const W = DEMO_W, H = DEMO_H
+    const put = (i: number, r: number, g: number, b: number) => {
+      fb[i] = b; fb[i + 1] = g; fb[i + 2] = r // LE: (r<<16)|(g<<8)|b → 字节序 B,G,R,0
+    }
+    // 1) 深色渐变底
+    for (let y = 0; y < H; y++) {
+      const k = y / H
+      const r = Math.round(10 + 8 * k), g = Math.round(20 + 14 * k), b = Math.round(26 + 18 * k)
+      for (let x = 0; x < W; x++) put((y * W + x) * 4, r, g, b)
+    }
+    // 2) 流动对角光带 ×2
+    const bands = [{ speed: 0.06, width: 60, off: 0 }, { speed: -0.04, width: 36, off: 300 }]
+    for (const bd of bands) {
+      const pos = (t * bd.speed + bd.off) % (W + H + 600)
+      for (let y = 0; y < H; y += 2) {
+        for (let x = 0; x < W; x += 2) {
+          const d = Math.abs(x + y - pos)
+          if (d < bd.width) {
+            const f = (1 - d / bd.width) * 0.22
+            const i = (y * W + x) * 4
+            put(i, Math.min(255, fb[i + 2] + 255 * f * 0.3), Math.min(255, fb[i + 1] + 255 * f), Math.min(255, fb[i] + 255 * f * 0.5))
+          }
+        }
+      }
+    }
+    // 3) 网格
+    for (let y = 0; y < H; y += 40) for (let x = 0; x < W; x++) { const i = (y * W + x) * 4; put(i, fb[i + 2] + 6, fb[i + 1] + 10, fb[i] + 10) }
+    for (let x = 0; x < W; x += 40) for (let y = 0; y < H; y++) { const i = (y * W + x) * 4; put(i, fb[i + 2] + 6, fb[i + 1] + 10, fb[i] + 10) }
+    // 4) 顶部状态条
+    for (let y = 0; y < 30; y++) for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4
+      put(i, 6, 12, 16)
+    }
+    for (let x = 0; x < W; x++) put((29 * W + x) * 4, 20, 240, 190) // 顶部亮线
+    // 5) 时钟 + 计数器（3x5 字体 ×2）
+    const d = new Date()
+    const hh = String(d.getHours()).padStart(2, "0"), mm = String(d.getMinutes()).padStart(2, "0"), ss = String(d.getSeconds()).padStart(2, "0")
+    this.text(`${hh}:${mm}:${ss}`, 12, 8, 2, 94, 244, 212)
+    // 6) 中央品牌锚标（16x16 ×6，带光晕）
+    const scale = 6, lw = 16, cx = Math.round(W / 2 - (lw * scale) / 2), cy = Math.round(H / 2 - (lw * scale) / 2) - 10
+    for (let r = 0; r < lw; r++) for (let c = 0; c < lw; c++) {
+      if (LOGO_ROWS[r][c] !== "#") continue
+      for (let dy = 0; dy < scale; dy++) for (let dx = 0; dx < scale; dx++) {
+        const i = ((cy + r * scale + dy) * W + (cx + c * scale + dx)) * 4
+        if (i > 0 && i < fb.length - 3) put(i, 32, 225, 178)
+      }
+    }
+    // 7) 底部计数条
+    for (let y = H - 26; y < H; y++) for (let x = 0; x < W; x++) { const i = (y * W + x) * 4; put(i, 5, 9, 12) }
+    this.text(`${this.keysTotal}-${this.pointersTotal}-${this.stats.frames}`, 12, H - 16, 1, 130, 160, 155)
+    // 8) 按键绽放环
+    for (const bl of this.blooms) {
+      bl.r += 1.6; bl.age++
+      const rr = Math.round(bl.r), thick = 2
+      const [br, bg] = hslToRgb(bl.hue / 360, 0.75, 0.6)
+      for (let a = 0; a < 360; a += 3) {
+        const px = Math.round(bl.x + rr * Math.cos((a * Math.PI) / 180))
+        const py = Math.round(bl.y + rr * Math.sin((a * Math.PI) / 180))
+        for (let t2 = 0; t2 < thick; t2++) {
+          const i = ((py + t2) * W + px) * 4
+          if (px >= 0 && px < W && py >= 0 && py < H && i < fb.length - 3) put(i, br, bg, 200)
+        }
+      }
+    }
+    this.blooms = this.blooms.filter((b) => b.r < 90)
+    // 9) 指针十字准星
+    if (this.ptr.active) {
+      const { x, y } = this.ptr
+      for (let dx = -6; dx <= 6; dx++) {
+        if (Math.abs(dx) < 2) continue
+        const i = (y * W + Math.min(W - 1, Math.max(0, x + dx))) * 4
+        if (i >= 0 && i < fb.length - 3) put(i, 240, 250, 255)
+      }
+      for (let dy = -6; dy <= 6; dy++) {
+        if (Math.abs(dy) < 2) continue
+        const py = Math.min(H - 1, Math.max(0, y + dy))
+        const i = (py * W + x) * 4
+        if (i >= 0 && i < fb.length - 3) put(i, 240, 250, 255)
+      }
+      const i = (y * W + x) * 4
+      put(i, 30, 235, 185)
+    }
+  }
+  private text(s: string, x0: number, y0: number, scale: number, r: number, g: number, b: number) {
+    const fb = this.fb, W = DEMO_W, H = DEMO_H
+    let x = x0
+    for (const ch of s) {
+      const glyph = FONT3x5[ch] || FONT3x5[" "]
+      for (let gy = 0; gy < 5; gy++) for (let gx = 0; gx < 3; gx++) {
+        if (glyph[gy][gx] !== "1") continue
+        for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) {
+          const px = x + gx * scale + sx, py = y0 + gy * scale + sy
+          if (px < 0 || px >= W || py < 0 || py >= H) continue
+          const i = (py * W + px) * 4
+          fb[i] = b; fb[i + 1] = g; fb[i + 2] = r
+        }
+      }
+      x += 4 * scale
+    }
+  }
+
+  close() {
+    if (this.closed) return
+    this.closed = true
+    clearInterval(this.timer)
+  }
+}
+
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const f = (n: number) => {
+    const k = (n + h * 12) % 12
+    const a = s * Math.min(l, 1 - l)
+    return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1)))))
+  }
+  return [f(0), f(8), f(4)]
+}
+
+// ---------------- TCP 会话（真实容器 RFB 转发） ----------------
+class TcpSession {
+  private socket: net.Socket | null = null
+  private closed = false
+  constructor(
+    private ws: { send(data: Uint8Array): void; close(): void },
+    target: { h: string; p: number },
+    private stats: SessStats,
+  ) {
+    this.socket = net.createConnection({ host: target.h, port: target.p })
+    this.socket.setTimeout(8000, () => {
+      this.close()
+    })
+    this.socket.on("connect", () => {
+      this.socket?.setTimeout(0)
+      this.stats.lastAt = Date.now()
+    })
+    this.socket.on("data", (d: Buffer) => {
+      this.stats.bytesOut += d.length
+      this.stats.lastAt = Date.now()
+      try { this.ws.send(new Uint8Array(d)) } catch { this.close() }
+    })
+    this.socket.on("error", () => this.close())
+    this.socket.on("close", () => this.close())
+  }
+  onData(chunk: Uint8Array) {
+    if (this.closed || !this.socket) return
+    this.stats.bytesIn += chunk.byteLength
+    this.socket.write(chunk)
+  }
+  close() {
+    if (this.closed) return
+    this.closed = true
+    try { this.socket?.destroy() } catch { /* noop */ }
+    try { this.ws.close() } catch { /* noop */ }
+  }
+}
+
+// ---------------- HTTP / WS 服务 ----------------
+interface WsData { v: string; ro: boolean; tgt: DialTarget; sess: DemoRfbSession | TcpSession | null; stats: SessStats }
+
+// Bun 运行时全局服务接口（bun --hot 执行；类型宽松声明避免额外依赖）
+declare const Bun: { serve<T = unknown>(cfg: Record<string, unknown>): { stop(force?: boolean): void } }
+
+const server = Bun.serve<WsData>({
+  port: PORT,
+  fetch(req, srv) {
+    const u = new URL(req.url)
+    if (u.pathname === "/health") {
+      return Response.json({ ok: true, port: PORT, uptimeSec: Math.round(process.uptime()), workspaces: statsByWs.size })
+    }
+    if (u.pathname === "/stats") {
+      const ws = u.searchParams.get("ws")
+      if (ws) {
+        const s = statsByWs.get(ws)
+        if (!s) return Response.json({ ok: false, msg: "无该会话统计" }, { status: 404 })
+        return Response.json({ ok: true, stats: s })
+      }
+      return Response.json({ ok: true, all: Object.fromEntries(statsByWs) })
+    }
+    if (u.pathname === "/internal/nonce-count") {
+      // 运维自检：观察防重放注册表规模
+      return Response.json({ ok: true, nonces: usedNonces.size })
+    }
+    // WS 升级：/ 或 /vnc/<workspaceId>（生产独立端口直连形态）
+    const isVncPath = u.pathname === "/" || u.pathname.startsWith("/vnc/")
+    if (isVncPath && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      const vnc = u.searchParams.get("vnc") || u.pathname.replace(/^\/vnc\//, "").split("/")[0]
+      const ticket = u.searchParams.get("ticket") || ""
+      if (!vnc) return new Response("缺少 vnc 参数", { status: 400 })
+      const payload = verifyTicket(ticket)
+      if (!payload || payload.v !== vnc) return new Response("票据无效或已过期", { status: 401 })
+      if (srv.upgrade(req, { data: { v: vnc, ro: payload.ro === 1, tgt: payload.tgt, sess: null, stats: statOf(vnc, payload.tgt.k === "demo" ? "demo" : "tcp") } })) {
+        return
+      }
+      return new Response("升级失败", { status: 500 })
+    }
+    return new Response("Not Found", { status: 404 })
+  },
+  websocket: {
+    open(ws) {
+      const d = ws.data
+      if (d.tgt.k === "demo") {
+        d.sess = new DemoRfbSession(
+          { send: (b) => ws.send(b), close: () => ws.close() },
+          d.ro,
+          d.stats,
+        )
+      } else {
+        d.sess = new TcpSession(
+          { send: (b) => ws.send(b), close: () => ws.close() },
+          { h: d.tgt.h, p: d.tgt.p },
+          d.stats,
+        )
+      }
+    },
+    message(ws, message) {
+      const d = ws.data
+      const bytes = typeof message === "string" ? Buffer.from(message, "utf8") : (message as Uint8Array)
+      d.stats.bytesIn += bytes.byteLength
+      d.sess?.onData(Buffer.from(bytes))
+    },
+    close(ws) {
+      const d = ws.data
+      d.stats.clients = Math.max(0, d.stats.clients - 1)
+      d.stats.lastAt = Date.now()
+      d.sess?.close()
+      d.sess = null
+    },
+  },
+})
+
+console.log(`[vnc-bridge] LiveDesk 桥已启动: 端口 ${PORT}（票据HMAC校验/单次防重放/只读服务端强制）`)
+
+// 优雅退出
+process.on("SIGTERM", () => { server.stop(true); process.exit(0) })
+process.on("SIGINT", () => { server.stop(true); process.exit(0) })
