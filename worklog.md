@@ -197,3 +197,17 @@ Work Log:
 
 Stage Summary:
 - 本轮任务全部完成：功能实现 + 鉴权防护 + 源码推送 + 容器编译成功监控 + 双镜像发布
+
+---
+Task ID: 7
+Agent: main
+Task: 最终收尾 — 僵死 runner 处置与终态确认
+
+Work Log:
+- 3e808d4 主镜像构建 110 分钟无缓存产出（runner 僵死）→ API 取消 → rerun（attempt 2）
+- 重跑 14 分钟成功：attempt 2 / success，镜像 07:11 UTC 推送 GHCR
+- 终态：3e808d4（Lint✅/Image✅）、696ef48（Lint✅/Image✅）、f10da2d（Lint✅/Image✅）、3a82c9d（三工作流✅）
+- ghcr.io/cshdotcom/dockyard-browser-platform:latest 与 -browser:latest 双镜像多架构在线
+
+Stage Summary:
+- 用户本轮要求全部达成：网络访问管控 + 鉴权防护 + 源码推送 + 容器编译成功
