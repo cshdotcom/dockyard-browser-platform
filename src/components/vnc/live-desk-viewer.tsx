@@ -43,7 +43,7 @@ const QUALITY_MAP: Record<string, number> = { low: 3, mid: 6, high: 9 }
 // 轻量设备指纹（水印标识用，不采集敏感信息）
 function deviceTag(): string {
   if (typeof navigator === "undefined") return "------"
-  const s = navigator.userAgent + "|" + (navigator.language || "") + "|" + ((screen && screen.width) || 0) + "x" + ((screen && screen.height) || 0)
+  const s = navigator.userAgent + "|" + (navigator.language || "") + "|" + ((typeof screen !== "undefined" && screen && screen.width) || 0) + "x" + ((typeof screen !== "undefined" && screen && screen.height) || 0)
   let h = 5381
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0
   return h.toString(16).padStart(6, "0").slice(0, 6)

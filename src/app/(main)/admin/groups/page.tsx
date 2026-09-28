@@ -75,6 +75,8 @@ export default async function AdminGroupsPage() {
     reservedQuota: (g.reservedQuota as Record<string, number | null> | null) || null,
     tags: Array.isArray(g.tags) ? (g.tags as unknown[]).filter((t): t is string => typeof t === "string") : [],
     force2fa: g.force2fa,
+    allowInternalNetwork: g.allowInternalNetwork,
+    allowSecureLocationAccess: g.allowSecureLocationAccess,
     policy: (g.policy as Record<string, unknown> | null) || null,
     userCount: (membersByGroup.get(g.id) || []).length,
     proxyBindings: (proxiesByGroup.get(g.id) || []).map((p) => p.name),

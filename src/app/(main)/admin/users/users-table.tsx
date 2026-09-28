@@ -5,7 +5,7 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, Users2 } from "lucide-react"
+import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2 } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { Button } from "@/components/ui/button"
@@ -26,6 +26,7 @@ import {
   importUsersCsvAction, batchSetUserStatusAction, batchMoveGroupAction, batchResetQuotaAction,
   kickUserSessionsAction, deleteUserAction, unlockUserAction, adminResetPasswordAction,
   setForce2faAction, resetUserTotpAction, clearTrustedDevicesAction, resetBackupCodesAction,
+  setUserNetworkPolicyAction,
   type CsvImportReport,
 } from "@/server/actions/users"
 import { UserFormDialog, type GroupOption } from "./user-form"
@@ -49,6 +50,9 @@ export interface AdminUserRow {
   lastLoginIp: string | null
   createdAt: string
   groups: string[]
+  allowInternalNetwork: boolean | null // 用户级覆盖（null=继承组）
+  allowSecureLocationAccess: boolean | null
+  netPolicy: { allowInternalNetwork: boolean; allowSecureLocationAccess: boolean; source: string } | null // 生效快照
 }
 
 interface UsersTableProps {
@@ -68,6 +72,35 @@ const ROLE_LABEL: Record<string, string> = {
   ADMIN: "管理员",
   GROUP_ADMIN: "组管理员",
   USER: "用户",
+}
+
+const POLICY_SOURCE_LABEL: Record<string, string> = {
+  USER: "用户覆盖",
+  GROUP: "组继承",
+  GLOBAL_DEFAULT: "全局默认",
+}
+
+// 网络策略徽章：内网 / 容器安全位置（生效值 + 覆盖来源）
+function NetPolicyCell({ row }: { row: AdminUserRow }) {
+  const np = row.netPolicy
+  const ov = (v: boolean | null) => (v === null ? "" : "（覆盖）")
+  return (
+    <div className="space-y-1 text-xs">
+      <div className="flex items-center gap-1.5">
+        <span className={np?.allowInternalNetwork ? "text-emerald-600" : "text-rose-600"}>
+          {np?.allowInternalNetwork ? "内网✓" : "内网✕"}
+        </span>
+        {ov(row.allowInternalNetwork) && <Badge variant="secondary" className="text-[9px] px-1">覆盖</Badge>}
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className={np?.allowSecureLocationAccess ? "text-emerald-600" : "text-rose-600"}>
+          {np?.allowSecureLocationAccess ? "安全位置✓" : "安全位置✕"}
+        </span>
+        {ov(row.allowSecureLocationAccess) && <Badge variant="secondary" className="text-[9px] px-1">覆盖</Badge>}
+      </div>
+      <p className="text-[10px] text-muted-foreground">{POLICY_SOURCE_LABEL[np?.source || "GLOBAL_DEFAULT"] || np?.source}</p>
+    </div>
+  )
 }
 
 export function UsersTable({ rows, total, page, pageSize, keyword, sortField, sortOrder, filters, groupOptions }: UsersTableProps) {
@@ -226,6 +259,11 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
       ),
     },
     {
+      key: "netPolicy",
+      title: "网络策略",
+      render: (row: AdminUserRow) => <NetPolicyCell row={row} />,
+    },
+    {
       key: "lastLoginAt",
       title: "最后登录",
       sortable: true,
@@ -304,6 +342,38 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
               }
             >
               重置备份码
+            </DropdownMenuItem>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>
+            <ShieldBan className="mr-1.5 h-4 w-4" /> 网络访问策略
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent className="w-60">
+            <p className="px-2 py-1 text-[11px] text-muted-foreground">
+              内网（当前：{row.netPolicy?.allowInternalNetwork ? "允许" : "禁止"}{row.allowInternalNetwork !== null ? "·覆盖" : ""}）
+            </p>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: true, allowSecureLocationAccess: row.allowSecureLocationAccess }))}>
+              允许访问内网
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: false, allowSecureLocationAccess: row.allowSecureLocationAccess }))}>
+              禁止访问内网
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: null, allowSecureLocationAccess: row.allowSecureLocationAccess }))}>
+              内网：恢复继承组/全局
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <p className="px-2 py-1 text-[11px] text-muted-foreground">
+              容器安全位置（当前：{row.netPolicy?.allowSecureLocationAccess ? "允许" : "禁止"}{row.allowSecureLocationAccess !== null ? "·覆盖" : ""}）
+            </p>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: row.allowInternalNetwork, allowSecureLocationAccess: true }))}>
+              允许访问安全位置
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: row.allowInternalNetwork, allowSecureLocationAccess: false }))}>
+              禁止访问安全位置
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: row.allowInternalNetwork, allowSecureLocationAccess: null }))}>
+              安全位置：恢复继承组/全局
             </DropdownMenuItem>
           </DropdownMenuSubContent>
         </DropdownMenuSub>

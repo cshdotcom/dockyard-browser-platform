@@ -30,6 +30,8 @@ export interface AdminGroupNode {
   reservedQuota: Record<string, number | null> | null
   tags: string[]
   force2fa: boolean
+  allowInternalNetwork: boolean
+  allowSecureLocationAccess: boolean
   policy: Record<string, unknown> | null
   userCount: number
   proxyBindings: string[]
@@ -128,6 +130,8 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
               <span className="font-medium truncate">{node.name}</span>
               {!node.enabled && <Badge variant="outline">已禁用</Badge>}
               {node.force2fa && <Badge variant="destructive" className="text-[10px]">强制2FA</Badge>}
+              {node.allowInternalNetwork && <Badge className="text-[10px] bg-amber-100 text-amber-800 hover:bg-amber-100">内网✓</Badge>}
+              {node.allowSecureLocationAccess && <Badge className="text-[10px] bg-amber-100 text-amber-800 hover:bg-amber-100">安全位置✓</Badge>}
               {lockCount > 0 && <Badge variant="secondary" className="text-[10px]">权限锁×{lockCount}</Badge>}
               {node.tags.slice(0, 3).map((t) => (
                 <Badge key={t} variant="outline" className="text-[10px] max-w-24 truncate">{t}</Badge>

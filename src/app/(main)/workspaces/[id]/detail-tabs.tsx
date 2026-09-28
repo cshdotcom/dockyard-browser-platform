@@ -7,7 +7,7 @@ import { toast } from "sonner"
 import {
   ArrowLeft, Globe, MonitorPlay, Share2, FileJson, Terminal, Clipboard, MousePointer2, Hand,
   RefreshCw, ShieldCheck, Wifi, Loader2, Trash2, Lock, Play, StopCircle, Copy, Anchor,
-  RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon,
+  RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon, Network, FileLock2,
 } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -355,6 +355,36 @@ function IsolationPanel({ hardening, containerRef }: { hardening: Record<string,
       title: "资源硬限制",
       desc: `CPU ${String(h.cpuLimit ?? "-")} 核 / 内存 ${String(h.memLimitMb ?? "-")}MB / Pids ${String(h.pidsLimit ?? "-")}，超限 OOM 硬终止`,
     },
+    {
+      ok: h.allowInternalNetwork !== true,
+      icon: <Network className="h-4 w-4" />,
+      title: h.allowInternalNetwork === true ? "内网访问：管理员已放行" : "内网访问拦截",
+      desc:
+        h.allowInternalNetwork === true
+          ? "管理员授权该用户/组访问私有网段（10/172.16/192.168/169.254 等）"
+          : "私有网段/链路本地/云元数据全部拦截（Chromium 托管策略 URLBlocklist + WebRTC 防泄漏）",
+    },
+    {
+      ok: h.allowSecureLocationAccess !== true,
+      icon: <FileLock2 className="h-4 w-4" />,
+      title: h.allowSecureLocationAccess === true ? "安全位置：管理员已放行" : "安全位置拦截",
+      desc:
+        h.allowSecureLocationAccess === true
+          ? "管理员授权访问容器内安全位置（本机 CDP/VNC、file://、平台内部端点）"
+          : "本机 CDP:9222/VNC:5900、file:// 协议、chrome:// 管理页、平台内部端点全部封禁；代理设置锁定不可改",
+    },
+    {
+      ok: h.policyManagedChromium === true,
+      icon: <LockKeyhole className="h-4 w-4" />,
+      title: "Chromium 托管策略锁",
+      desc: "网络策略以只读 bind-mount 注入（/etc/chromium/policies/managed），只读根 FS 下沙箱内无法篡改",
+    },
+    {
+      ok: h.iccDisabledNetwork !== false,
+      icon: <Ban className="h-4 w-4" />,
+      title: "容器互访封禁（ICC）",
+      desc: "会话网络容器间互访封禁，跨用户浏览器网络不可达（防横向探测）",
+    },
   ]
   return (
     <Card>
@@ -370,7 +400,8 @@ function IsolationPanel({ hardening, containerRef }: { hardening: Record<string,
         </CardTitle>
         <CardDescription>
           每个会话运行在独立硬隔离容器中：用户无法以任何形式退出浏览器（闪退后立即恢复同一配置环境）；
-          对其他用户资料与任何其他文件无读取权限；下载软件运行直接报权限错误。
+          对其他用户资料与任何其他文件无读取权限；下载软件运行直接报权限错误；
+          网络访问按管理员策略执行（内网 / 容器安全位置，默认全部拒绝）。
         </CardDescription>
       </CardHeader>
       <CardContent>

@@ -38,6 +38,9 @@ model User {
   lastLoginCountry    String?
   frozen              Boolean   @default(false) // 永久冻结
   permissionLocks     Json? // 用户级权限锁覆盖
+  // —— 网络访问管控（管理员按用户覆盖；null=继承所属组，组缺失时用全局默认）——
+  allowInternalNetwork      Boolean? // 允许浏览器会话访问内网（RFC1918/链路本地/云元数据）
+  allowSecureLocationAccess Boolean? // 允许访问容器内安全位置（CDP/VNC本机端口、file://、平台内部端点）
   loginSessionCount   Int       @default(0)
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -180,6 +183,8 @@ model Group {
   tags             Json? // ["标签"]
   webhookUrl       String?
   force2fa         Boolean  @default(false) // 组级强制2FA
+  allowInternalNetwork       Boolean  @default(false) // 组级：允许访问内网（成员默认继承）
+  allowSecureLocationAccess  Boolean  @default(false) // 组级：允许访问容器内安全位置
   policy           Json? // 组级权限锁 / 生命周期默认策略
   createdByUserId  String?
   createdAt        DateTime @default(now())
@@ -552,6 +557,7 @@ model BrowserWorkspace {
   expireAt           DateTime?
   containerRef       String?  // 自托管硬隔离浏览器容器（name/id，防退出看门狗自愈目标）
   hardeningJson      Json?    // 隔离防护快照（只读根FS/CapDrop/noexec下载/独立Profile卷/防退出循环）
+  networkPolicyJson  Json?    // 生效网络策略快照 { allowInternalNetwork, allowSecureLocationAccess, source, enforcedAt }
   createdByUserId    String?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt

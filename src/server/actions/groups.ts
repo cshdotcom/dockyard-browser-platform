@@ -6,7 +6,7 @@ import { z } from "zod"
 import { Prisma } from "@prisma/client"
 import { db } from "@/lib/db"
 import { actionHandler, type ActionResult } from "@/lib/api"
-import { requireWritableMode, requireAdmin } from "@/lib/permissions"
+import { requireWritableMode, requireAdmin, requireAuth } from "@/lib/permissions"
 import { PERMISSION_LOCK_KEYS, type PermissionLockKey } from "@/lib/permissions"
 import { writeAudit } from "@/lib/audit"
 import { trackBehavior } from "@/lib/risk"
@@ -67,6 +67,8 @@ function groupBrief(g: {
   tags?: unknown
   force2fa: boolean
   policy?: unknown
+  allowInternalNetwork?: boolean | null
+  allowSecureLocationAccess?: boolean | null
 }) {
   return {
     id: g.id,
@@ -80,6 +82,8 @@ function groupBrief(g: {
     tags: g.tags ?? null,
     force2fa: g.force2fa,
     policy: g.policy ?? null,
+    allowInternalNetwork: g.allowInternalNetwork ?? null,
+    allowSecureLocationAccess: g.allowSecureLocationAccess ?? null,
   }
 }
 
@@ -95,6 +99,8 @@ const createGroupSchema = z.object({
   reservedQuota: zQuota.optional(),
   force2fa: z.boolean().default(false),
   tags: z.array(z.string().max(32)).max(20).default([]),
+  allowInternalNetwork: z.boolean().default(false), // 组级网络策略：允许访问内网
+  allowSecureLocationAccess: z.boolean().default(false), // 组级网络策略：允许访问容器内安全位置
 })
 
 export async function createGroupAction(input: unknown): Promise<ActionResult<{ id: string }>> {
@@ -121,6 +127,8 @@ export async function createGroupAction(input: unknown): Promise<ActionResult<{ 
         reservedQuota: p.reservedQuota ? { ...p.reservedQuota } : undefined,
         force2fa: p.force2fa,
         tags: p.tags.length > 0 ? p.tags : undefined,
+        allowInternalNetwork: p.allowInternalNetwork,
+        allowSecureLocationAccess: p.allowSecureLocationAccess,
         createdByUserId: ctx.userId,
       },
     })
@@ -177,6 +185,8 @@ export async function updateGroupAction(input: unknown): Promise<ActionResult<{ 
         reservedQuota: p.reservedQuota ? (cleanQuota(p.reservedQuota) as Prisma.InputJsonValue) : Prisma.DbNull,
         force2fa: p.force2fa,
         tags: p.tags.length > 0 ? p.tags : Prisma.DbNull,
+        allowInternalNetwork: p.allowInternalNetwork,
+        allowSecureLocationAccess: p.allowSecureLocationAccess,
       },
     })
 
@@ -638,5 +648,79 @@ export async function importGroupsJsonAction(input: unknown): Promise<ActionResu
     await trackBehavior(ctx.userId, "BATCH")
 
     return report
+  })
+}
+
+// ---- 组级网络访问策略（管理员按用户组控制：内网 / 容器安全位置，成员默认继承）----
+// 鉴权：SUPER_ADMIN / ADMIN 全量；GROUP_ADMIN 仅限自己管理的组；普通用户 403（前端不渲染入口）
+export async function setGroupNetworkPolicyAction(
+  input: unknown,
+): Promise<ActionResult<{ id: string; allowInternalNetwork: boolean; allowSecureLocationAccess: boolean; affectedMembers: number }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAuth()
+    const isAdmin = ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN"
+    const isGroupAdmin = ctx.role === "GROUP_ADMIN"
+    if (!isAdmin && !isGroupAdmin) throw new Error("无权设置组级网络访问策略（需要管理员或组管理员权限）")
+
+    const p = zodValidate(
+      z.object({
+        id: zId,
+        allowInternalNetwork: z.boolean(),
+        allowSecureLocationAccess: z.boolean(),
+      }),
+      input,
+    )
+
+    const group = await db.group.findUnique({ where: { id: p.id } })
+    if (!group || group.deletedAt) throw new Error("用户组不存在或已删除")
+
+    // 组管理员范围校验：仅可操作自己管理的组
+    if (isGroupAdmin && !isAdmin) {
+      const ga = await db.groupAdmin.findFirst({ where: { groupId: group.id, userId: ctx.userId } })
+      if (!ga) throw new Error("仅可为自己管理的用户组设置网络访问策略")
+    }
+
+    const before = {
+      allowInternalNetwork: group.allowInternalNetwork,
+      allowSecureLocationAccess: group.allowSecureLocationAccess,
+    }
+
+    await db.group.update({
+      where: { id: group.id },
+      data: {
+        allowInternalNetwork: p.allowInternalNetwork,
+        allowSecureLocationAccess: p.allowSecureLocationAccess,
+      },
+    })
+
+    // 影响面统计：组内未做用户级覆盖的成员数（策略调整即时影响其新会话）
+    const memberIds = await db.groupUser.findMany({ where: { groupId: group.id }, select: { userId: true } })
+    const affectedMembers = await db.user.count({
+      where: {
+        id: { in: memberIds.map((m) => m.userId) },
+        deletedAt: null,
+        allowInternalNetwork: null,
+        allowSecureLocationAccess: null,
+      },
+    })
+
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "GROUP_NETWORK_POLICY",
+      resourceType: "GROUP",
+      resourceId: group.id,
+      resourceName: group.name,
+      before,
+      after: {
+        allowInternalNetwork: p.allowInternalNetwork,
+        allowSecureLocationAccess: p.allowSecureLocationAccess,
+      },
+      severity: "WARN",
+      extra: { affectedMembers },
+    })
+
+    return { id: group.id, allowInternalNetwork: p.allowInternalNetwork, allowSecureLocationAccess: p.allowSecureLocationAccess, affectedMembers }
   })
 }

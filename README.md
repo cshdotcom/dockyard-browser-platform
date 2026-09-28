@@ -63,7 +63,14 @@
   - 唯一挂载本人 Profile 卷（其他用户资料不在容器命名空间内，任何形式不可读）
   - 下载目录/tmpfs 全部 noexec：下载可执行软件运行即报权限错误
   - 防退出三重自愈：镜像 supervisor 死循环（退出 1 秒内同一 Profile 拉起）+ RestartPolicy=always + 平台看门狗自动重建（连续 3 轮失败才转 ERROR）
-  - CPU/内存/Pids 硬限制（禁 swap，超限 OOM 硬终止）+ dockyard-sessions 隔离网络
+  - CPU/内存/Pids 硬限制（禁 swap，超限 OOM 硬终止）+ dockyard-sessions 隔离网络（ICC=false 容器互访封禁，跨用户浏览器网络不可达）
+- **网络访问管控（管理员按用户/组控制）**：
+  - 两个独立维度：`允许访问内网`（RFC1918/链路本地/云元数据 169.254.169.254/mDNS）与 `允许访问容器内安全位置`（本机 CDP:9222/VNC:5900、file://、chrome:// 管理页、平台内部端点）
+  - 三层解析：用户级覆盖 > 组级（含父组继承链）> 全局默认（security.defaultAllowInternalNetwork / security.defaultAllowSecureLocationAccess，默认全部拒绝）
+  - 三层真实执行（纵深防御）：① Chromium 托管策略（只读 bind-mount /etc/chromium/policies/managed/dockyard.json，URLBlocklist 在 URL 分类阶段直接拦截 + WebRtcIPHandling 防泄漏 + ProxyMode 锁定）② Sing-Box 路由拦截（真实 CIDR + action=block）③ Docker 网络 ICC 封禁
+  - 策略创建时快照落库（networkPolicyJson）；防闪退自愈/代理切换重建时重新解析（管理员收紧立即作用于新容器）
+  - 管理入口：用户列表「网络策略」列（生效值+覆盖来源）+ 行菜单三态控制（允许/禁止/继承）；组编辑双开关；工作区详情安全面板可视化
+  - 鉴权：SUPER_ADMIN/ADMIN 全量，GROUP_ADMIN 仅限本组；普通用户前端无入口 + 后端强制 403；变更全部落审计（WARN）+ 安全事件
 - Profile 快照：挂载/创建/过期/配额
 - 会话模板（私有/组/全局+继承+变量）、UA池、域名黑白名单、请求篡改规则
 - 会话共享授权（时效/撤销）、代理切换（保留快照重启）
@@ -170,3 +177,4 @@ docker/            start/stop/healthcheck/守护脚本
 - 审计日志只插入（附 PostgreSQL 触发器脚本可加数据库层保护）
 - 容器禁特权、禁挂载宿主目录、资源硬限制OOM
 - 统一幂等指纹防重复提交；写操作维护模式/只读模式拦截
+- 网络访问默认拒绝（deny-by-default）：内网/容器安全位置需管理员显式按用户或用户组授权；策略文件只读 bind-mount，沙箱内（只读根FS+非root+CapDrop=ALL）无法篡改

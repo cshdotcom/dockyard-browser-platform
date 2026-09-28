@@ -15,6 +15,7 @@ import {
   type BrowserHardeningInfo,
   type BrowserHardeningSpec,
 } from "./docker"
+import { writeNetworkPolicyFile, sessionNetworkGateway, type NetworkPolicy } from "../network-policy"
 
 export interface NovncSession {
   novncSessionId: string
@@ -62,6 +63,7 @@ export interface NovncProvisionParams {
   memLimitMb?: number
   startUrl?: string
   labels?: Record<string, string>
+  networkPolicy?: NetworkPolicy // 生效网络访问管控（内网/容器安全位置），自托管模式强制下发
 }
 
 export async function createNovncSession(params: NovncProvisionParams): Promise<NovncSession> {
@@ -83,6 +85,8 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
           restartPolicy: "always",
           supervisorLoop: true,
         },
+        // 网络访问管控下发（池侧按策略注入 Chromium 托管策略与网络隔离）
+        networkPolicy: params.networkPolicy || { allowInternalNetwork: false, allowSecureLocationAccess: false },
       }),
     })
     if (!res.ok) throw new Error(`NoVNC API create failed: HTTP ${res.status}`)
@@ -102,6 +106,18 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
     // ---- 自托管：平台直接编排硬隔离浏览器容器 ----
     const network = await ensureSessionNetwork()
     const profileDir = params.userId && params.profileKey ? browserProfileDir(params.userId, params.profileKey) : null
+    // 网络策略：生成 Chromium 托管策略文件（只读 bind-mount，沙箱内不可篡改）
+    const policy = params.networkPolicy || {
+      allowInternalNetwork: false,
+      allowSecureLocationAccess: false,
+      source: "GLOBAL_DEFAULT" as const,
+      resolvedAt: new Date().toISOString(),
+    }
+    const gatewayIp = params.networkPolicy ? await sessionNetworkGateway() : null
+    const policyFile =
+      params.userId && params.profileKey
+        ? await writeNetworkPolicyFile(`ws-${params.profileKey}`, { policy, gatewayIp, proxyUrl: params.proxyUrl || null }).catch(() => null)
+        : null
     const spec: BrowserHardeningSpec = {
       image: ENV.browserImage,
       cpuLimit: params.cpuLimit ?? 1,
@@ -113,6 +129,9 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       proxyUrl: params.proxyUrl,
       resolution: params.resolution || "1280x800",
       labels: params.labels,
+      networkPolicy: { allowInternalNetwork: policy.allowInternalNetwork, allowSecureLocationAccess: policy.allowSecureLocationAccess },
+      policyFile,
+      gatewayIp,
     }
     const cont = await createIsolatedBrowserContainer(spec)
     return {

@@ -29,6 +29,8 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "security.emailCodeMaxSendPerHour": { value: 10, category: "SECURITY", type: "number", description: "同一邮箱每小时最多发送次数" },
   "security.remoteLoginAlert": { value: true, category: "SECURITY", type: "boolean", description: "异地新IP登录邮件告警" },
   "security.autoInvalidateTokensOnSecurityChange": { value: false, category: "SECURITY", type: "boolean", description: "账号安全变更时自动作废全部API-Token" },
+  "security.defaultAllowInternalNetwork": { value: false, category: "SECURITY", type: "boolean", description: "网络策略全局默认：是否允许访问内网（用户/组未显式设置时生效，默认拒绝）" },
+  "security.defaultAllowSecureLocationAccess": { value: false, category: "SECURITY", type: "boolean", description: "网络策略全局默认：是否允许访问容器内安全位置（CDP/VNC端口、file://、平台内部端点，默认拒绝）" },
   "security.trustedDeviceDays": { value: 30, category: "SECURITY", type: "number", description: "受信任设备有效期（天）" },
   "session.maxLifetimeHours": { value: 168, category: "SESSION", type: "number", description: "会话最大存活时间（小时）" },
   "session.idleTimeoutMin": { value: 30, category: "SESSION", type: "number", description: "闲置自动登出（分钟）" },

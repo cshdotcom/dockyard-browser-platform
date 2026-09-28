@@ -2,6 +2,7 @@
 
 import { z } from "zod"
 import crypto from "crypto"
+import { Prisma } from "@prisma/client"
 import { db } from "@/lib/db"
 import { requireAuth, checkSessionQuota, userGroupIds, requireWritableMode, requirePermission } from "@/lib/permissions"
 import { actionHandler, type ActionResult } from "@/lib/api"
@@ -15,6 +16,7 @@ import { zodValidate, zPrecision } from "@/lib/validators"
 import { createSession, destroySession } from "@/lib/external/steel"
 import { createNovncSession, destroyNovncSession, refreshNovncSecret, novncDialTarget, restartNovncBrowser, type NovncSession } from "@/lib/external/novnc"
 import { browserHardeningSummary, restartBrowserProcessInContainer, type BrowserHardeningInfo } from "@/lib/external/docker"
+import { resolveNetworkPolicy, type NetworkPolicy } from "@/lib/network-policy"
 import { ENV } from "@/lib/env"
 import { moveToRecycle } from "@/lib/recycle"
 import { getConfigBool, getConfig, getConfigNumber } from "@/lib/config"
@@ -24,6 +26,11 @@ import { getConfigBool, getConfig, getConfigNumber } from "@/lib/config"
 // 数据流：前端表单 → Server Action（权限+配额+幂等+风控校验）
 //   → Steel-Browser/NoVNC 外部API → Prisma 落库 → 审计 → 返回
 // ============================================================
+
+// 网络策略快照序列化（落库展示 / MCP·OpenAPI 归属字段）
+function netPolicyJson(policy: NetworkPolicy): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(policy)) as Prisma.InputJsonValue
+}
 
 // 组装代理URL：internal_singbox 类型读取实例内网socks地址
 async function buildProxyUrl(proxyNodeId?: string | null): Promise<{ proxyUrl?: string; proxyNodeName?: string; singboxInstanceId?: string | null }> {
@@ -133,6 +140,8 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
       // ---- CDP 轻量会话 ----
       const proxyInfo = await buildProxyUrl(p.proxyNodeId)
       const steelNodeId = await pickSteelNode()
+      // 生效网络访问策略快照（Steel 外部集群形态：策略随规格下发并落库；自托管形态由容器层执行）
+      const netPolicy = await resolveNetworkPolicy(ctx.userId)
       const session = await createSession({
         proxyUrl: proxyInfo.proxyUrl,
         userAgent: (templateConfig.ua as string) || undefined,
@@ -156,6 +165,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           tags,
           steelSessionId: session.sessionId,
           cdpUrl: session.cdpUrl,
+          networkPolicyJson: netPolicyJson(netPolicy),
           ttlMinutes: p.ttlMinutes || (await getConfigNumber("workspace.defaultTtlMinutes", 0)),
           idleTimeoutMinutes: p.idleTimeoutMinutes || (await getConfigNumber("workspace.defaultIdleTimeoutMin", 60)),
           createdByUserId: ctx.userId,
@@ -174,6 +184,8 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
     } else {
       // ---- NoVNC 重度会话（独立配额校验在上面已做）----
       const proxyInfo = await buildProxyUrl(p.proxyNodeId)
+      // 生效网络访问策略（管理员按用户/组控制：内网 / 容器安全位置）——创建时快照落库
+      const netPolicy = await resolveNetworkPolicy(ctx.userId)
       // 隔离Profile键：绑定“用户对应的配置的浏览器”，闪退/重建后自动还原同一环境
       const profileKey = p.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
       const novnc = await createNovncSession({
@@ -187,13 +199,14 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         memLimitMb: (templateConfig.memLimitMb as number) || undefined,
         startUrl: (templateConfig.startUrl as string) || undefined,
         labels: { "dockyard.owner": ctx.userId, "dockyard.profile-key": profileKey },
+        networkPolicy: netPolicy,
       })
       const hardening = novnc.hardening || browserHardeningSummary({
         image: ENV.browserImage, cpuLimit: (templateConfig.cpuLimit as number) || 1, memLimitMb: (templateConfig.memLimitMb as number) || 1024,
-        pidsLimit: 256, network: "dockyard-sessions", profileDir: null,
+        pidsLimit: 256, network: "dockyard-sessions", profileDir: null, networkPolicy: { allowInternalNetwork: netPolicy.allowInternalNetwork, allowSecureLocationAccess: netPolicy.allowSecureLocationAccess },
       })
       const hardeningSnapshot = { ...hardening, profileKey, provisioned: novnc.simulated ? "simulated" : "live" } as BrowserHardeningInfo & { profileKey: string; provisioned: string }
-      const hardeningJsonInput = JSON.parse(JSON.stringify(hardeningSnapshot)) as Record<string, unknown>
+      const hardeningJsonInput = JSON.parse(JSON.stringify(hardeningSnapshot)) as Prisma.InputJsonValue
       const ws = await db.browserWorkspace.create({
         data: {
           name: p.name,
@@ -211,6 +224,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           novncConnCount: 1,
           containerRef: novnc.containerName || null,
           hardeningJson: hardeningJsonInput,
+          networkPolicyJson: netPolicyJson(netPolicy),
           ttlMinutes: p.ttlMinutes,
           idleTimeoutMinutes: p.idleTimeoutMinutes,
           createdByUserId: ctx.userId,
@@ -278,6 +292,8 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
     } else {
       const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
       const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
+      // 重建时重新解析生效策略（管理员收紧/放宽即时作用于新容器）
+      const netPolicy = await resolveNetworkPolicy(ws.userId)
       const novnc = await createNovncSession({
         proxyUrl: proxyInfo.proxyUrl,
         ttlMinutes: ws.ttlMinutes || undefined,
@@ -285,13 +301,15 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
         userId: ws.userId,
         profileKey,
         labels: { "dockyard.owner": ws.userId, "dockyard.profile-key": profileKey },
+        networkPolicy: netPolicy,
       })
       await db.browserWorkspace.update({
         where: { id },
         data: {
           status: "RUNNING", novncSessionId: novnc.novncSessionId, novncSecret: encrypt(novnc.secret),
           containerRef: novnc.containerName || null,
-          hardeningJson: novnc.hardening ? (JSON.parse(JSON.stringify({ ...novnc.hardening, profileKey, provisioned: "live" })) as Record<string, unknown>) : prevHardening,
+          hardeningJson: JSON.parse(JSON.stringify(novnc.hardening ? { ...novnc.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,
+          networkPolicyJson: netPolicyJson(netPolicy),
         },
       })
     }
@@ -362,6 +380,7 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
       if (ws.novncSessionId) await destroyNovncSession(ws.novncSessionId).catch(() => {})
       const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
       const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
+      const switchedPolicy = await resolveNetworkPolicy(ws.userId)
       const novnc = await createNovncSession({
         proxyUrl: proxyInfo.proxyUrl,
         ttlMinutes: ws.ttlMinutes || undefined,
@@ -369,13 +388,16 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
         userId: ws.userId,
         profileKey,
         labels: { "dockyard.owner": ws.userId, "dockyard.profile-key": profileKey },
+        // 代理切换重建：策略重新解析，新代理地址同步锁入托管策略
+        networkPolicy: switchedPolicy,
       })
       await db.browserWorkspace.update({
         where: { id },
         data: {
           novncSessionId: novnc.novncSessionId, novncSecret: encrypt(novnc.secret),
           containerRef: novnc.containerName || null,
-          hardeningJson: novnc.hardening ? (JSON.parse(JSON.stringify({ ...novnc.hardening, profileKey, provisioned: "live" })) as Record<string, unknown>) : prevHardening,
+          hardeningJson: JSON.parse(JSON.stringify(novnc.hardening ? { ...novnc.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,
+          networkPolicyJson: netPolicyJson(switchedPolicy),
           proxyNodeId: proxyNodeId || null, singboxInstanceId: proxyInfo.singboxInstanceId || null, status: "RUNNING",
         },
       })

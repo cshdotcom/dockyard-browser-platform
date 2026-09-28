@@ -5,7 +5,7 @@
 import { z } from "zod"
 import { db } from "@/lib/db"
 import { actionHandler, type ActionResult } from "@/lib/api"
-import { requireWritableMode, requireAdmin } from "@/lib/permissions"
+import { requireWritableMode, requireAdmin, requireAuth } from "@/lib/permissions"
 import { writeAudit, writeSecurityEvent } from "@/lib/audit"
 import { trackBehavior } from "@/lib/risk"
 import { zodValidate, zId, zEmail, zUsername, validatePasswordPolicy, checkPasswordHistory, zPrecision } from "@/lib/validators"
@@ -886,5 +886,90 @@ export async function importUsersCsvAction(input: unknown): Promise<ActionResult
     await trackBehavior(ctx.userId, "BATCH")
 
     return report
+  })
+}
+
+// ---- 16. 用户级网络访问策略（管理员按用户控制：内网 / 容器安全位置）----
+// 鉴权：SUPER_ADMIN / ADMIN 全量；GROUP_ADMIN 仅限本组成员；
+//       普通用户调用直接 403（前端不渲染入口，后端强制拦截，防绕过）
+export async function setUserNetworkPolicyAction(
+  input: unknown,
+): Promise<ActionResult<{ id: string; allowInternalNetwork: boolean | null; allowSecureLocationAccess: boolean | null; effective: { allowInternalNetwork: boolean; allowSecureLocationAccess: boolean; source: string } }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAuth()
+    const isAdmin = ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN"
+    const isGroupAdmin = ctx.role === "GROUP_ADMIN"
+    if (!isAdmin && !isGroupAdmin) throw new Error("无权设置网络访问策略（需要管理员或组管理员权限）")
+
+    const p = zodValidate(
+      z.object({
+        id: zId,
+        allowInternalNetwork: z.boolean().nullable(), // null=继承所属组
+        allowSecureLocationAccess: z.boolean().nullable(), // null=继承所属组
+      }),
+      input,
+    )
+
+    const user = await db.user.findUnique({ where: { id: p.id } })
+    if (!user || user.deletedAt) throw new Error("用户不存在或已删除")
+
+    // 组管理员范围校验：仅可操作本组成员
+    if (isGroupAdmin && !isAdmin) {
+      const { isGroupAdminOf } = await import("@/lib/permissions")
+      if (!(await isGroupAdminOf(ctx.userId, user.id))) throw new Error("仅可为本组成员设置网络访问策略")
+    }
+
+    const before = {
+      allowInternalNetwork: user.allowInternalNetwork,
+      allowSecureLocationAccess: user.allowSecureLocationAccess,
+    }
+
+    await db.user.update({
+      where: { id: user.id },
+      data: {
+        allowInternalNetwork: p.allowInternalNetwork,
+        allowSecureLocationAccess: p.allowSecureLocationAccess,
+      },
+    })
+
+    // 解析生效结果（含继承来源），供前端即时回显
+    const { resolveNetworkPolicy } = await import("@/lib/network-policy")
+    const effective = await resolveNetworkPolicy(user.id)
+
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "USER_NETWORK_POLICY",
+      resourceType: "USER",
+      resourceId: user.id,
+      resourceName: user.username,
+      ownerUserId: user.id,
+      before,
+      after: {
+        allowInternalNetwork: p.allowInternalNetwork,
+        allowSecureLocationAccess: p.allowSecureLocationAccess,
+        effective,
+      },
+      severity: "WARN",
+    })
+    await writeSecurityEvent({
+      userId: ctx.userId,
+      username: ctx.username,
+      eventType: "NETWORK_POLICY_CHANGE",
+      success: true,
+      detail: `管理员 ${ctx.username} 调整用户 ${user.username} 网络访问策略（内网:${p.allowInternalNetwork === null ? "继承" : p.allowInternalNetwork ? "允许" : "禁止"} / 安全位置:${p.allowSecureLocationAccess === null ? "继承" : p.allowSecureLocationAccess ? "允许" : "禁止"}）`,
+    })
+
+    return {
+      id: user.id,
+      allowInternalNetwork: p.allowInternalNetwork,
+      allowSecureLocationAccess: p.allowSecureLocationAccess,
+      effective: {
+        allowInternalNetwork: effective.allowInternalNetwork,
+        allowSecureLocationAccess: effective.allowSecureLocationAccess,
+        source: effective.source,
+      },
+    }
   })
 }

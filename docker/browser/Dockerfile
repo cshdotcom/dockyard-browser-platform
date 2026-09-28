@@ -34,6 +34,10 @@ RUN useradd -m -u 1000 -s /bin/sh browser \
   && mkdir -p /home/browser/profile /home/browser/downloads \
   && chown -R browser:browser /home/browser
 
+# Chromium 托管策略目录：平台按用户/组网络策略生成 JSON，只读 bind-mount 到此目录
+#（只读根 FS + 非 root + CapDrop=ALL → 沙箱内无法篡改，URLBlocklist 在 URL 分类阶段直接拦截）
+RUN mkdir -p /etc/chromium/policies/managed && chmod 0755 /etc/chromium/policies/managed
+
 COPY supervisor.sh /usr/local/bin/supervisor.sh
 RUN chmod 0755 /usr/local/bin/supervisor.sh
 

@@ -49,6 +49,12 @@ if [ -n "${PROXY_URL:-}" ]; then
   log "启用代理：${PROXY_URL}"
 fi
 
+# 网络访问管控：平台按管理员策略下发 /etc/chromium/policies/managed/dockyard.json
+#（URLBlocklist 拦截内网/安全位置 + ProxyMode 锁定；文件只读 bind-mount，此处仅提示存在性）
+if [ -f /etc/chromium/policies/managed/dockyard.json ]; then
+  log "网络策略托管策略已注入（Chromium managed policy）"
+fi
+
 # ---- 4. 防退出主循环 ----
 # 浏览器退出（任何原因）→ wait 返回 → 1 秒后以同一 user-data-dir 拉起
 # 用户“闪退后立即打开”得到的永远是同一个配置的浏览器环境

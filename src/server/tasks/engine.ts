@@ -2,6 +2,7 @@
 // 由外部 cron 触发受保护 Route Handler /api/cron 调用；手动执行同样施加内存锁
 
 import { db } from "@/lib/db"
+import { Prisma } from "@prisma/client"
 import { writeAudit } from "@/lib/audit"
 import { raiseAlert } from "@/lib/alerts"
 import { cleanIdempotencyRecords } from "@/lib/idempotency"
@@ -10,6 +11,7 @@ import { inspectContainer, containerStats, hostInfo } from "@/lib/external/docke
 import { sessionStatus, destroySession } from "@/lib/external/steel"
 import { novncHealth, destroyNovncSession } from "@/lib/external/novnc"
 import { testConnectivity } from "@/lib/singbox"
+import { resolveNetworkPolicy } from "@/lib/network-policy"
 
 const g = globalThis as unknown as {
   __dyTaskLocks?: Map<string, { lockedAt: number; heartbeat: number }>
@@ -458,12 +460,15 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
             const { encrypt } = await import("@/lib/crypto")
             const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
             const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${ws.id.slice(-16)}`
+            // 崩溃自愈重建：重新解析当前生效策略（管理员收紧立即作用于新容器）
+            const netPolicy = await resolveNetworkPolicy(ws.userId)
             const rebuilt = await createNovncSession({
               ttlMinutes: ws.ttlMinutes || undefined,
               profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
               userId: ws.userId,
               profileKey,
               labels: { "dockyard.owner": ws.userId, "dockyard.recovered": "true" },
+              networkPolicy: netPolicy,
             })
             await db.browserWorkspace.update({
               where: { id: ws.id },
@@ -471,7 +476,8 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
                 status: "RUNNING", crashCategory: `自愈重建#${fails}`,
                 novncSessionId: rebuilt.novncSessionId, novncSecret: encrypt(rebuilt.secret),
                 containerRef: rebuilt.containerName || null,
-                hardeningJson: rebuilt.hardening ? (JSON.parse(JSON.stringify({ ...rebuilt.hardening, profileKey, provisioned: "live" })) as Record<string, unknown>) : prevHardening,
+                hardeningJson: JSON.parse(JSON.stringify(rebuilt.hardening ? { ...rebuilt.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,
+                networkPolicyJson: JSON.parse(JSON.stringify(netPolicy)) as Prisma.InputJsonValue,
               },
             })
             recovered++

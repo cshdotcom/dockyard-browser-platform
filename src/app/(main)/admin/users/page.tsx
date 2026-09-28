@@ -1,5 +1,6 @@
 import { db } from "@/lib/db"
 import { requireAdmin } from "@/lib/permissions"
+import { resolveNetworkPoliciesBatch } from "@/lib/network-policy"
 import { parseListQuery, pageSkipTake, safeOrderBy, fmtDate } from "@/lib/utils-server"
 import { StatCard } from "@/components/shared/confirm"
 import { UsersTable, type AdminUserRow } from "./users-table"
@@ -62,6 +63,8 @@ export default async function AdminUsersPage({
         mustChangePassword: true,
         twoFactorEnabled: true,
         force2faSetup: true,
+        allowInternalNetwork: true,
+        allowSecureLocationAccess: true,
         lockedUntil: true,
         failedLoginCount: true,
         quota: true,
@@ -104,6 +107,9 @@ export default async function AdminUsersPage({
     groupsByUser.set(m.userId, arr)
   }
 
+  // 当前页用户生效网络策略（批量解析：用户覆盖 > 组继承 > 全局默认）
+  const netPolicies = await resolveNetworkPoliciesBatch(userIds)
+
   const list: AdminUserRow[] = rows.map((u) => ({
     id: u.id,
     username: u.username,
@@ -123,6 +129,9 @@ export default async function AdminUsersPage({
     lastLoginIp: u.lastLoginIp,
     createdAt: fmtDate(u.createdAt),
     groups: groupsByUser.get(u.id) || [],
+    allowInternalNetwork: u.allowInternalNetwork,
+    allowSecureLocationAccess: u.allowSecureLocationAccess,
+    netPolicy: netPolicies.get(u.id) || null,
   }))
 
   return (

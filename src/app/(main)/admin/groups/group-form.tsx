@@ -39,6 +39,8 @@ interface GroupFormDialogProps {
     quota: Record<string, number | null> | null
     reservedQuota: Record<string, number | null> | null
     force2fa: boolean
+    allowInternalNetwork: boolean
+    allowSecureLocationAccess: boolean
     tags: string[]
   } | null
   defaultParentId?: string | null
@@ -92,6 +94,8 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
   const [enabled, setEnabled] = React.useState(true)
   const [inheritParentQuota, setInheritParentQuota] = React.useState(true)
   const [force2fa, setForce2fa] = React.useState(false)
+  const [allowInternalNetwork, setAllowInternalNetwork] = React.useState(false)
+  const [allowSecureLocationAccess, setAllowSecureLocationAccess] = React.useState(false)
   const [tagsText, setTagsText] = React.useState("")
 
   const [quotaEnabled, setQuotaEnabled] = React.useState(false)
@@ -111,6 +115,8 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       setEnabled(group.enabled)
       setInheritParentQuota(group.inheritParentQuota)
       setForce2fa(group.force2fa)
+      setAllowInternalNetwork(group.allowInternalNetwork)
+      setAllowSecureLocationAccess(group.allowSecureLocationAccess)
       setTagsText(group.tags.join(", "))
       const q = group.quota
       if (q && (q.sessions !== null && q.sessions !== undefined || q.novncSessions != null || q.diskMb != null)) {
@@ -136,6 +142,8 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       setEnabled(true)
       setInheritParentQuota(true)
       setForce2fa(false)
+      setAllowInternalNetwork(false)
+      setAllowSecureLocationAccess(false)
       setTagsText("")
       setQuotaEnabled(false)
       setQSessions(20)
@@ -166,6 +174,8 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       enabled,
       inheritParentQuota,
       force2fa,
+      allowInternalNetwork,
+      allowSecureLocationAccess,
       tags,
       quota: quotaEnabled ? { sessions: qSessions, novncSessions: qNovnc, diskMb: qDisk } : undefined,
       reservedQuota: reservedEnabled ? { sessions: rSessions, novncSessions: rNovnc } : undefined,
@@ -251,6 +261,20 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
             <div className="flex items-center justify-between rounded-md border px-3 py-2">
               <span className="text-sm">组级强制2FA</span>
               <Switch checked={force2fa} onCheckedChange={setForce2fa} />
+            </div>
+            <div className="flex items-center justify-between rounded-md border px-3 py-2">
+              <div className="min-w-0 pr-2">
+                <span className="text-sm">允许访问内网</span>
+                <p className="text-[10px] text-muted-foreground">成员浏览器会话可访问私有网段（用户级覆盖优先）</p>
+              </div>
+              <Switch checked={allowInternalNetwork} onCheckedChange={setAllowInternalNetwork} />
+            </div>
+            <div className="flex items-center justify-between rounded-md border px-3 py-2">
+              <div className="min-w-0 pr-2">
+                <span className="text-sm">允许访问容器安全位置</span>
+                <p className="text-[10px] text-muted-foreground">CDP/VNC端口、file://、平台内部端点（默认拒绝）</p>
+              </div>
+              <Switch checked={allowSecureLocationAccess} onCheckedChange={setAllowSecureLocationAccess} />
             </div>
           </div>
         </div>

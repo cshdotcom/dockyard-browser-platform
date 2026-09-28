@@ -30,6 +30,9 @@ export interface BrowserHardeningSpec {
   resolution?: string
   env?: Record<string, string>
   labels?: Record<string, string>
+  networkPolicy?: { allowInternalNetwork: boolean; allowSecureLocationAccess: boolean }
+  policyFile?: string | null // 网络策略托管策略 JSON（只读 bind-mount 进 /etc/chromium/policies/managed/）
+  gatewayIp?: string | null // 会话网络网关（平台内部端点封禁目标）
 }
 
 export interface BrowserHardeningInfo {
@@ -49,10 +52,17 @@ export interface BrowserHardeningInfo {
   oomHardKill: boolean
   profileDir: string | null
   image: string
+  // —— 网络访问管控（管理员按用户/组下发）——
+  allowInternalNetwork: boolean
+  allowSecureLocationAccess: boolean
+  policyManagedChromium: boolean // Chromium 托管策略文件已注入（只读、不可篡改）
+  iccDisabledNetwork: boolean // 会话网络容器互访封禁（跨用户网络不可达）
 }
 
 export const SESSION_NETWORK = "dockyard-sessions"
 export const BROWSER_USER = "browser"
+// Chromium 托管策略注入点（Debian chromium 策略目录，镜像内已预建，只读 bind-mount）
+export const CHROMIUM_POLICY_MOUNT = "/etc/chromium/policies/managed/dockyard.json"
 
 export function browserHardeningSummary(spec: BrowserHardeningSpec): BrowserHardeningInfo {
   return {
@@ -72,6 +82,10 @@ export function browserHardeningSummary(spec: BrowserHardeningSpec): BrowserHard
     oomHardKill: true,
     profileDir: spec.profileDir,
     image: spec.image,
+    allowInternalNetwork: spec.networkPolicy?.allowInternalNetwork ?? false,
+    allowSecureLocationAccess: spec.networkPolicy?.allowSecureLocationAccess ?? false,
+    policyManagedChromium: !!spec.policyFile,
+    iccDisabledNetwork: true,
   }
 }
 
@@ -86,6 +100,9 @@ export function browserProfileDir(userId: string, profileKey: string): string | 
 }
 
 export function buildBrowserHostConfig(spec: BrowserHardeningSpec) {
+  const binds = spec.profileDir ? [`${spec.profileDir}:/home/browser/profile:rw,nosuid,nodev,noexec`] : []
+  // 网络策略托管策略：只读 bind-mount（只读根 FS + 非 root + CapDrop=ALL → 沙箱内无法篡改）
+  if (spec.policyFile) binds.push(`${spec.policyFile}:${CHROMIUM_POLICY_MOUNT}:ro`)
   return {
     NanoCpus: Math.round(spec.cpuLimit * 1e9),
     Memory: Math.round(spec.memLimitMb * 1024 * 1024),
@@ -97,7 +114,7 @@ export function buildBrowserHostConfig(spec: BrowserHardeningSpec) {
     SecurityOpt: ["no-new-privileges"],
     RestartPolicy: { Name: "always" }, // 防退出：容器崩溃自动拉起（浏览器进程级自愈在镜像 supervisor）
     NetworkMode: spec.network,
-    Binds: spec.profileDir ? [`${spec.profileDir}:/home/browser/profile:rw,nosuid,nodev,noexec`] : [],
+    Binds: binds,
     Tmpfs: {
       "/tmp": "rw,noexec,nosuid,size=256m",
       "/home/browser/downloads": "rw,noexec,nosuid,size=128m", // 下载落点：可写不可执行
@@ -108,15 +125,36 @@ export function buildBrowserHostConfig(spec: BrowserHardeningSpec) {
   }
 }
 
-// 确保会话专用隔离网络存在（浏览器容器不进 host 网络，互不可见）
+// 确保会话专用隔离网络存在：
+//   · 浏览器容器不进 host 网络
+//   · ICC=false —— 同网络内容器互访封禁（跨用户浏览器网络不可达，防横向探测/跨用户读取）
+//   · 平台（宿主侧）访问容器 IP:port 不受 ICC 影响，CDP/VNC 运维通道不受影响
 export async function ensureSessionNetwork(): Promise<string> {
   if (externalAvailable.docker) {
     const res = await dockerFetch("/networks")
     if (res.ok) {
-      const nets = (await res.json()) as Array<{ Name: string }>
-      if (nets.some((n) => n.Name === SESSION_NETWORK)) return SESSION_NETWORK
+      const nets = (await res.json()) as Array<{ Name: string; Options?: Record<string, string> }>
+      const existing = nets.find((n) => n.Name === SESSION_NETWORK)
+      if (existing) {
+        const strict = existing.Options?.["com.docker.network.bridge.enable_icc"] === "false"
+        if (strict) return SESSION_NETWORK
+        // 旧版无 ICC 网络 → 尝试删除重建为严格网络（仍有容器挂载时删除失败则沿用旧网）
+        try {
+          const del = await dockerFetch(`/networks/${SESSION_NETWORK}`, { method: "DELETE" })
+          if (!del.ok) return SESSION_NETWORK
+        } catch {
+          return SESSION_NETWORK
+        }
+      }
     }
-    const create = await dockerFetch("/networks/create", { method: "POST", body: JSON.stringify({ Name: SESSION_NETWORK, Driver: "bridge" }) })
+    const create = await dockerFetch("/networks/create", {
+      method: "POST",
+      body: JSON.stringify({
+        Name: SESSION_NETWORK,
+        Driver: "bridge",
+        Options: { "com.docker.network.bridge.enable_icc": "false" }, // 容器互访封禁
+      }),
+    })
     if (!create.ok) throw new Error(`Docker API network create failed: HTTP ${create.status}`)
     return SESSION_NETWORK
   }
