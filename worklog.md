@@ -183,3 +183,17 @@ Work Log:
 
 Stage Summary:
 - 本轮全部交付完成：网络访问管控功能 + 源码推送 + 容器编译成功验证
+
+---
+Task ID: 6
+Agent: main
+Task: 收尾 — 密钥扫描事件处理 + 最终 CI 全绿 + 服务守护化
+
+Work Log:
+- GitHub 密钥扫描推送保护拦截含明文 token 的提交（"push declined due to repository rule violations"）→ monitor-ci.sh 改为 GITHUB_TOKEN 环境变量注入（696ef48），凭据零入库
+- 最终 CI（696ef48）：CI Lint ✅ / Build & Push Docker Image ✅；3a82c9d 三工作流全绿（含浏览器镜像）
+- 环境服务守护化：Bash 命令结束时会话进程组被清理（bun run dev 内置 tee 管道加剧）→ Python 双 fork + setsid 守护化拉起 next dev / vnc-bridge / ws-hub，跨命令存活验证通过
+- 最终浏览器冒烟：登录 → 用户管理页网络策略列（demo=组继承、admin=全局默认）渲染正确
+
+Stage Summary:
+- 本轮任务全部完成：功能实现 + 鉴权防护 + 源码推送 + 容器编译成功监控 + 双镜像发布
