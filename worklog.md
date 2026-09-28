@@ -144,3 +144,25 @@ Work Log:
 
 Stage Summary:
 - 本轮全部交付物已验证并推送；CI（lint + 双镜像构建）将随 push 自动触发
+
+---
+Task ID: 4
+Agent: main
+Task: 网络访问管控（管理员按用户/组控制内网/容器安全位置）+ 完整鉴权 + 提交推送 + CI 监控
+
+Work Log:
+- Prisma schema：User(allowInternalNetwork/allowSecureLocationAccess 可空覆盖) + Group(组级双开关) + BrowserWorkspace(networkPolicyJson 快照)；修复 SingboxInstance hostNodeId 索引笔误；db push（本地演示数据被 --accept-data-loss 清空 → 重新 seed 恢复）
+- 新建 src/lib/network-policy.ts：三层解析（用户>组继承链>全局默认，deny-by-default）+ Chromium 托管策略生成器（URLBlocklist 186 条/双形态/半放行）+ sing-box CIDR 拦截规则 + 策略文件落盘（防路径穿越）+ 批量解析（列表页免 N+1）
+- docker.ts：spec 扩展 networkPolicy/policyFile/gatewayIp；策略文件只读 bind-mount /etc/chromium/policies/managed/dockyard.json；会话网络 ICC=false 容器互访封禁（旧网自动重建为严格网）
+- novnc.ts：自托管/池集群两种形态均下发 networkPolicy
+- workspaces.ts：创建/启动/切代理/看门狗自愈四条链路注入策略（解析+下发+快照落库）
+- 管理端 actions：setUserNetworkPolicyAction / setGroupNetworkPolicyAction（ADMIN 全量、GROUP_ADMIN 限本组、普通用户 403、审计 WARN + 安全事件 + 影响面统计）
+- UI：用户列表网络策略列（生效值+覆盖徽章+来源）+ 行菜单三态控制；组编辑双开关+树徽章；工作区详情安全面板新增 4 项（内网拦截/安全位置拦截/托管策略锁/ICC 封禁）
+- config.ts：security.defaultAllowInternalNetwork / defaultAllowSecureLocationAccess 全局默认键
+- 浏览器镜像：预建策略目录 + supervisor 策略注入提示
+- 修复：live-desk-viewer SSR screen 未定义；.env 缺 AUTH_SECRET 导致登录循环（补齐 AUTH_SECRET/ENCRYPTION_KEY/CRON_SECRET 并重启）；误删组成员关系恢复
+- 验证：33 项策略脚本全过；lint 零错；改动文件类型错误清零；Agent Browser 实测用户级开关（覆盖徽章+审计+安全事件）、组级开关（落库+徽章+继承显示）、工作区创建（快照落库）+ 详情安全面板 4 行渲染
+- 提交 71cb7d9 并推送 GitHub
+
+Stage Summary:
+- 网络访问管控全链路（策略→解析→下发→执行→审计→UI）双层实测通过；默认全部拒绝
