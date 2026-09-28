@@ -16,7 +16,9 @@
 
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 核心依赖（硬性）+ 可选 emoji 字体（软失败：部分镜像源缺失不影响核心功能）
+RUN apt-get update -o Acquire::Retries=5 \
+    && apt-get install -y --no-install-recommends \
     chromium \
     xvfb \
     x11vnc \
@@ -25,8 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     psmisc \
     fonts-noto-cjk \
-    fonts-noto-color \
     fonts-liberation \
+  && (apt-get install -y --no-install-recommends fonts-noto-color \
+      || echo "[warn] fonts-noto-color 不可用，跳过（CJK 字体已含于 fonts-noto-cjk）") \
   && rm -rf /var/lib/apt/lists/*
 
 # 非 root 运行用户（与平台 BROWSER_USER 常量一致）
