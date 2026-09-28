@@ -166,3 +166,20 @@ Work Log:
 
 Stage Summary:
 - 网络访问管控全链路（策略→解析→下发→执行→审计→UI）双层实测通过；默认全部拒绝
+
+---
+Task ID: 5
+Agent: main
+Task: CI 修复与最终验证
+
+Work Log:
+- 浏览器镜像 CI 首次运行失败：apt 报 fonts-noto-color 无法定位（exit 100）
+- 修复：核心依赖硬性安装 + emoji 字体软失败（CJK 已由 fonts-noto-cjk 覆盖）+ apt Acquire::Retries=5，提交 3a82c9d
+- CI 终态（3a82c9d）：CI Lint ✅ / Build & Push Docker Image ✅ / Build & Push Browser Image ✅ 三工作流全绿
+- GHCR 发布确认：
+  · ghcr.io/cshdotcom/dockyard-browser-platform:latest（sha256:1e5f3554…）
+  · ghcr.io/cshdotcom/dockyard-browser-platform-browser:latest（sha256:7647b963…）
+  · 双镜像均 linux/amd64 + linux/arm64 多架构
+
+Stage Summary:
+- 本轮全部交付完成：网络访问管控功能 + 源码推送 + 容器编译成功验证
