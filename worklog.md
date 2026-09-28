@@ -252,3 +252,17 @@ Work Log:
 
 Stage Summary:
 - 本轮四项增量（作用域黑白名单+批量策略下发、MCP/OpenAPI 32动作浏览器全量控制、HelmPort 重命名重构、管理员三通道引导）全部实现并双通道验证通过
+
+---
+Task ID: 10
+Agent: main
+Task: 本轮推送与 CI 监控终态
+
+Work Log:
+- 提交 4971d0b（50 文件 +5775 行）推送 GitHub（密钥扫描预检通过）
+- CI 终态（4971d0b）：CI Lint ✅ success（run #11）/ Build & Push Docker Image ✅ success（run #11）
+- GHCR 发布确认：ghcr.io/cshdotcom/dockyard-browser-platform:latest（+main 标签，id 1305458494，13:41 UTC）
+- dev 服务器守护化恢复（setuid z 用户 + setsid 双 fork），服务三进程健康（app:200 / bridge:health ok）
+
+Stage Summary:
+- 用户本轮四项要求全部完成：作用域黑白名单+批量策略下发、MCP/OpenAPI 浏览器全量控制（Steel 全功能复制）、VNC 更名 HelmPort + Next.js 自研 RFB 重构、管理员配置/首启注册+后期可修改；源码推送 + 容器编译成功监控全绿
