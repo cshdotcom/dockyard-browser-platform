@@ -6,7 +6,7 @@ import { ENV, externalAvailable } from "../env"
 import { randomUUID } from "crypto"
 
 // ============================================================
-// 硬隔离浏览器容器（LiveDesk 自托管模式）
+// 硬隔离浏览器容器（HelmPort 自托管模式）
 // 安全模型：
 //   1. ReadOnlyRootfs    —— 根文件系统只读，任何位置不可写系统文件
 //   2. CapDrop=ALL       —— 丢弃全部 Linux capabilities
@@ -31,6 +31,7 @@ export interface BrowserHardeningSpec {
   env?: Record<string, string>
   labels?: Record<string, string>
   networkPolicy?: { allowInternalNetwork: boolean; allowSecureLocationAccess: boolean }
+  domainPolicy?: { mode: string; blackPatterns: string[]; whitePatterns: string[] }
   policyFile?: string | null // 网络策略托管策略 JSON（只读 bind-mount 进 /etc/chromium/policies/managed/）
   gatewayIp?: string | null // 会话网络网关（平台内部端点封禁目标）
 }
@@ -84,6 +85,7 @@ export function browserHardeningSummary(spec: BrowserHardeningSpec): BrowserHard
     image: spec.image,
     allowInternalNetwork: spec.networkPolicy?.allowInternalNetwork ?? false,
     allowSecureLocationAccess: spec.networkPolicy?.allowSecureLocationAccess ?? false,
+    domainPolicy: spec.domainPolicy ?? { mode: "BLACKLIST", blackPatterns: [], whitePatterns: [] },
     policyManagedChromium: !!spec.policyFile,
     iccDisabledNetwork: true,
   }

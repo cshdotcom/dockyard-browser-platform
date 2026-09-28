@@ -46,7 +46,11 @@ log "初始化数据库结构..."
 cd "$APP_DIR"
 bunx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -2 || log "警告：数据库结构推送失败（将沿用现有数据库）"
 
-# ---- 3. 种子数据（幂等：默认配置/超管账号/内置任务）----
+# ---- 3. 种子数据（幂等：默认配置/超管账号/内置任务/内置策略模板）----
+# 管理员引导三通道（互为补充，均幂等，后期可经「账号与安全」页修改）：
+#   · ADMIN_USERNAME / ADMIN_EMAIL / ADMIN_PASSWORD 环境变量 → 首启自动创建超管
+#   · ADMIN_PASSWORD_FORCE=1 → 启动时用环境变量密码覆盖已有管理员密码
+#   · 未配置且库中无管理员 → 登录页引导跳转 /setup 首启注册页
 log "播种初始数据（幂等）..."
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin@2026}" bun prisma/seed.ts 2>&1 | tail -3 || log "警告：种子执行失败（可能已初始化过）"
 
@@ -55,7 +59,7 @@ log "启动 WebSocket 枢纽..."
 (cd mini-services/ws-hub && PORT=${WS_HUB_PORT:-3003} bun index.ts >> /app/storage/ws-hub.log 2>&1) &
 WS_PID=$!
 
-# ---- 4.5 LiveDesk VNC 网关桥（票据HMAC鉴权 + RFB TCP中转，端口 $VNC_BRIDGE_PORT）----
+# ---- 4.5 HelmPort VNC 网关桥（票据HMAC鉴权 + RFB TCP中转，端口 $VNC_BRIDGE_PORT）----
 log "启动 VNC 网关桥..."
 (cd mini-services/vnc-bridge && VNC_BRIDGE_PORT=$VNC_BRIDGE_PORT bun index.ts >> /app/storage/vnc-bridge.log 2>&1) &
 BRIDGE_PID=$!

@@ -118,8 +118,9 @@ async function DomainTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Re
   }
   if (f.type) where.type = f.type
   if (f.enabled) where.enabled = f.enabled === "true"
+  if (f.scopeType) where.scopeType = f.scopeType
 
-  const [rows, total, statTotal, statBlack, statWhite, statEnabled] = await Promise.all([
+  const [rows, total, statTotal, statBlack, statWhite, statEnabled, groupOpts, userOpts] = await Promise.all([
     db.domainRule.findMany({
       where,
       ...pageSkipTake(q),
@@ -130,10 +131,13 @@ async function DomainTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Re
     db.domainRule.count({ where: { type: "BLACK" } }),
     db.domainRule.count({ where: { type: "WHITE" } }),
     db.domainRule.count({ where: { enabled: true } }),
+    db.group.findMany({ where: { deletedAt: null }, select: { id: true, name: true }, take: 200 }),
+    db.user.findMany({ where: { deletedAt: null }, select: { id: true, username: true }, take: 500 }),
   ])
 
   const creators = await db.user.findMany({ select: { id: true, username: true }, take: 300 })
   const usernameById = new Map(creators.map((u) => [u.id, u.username]))
+  const groupNameById = new Map(groupOpts.map((g) => [g.id, g.name]))
 
   const list: DomainRuleRow[] = rows.map((r) => ({
     id: r.id,
@@ -141,6 +145,14 @@ async function DomainTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Re
     type: r.type,
     enabled: r.enabled,
     note: r.note,
+    scopeType: r.scopeType || "GLOBAL",
+    scopeLabel:
+      (r.scopeType || "GLOBAL") === "GROUP" && r.groupId
+        ? `组：${groupNameById.get(r.groupId) || r.groupId.slice(0, 8)}`
+        : (r.scopeType || "GLOBAL") === "USER" && r.userId
+          ? `用户：${usernameById.get(r.userId) || r.userId.slice(0, 8)}`
+          : "全局",
+    scopeTargetId: (r.scopeType === "GROUP" ? r.groupId : r.scopeType === "USER" ? r.userId : null) || null,
     createdByUsername: r.createdByUserId ? usernameById.get(r.createdByUserId) || "-" : "-",
     createdAt: fmtDate(r.createdAt),
   }))
@@ -169,6 +181,8 @@ async function DomainTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Re
         sortField={q.sortField}
         sortOrder={q.sortOrder}
         filters={f}
+        groupOptions={groupOpts.map((g) => ({ id: g.id, name: g.name }))}
+        userOptions={userOpts.map((u) => ({ id: u.id, name: u.username }))}
       />
     </div>
   )

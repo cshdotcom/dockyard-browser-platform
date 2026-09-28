@@ -24,6 +24,7 @@ import { getConfigBool } from "./config"
 import { ENV } from "./env"
 import { mkdir, writeFile } from "fs/promises"
 import { join } from "path"
+import type { DomainPolicy } from "./domain-policy"
 
 export interface NetworkPolicy {
   allowInternalNetwork: boolean
@@ -88,7 +89,7 @@ function expandPatterns(patterns: string[]): string[] {
 export function platformSecureEndpoints(): string[] {
   const ports = [
     ENV.appPort, // NextJS 统一网关（页面/API/Server Actions）
-    ENV.vncBridgePort, // LiveDesk VNC 网关桥
+    ENV.vncBridgePort, // HelmPort VNC 网关桥
     ENV.cdpServicePort, // CDP 服务后台端口
     Number(process.env.WS_HUB_PORT || 3003), // 事件推送枢纽
   ]
@@ -166,11 +167,14 @@ export interface ChromiumPolicyOptions {
   policy: NetworkPolicy
   gatewayIp?: string | null // 会话网络网关（宿主服务入口）
   proxyUrl?: string | null // 锁定代理（ProxyMode=fixed_servers，用户不可改）
+  domainPolicy?: DomainPolicy | null // 域名黑白名单（作用域合并后）
 }
 
 export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<string, unknown> {
   const { policy } = opts
   const blocklist: string[] = []
+  const allowlist: string[] = []
+  let whitelistMode = false
 
   if (!policy.allowInternalNetwork) {
     blocklist.push(...expandPatterns(PRIVATE_HOST_PATTERNS))
@@ -186,11 +190,36 @@ export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<
     }
   }
 
+  // —— 域名黑白名单（黑名单直接入 blocklist；白名单模式切换 allowlist 严格语义）——
+  if (opts.domainPolicy && opts.domainPolicy.rules.length > 0) {
+    const dp = opts.domainPolicy
+    if (dp.mode === "WHITELIST") {
+      whitelistMode = true
+      for (const w of dp.whitePatterns) {
+        for (const s of SCHEMES) allowlist.push(s + w)
+      }
+      // 命中黑名单的白名单模式：黑名单规则叠加在 allowlist 之上（同为放行集内排除）
+      for (const b of dp.blackPatterns) {
+        for (const s of SCHEMES) allowlist.push("!" + s + b) // ! 前缀 = 白名单内排除例外
+      }
+      blocklist.push("*") // 全量阻断，仅白名单放行（allowlist 优先于 blocklist 命中）
+    } else {
+      for (const b of dp.blackPatterns) {
+        for (const s of SCHEMES) blocklist.push(s + b)
+      }
+      // 黑名单模式下白名单规则仍有价值：作为 blocklist 内的例外放行（半放行）
+      for (const w of dp.whitePatterns) {
+        for (const s of SCHEMES) blocklist.push("!" + s + w)
+      }
+    }
+  }
+
   const managed: Record<string, unknown> = {
     URLBlocklist: blocklist,
     // 沙箱内禁选文件（配合 file:// 封禁）
     AllowFileSelectionDialogs: false,
   }
+  if (whitelistMode) managed.URLAllowlist = allowlist
   // 内网封禁时：WebRTC 仅走代理 UDP，防本机/局域网 IP 泄漏与 P2P 直连
   if (!policy.allowInternalNetwork) {
     managed.WebRtcIPHandling = "disable_non_proxied_udp"

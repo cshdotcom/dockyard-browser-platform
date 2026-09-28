@@ -181,20 +181,51 @@ const domainSchema = z.object({
   type: z.enum(["BLACK", "WHITE"]),
   enabled: z.boolean(),
   note: z.string().max(300).optional().nullable(),
+  // —— 作用域：全局/用户组/用户 ——
+  scopeType: z.enum(["GLOBAL", "GROUP", "USER"]).default("GLOBAL"),
+  groupId: zId.nullish(),
+  userId: zId.nullish(),
+  priority: z.number().int().min(0).max(9999).default(0),
 })
+
+// 作用域参数清洗（GROUP 必须有效组 / USER 必须有效用户；不一致时回退 GLOBAL）
+async function sanitizeDomainScope(p: { scopeType: string; groupId?: string | null; userId?: string | null }): Promise<{
+  scopeType: string; groupId: string | null; userId: string | null
+}> {
+  if (p.scopeType === "GROUP") {
+    if (!p.groupId) throw new Error("组级规则必须选择用户组")
+    const g = await db.group.findFirst({ where: { id: p.groupId, deletedAt: null } })
+    if (!g) throw new Error("用户组不存在")
+    return { scopeType: "GROUP", groupId: p.groupId, userId: null }
+  }
+  if (p.scopeType === "USER") {
+    if (!p.userId) throw new Error("用户级规则必须选择用户")
+    const u = await db.user.findFirst({ where: { id: p.userId, deletedAt: null } })
+    if (!u) throw new Error("用户不存在")
+    return { scopeType: "USER", groupId: null, userId: p.userId }
+  }
+  return { scopeType: "GLOBAL", groupId: null, userId: null }
+}
 
 export async function saveDomainRuleAction(input: unknown): Promise<ActionResult<{ id: string }>> {
   return actionHandler(async () => {
     const ctx = await requireAdmin()
     const p = zodValidate(domainSchema, input)
-    const dup = await db.domainRule.findFirst({ where: { pattern: p.pattern, ...(p.id ? { id: { not: p.id } } : {}) } })
-    if (dup) throw new Error("相同域名模式已存在")
+    const scope = await sanitizeDomainScope(p)
+    const dup = await db.domainRule.findFirst({
+      where: {
+        pattern: p.pattern, type: p.type, scopeType: scope.scopeType, groupId: scope.groupId, userId: scope.userId,
+        ...(p.id ? { id: { not: p.id } } : {}),
+      },
+    })
+    if (dup) throw new Error("相同域名模式（同作用域/同类型）已存在")
+    const scopeData = { scopeType: scope.scopeType, groupId: scope.groupId, userId: scope.userId, priority: p.priority ?? 0 }
     if (p.id) {
       const existing = await db.domainRule.findUnique({ where: { id: p.id } })
       if (!existing) throw new Error("域名规则不存在")
       const row = await db.domainRule.update({
         where: { id: p.id },
-        data: { pattern: p.pattern, type: p.type, enabled: p.enabled, note: p.note || null },
+        data: { pattern: p.pattern, type: p.type, enabled: p.enabled, note: p.note || null, ...scopeData },
       })
       await writeAudit({
         operatorUserId: ctx.userId,
@@ -203,13 +234,13 @@ export async function saveDomainRuleAction(input: unknown): Promise<ActionResult
         resourceType: "DOMAIN_RULE",
         resourceId: row.id,
         resourceName: row.pattern,
-        before: { pattern: existing.pattern, type: existing.type, enabled: existing.enabled, note: existing.note },
-        after: { pattern: row.pattern, type: row.type, enabled: row.enabled, note: row.note },
+        before: { pattern: existing.pattern, type: existing.type, enabled: existing.enabled, note: existing.note, scopeType: existing.scopeType, groupId: existing.groupId, userId: existing.userId },
+        after: { pattern: row.pattern, type: row.type, enabled: row.enabled, note: row.note, ...scopeData },
       })
       return { id: row.id }
     }
     const row = await db.domainRule.create({
-      data: { pattern: p.pattern, type: p.type, enabled: p.enabled, note: p.note || null, createdByUserId: ctx.userId },
+      data: { pattern: p.pattern, type: p.type, enabled: p.enabled, note: p.note || null, createdByUserId: ctx.userId, ...scopeData },
     })
     await writeAudit({
       operatorUserId: ctx.userId,
@@ -218,7 +249,7 @@ export async function saveDomainRuleAction(input: unknown): Promise<ActionResult
       resourceType: "DOMAIN_RULE",
       resourceId: row.id,
       resourceName: row.pattern,
-      after: { pattern: row.pattern, type: row.type, enabled: row.enabled, note: row.note },
+      after: { pattern: row.pattern, type: row.type, enabled: row.enabled, note: row.note, ...scopeData },
     })
     return { id: row.id }
   })

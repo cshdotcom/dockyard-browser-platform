@@ -24,7 +24,7 @@ import {
   revokeShareAction, exportWorkspaceConfigAction, exportHarAction, runScriptAction,
   refreshVncKeyAction, updateWorkspaceAction, switchProxyAction, restartBrowserProcessAction,
 } from "@/server/actions/workspaces"
-import { LiveDeskViewer } from "@/components/vnc/live-desk-viewer"
+import { HelmPortViewer } from "@/components/vnc/helmport-viewer"
 import { cn } from "@/lib/utils"
 
 export interface WorkspaceDetailData {
@@ -232,7 +232,7 @@ export function WorkspaceDetail({
   )
 }
 
-// ================= NoVNC 远程桌面面板（LiveDesk 品牌化查看器） =================
+// ================= NoVNC 远程桌面面板（HelmPort 品牌化查看器：自研 RFB 客户端） =================
 function VncPanel({ workspace, canOperate }: { workspace: WorkspaceDetailData; canOperate: boolean }) {
   const router = useRouter()
   const [busy, setBusy] = React.useState(false)
@@ -259,7 +259,7 @@ function VncPanel({ workspace, canOperate }: { workspace: WorkspaceDetailData; c
 
   return (
     <div className="space-y-4">
-      <LiveDeskViewer
+      <HelmPortViewer
         workspace={{
           id: workspace.id, uuid: workspace.uuid, name: workspace.name, status: workspace.status,
           novncSessionId: workspace.novncSessionId, ownerName: workspace.ownerName,

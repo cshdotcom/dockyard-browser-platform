@@ -1,5 +1,5 @@
 // ============================================================
-// Dockyard VNC 网关桥（LiveDesk Bridge）
+// Dockyard VNC 网关桥（HelmPort Bridge）
 // 职责：浏览器端 WebSocket ←→ 远程浏览器容器 RFB(TCP) 双向转发
 //   - 单域名统一网关：经平台反向代理（?XTransformPort=3005）或独立端口
 //   - 票据鉴权：HMAC-SHA256 签名 + 60s 有效期 + 单次使用（nonce 防重放）
@@ -206,7 +206,7 @@ class DemoRfbSession {
   }
 
   private sendServerInit() {
-    const name = Buffer.from("Dockyard LiveDesk · Isolated Sandbox Framebuffer", "utf8")
+    const name = Buffer.from("Dockyard HelmPort · Isolated Sandbox Framebuffer", "utf8")
     const head = Buffer.alloc(24)
     head.writeUInt16BE(DEMO_W, 0)
     head.writeUInt16BE(DEMO_H, 2)
@@ -288,7 +288,7 @@ class DemoRfbSession {
           this.buf = this.buf.subarray(8 + cutLen)
           if (!this.readonly && text) {
             this.stats.clipRt++
-            const reply = Buffer.from(`[LiveDesk] 已收到 ${text.length} 字符: ${text.slice(0, 64)}`, "utf8")
+            const reply = Buffer.from(`[HelmPort] 已收到 ${text.length} 字符: ${text.slice(0, 64)}`, "utf8")
             const head = Buffer.alloc(8)
             head.writeUInt8(3, 0) // ServerCutText
             head.writeUInt32BE(reply.length, 4)
@@ -317,7 +317,7 @@ class DemoRfbSession {
                   if (text) {
                     this.stats.clipRt++
                     this.remoteClipboard = text
-                    this.sendExtProvide(`[LiveDesk] 已收到 ${text.length} 字符: ${text.slice(0, 128)}`)
+                    this.sendExtProvide(`[HelmPort] 已收到 ${text.length} 字符: ${text.slice(0, 128)}`)
                   }
                 }
               } catch { /* zlib 解压失败：忽略 */ }
@@ -603,7 +603,7 @@ const server = Bun.serve<WsData>({
   },
 })
 
-console.log(`[vnc-bridge] LiveDesk 桥已启动: 端口 ${PORT}（票据HMAC校验/单次防重放/只读服务端强制）`)
+console.log(`[vnc-bridge] HelmPort 桥已启动: 端口 ${PORT}（票据HMAC校验/单次防重放/只读服务端强制）`)
 
 // 优雅退出
 process.on("SIGTERM", () => { server.stop(true); process.exit(0) })

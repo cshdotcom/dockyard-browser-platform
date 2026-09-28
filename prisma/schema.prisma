@@ -655,8 +655,18 @@ model DomainRule {
   type           String   @default("BLACK") // BLACK | WHITE
   enabled        Boolean  @default(true)
   note           String?
+  // —— 作用域（0=全局 1=用户组 2=用户）：策略下发中心按目标批量落规则 ——
+  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER
+  groupId        String?  // scopeType=GROUP 时生效
+  userId         String?  // scopeType=USER 时生效
+  deploymentId   String?  // 来源策略下发批次（回滚时整批清理）
+  priority       Int      @default(0) // 数字越大越先应用
   createdByUserId String?
   createdAt      DateTime @default(now())
+
+  @@index([scopeType, groupId])
+  @@index([scopeType, userId])
+  @@index([type, enabled])
 }
 
 model UaRecord {
@@ -925,10 +935,63 @@ model RiskListRule {
   note           String?
   mode           String   @default("PERMANENT") // TEMP | PERMANENT
   expiresAt      DateTime?
+  // —— 作用域：登录/入口级风控仍取 GLOBAL；用户/组级 IP 黑白名单供策略下发中心批量落规则 ——
+  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER
+  groupId        String?
+  userId         String?
+  deploymentId   String?  // 来源策略下发批次（回滚时整批清理）
   createdByUserId String?
   createdAt      DateTime @default(now())
 
   @@index([type, value])
+  @@index([scopeType, groupId])
+  @@index([scopeType, userId])
+}
+
+// ============================================================
+// 策略下发中心：管理员按【用户/用户组】批量下发访问控制策略包
+// 策略包字段：内网开关 / 容器安全位置开关 / 域名黑白名单 / IP 黑白名单
+// 每次下发全量快照前置状态，支持一键回滚；逐目标结果落库可审计
+// ============================================================
+model PolicyDeployment {
+  id              String   @id @default(cuid())
+  name            String // 下发批次名称
+  bundleJson      String   // 下发的策略包内容（规范化后）
+  targetUsers     Json? // 目标用户ID列表
+  targetGroups    Json? // 目标用户组ID列表
+  status          String   @default("PENDING") // PENDING | RUNNING | SUCCESS | PARTIAL | FAILED | ROLLED_BACK
+  totalTargets    Int      @default(0)
+  successTargets  Int      @default(0)
+  failedTargets   Int      @default(0)
+  resultsJson     String? // 逐目标执行结果 [{targetId,targetType,targetName,ok,reason}]
+  snapshotJson    String? // 下发前全量状态快照（回滚依据）
+  note            String?
+  createdByUserId String?
+  deployedAt      DateTime?
+  finishedAt      DateTime?
+  rolledBackAt    DateTime?
+  rolledBackByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([createdByUserId])
+}
+
+model PolicyTemplate {
+  id              String   @id @default(cuid())
+  name            String   @unique
+  description     String?
+  bundleJson      String   // 模板策略包（同 PolicyDeployment.bundleJson 结构）
+  builtin         Boolean  @default(false) // 内置模板不可删除
+  usageCount      Int      @default(0)
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  deletedAt       DateTime?
+
+  @@index([builtin])
+  @@index([deletedAt])
 }
 
 model UserBehaviorProfile {

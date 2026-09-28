@@ -214,6 +214,46 @@ export async function changePasswordAction(input: unknown): Promise<ActionResult
   })
 }
 
+// ---- 修改登录用户名（需当前密码验证；审计 + 安全事件 + 会话保持）----
+export async function changeUsernameAction(input: unknown): Promise<ActionResult<{ username: string }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { newUsername, currentPassword } = zodValidate(
+      z.object({
+        newUsername: z.string().min(3, "用户名至少 3 位").max(32, "用户名至多 32 位"),
+        currentPassword: z.string().min(1).max(128),
+      }),
+      input
+    )
+    if (!rateLimit(`changeUsername:${ctx.userId}`, 5, 10 * 60_000).allowed) throw new Error("修改用户名过于频繁，请 10 分钟后再试")
+
+    if (!/^[a-zA-Z0-9_.-]+$/.test(newUsername)) throw new Error("用户名仅允许字母/数字/下划线/点/横线")
+    const user = await db.user.findUnique({ where: { id: ctx.userId } })
+    if (!user?.passwordHash) throw new Error("当前账号未设置密码")
+    if (newUsername === user.username) throw new Error("新用户名与当前相同")
+    if (!(await verifyPassword(currentPassword, user.passwordHash))) {
+      await writeSecurityEvent({ userId: ctx.userId, username: ctx.username, eventType: "USERNAME_CHANGE", success: false, detail: "密码验证失败" })
+      throw new Error("当前密码错误")
+    }
+    const dup = await db.user.findFirst({ where: { username: newUsername }, select: { id: true } })
+    if (dup) throw new Error("该用户名已被占用")
+
+    await db.user.update({ where: { id: ctx.userId }, data: { username: newUsername } })
+    await writeSecurityEvent({ userId: ctx.userId, username: newUsername, eventType: "USERNAME_CHANGE", success: true, detail: `登录用户名已由 ${ctx.username} 修改为 ${newUsername}` })
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "USERNAME_CHANGE",
+      resourceType: "USER",
+      resourceId: ctx.userId,
+      before: { username: user.username },
+      after: { username: newUsername },
+      severity: "WARN",
+    })
+    return { username: newUsername }
+  })
+}
+
 // ---- 换绑邮箱：旧邮箱+新邮箱双重验证码 ----
 export async function sendEmailChangeCodeAction(input: unknown): Promise<ActionResult> {
   return actionHandler(async () => {

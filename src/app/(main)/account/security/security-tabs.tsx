@@ -15,7 +15,7 @@ import { Switch } from "@/components/ui/switch"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import {
   start2faSetupAction, confirm2faSetupAction, disable2faAction, regenerateBackupCodesAction,
-  changePasswordAction, sendEmailChangeCodeAction, changeEmailAction, getBackupCodeCountAction,
+  changePasswordAction, changeUsernameAction, sendEmailChangeCodeAction, changeEmailAction, getBackupCodeCountAction,
 } from "@/server/actions/account"
 import { ConfirmDialog } from "@/components/shared/confirm"
 import { cn } from "@/lib/utils"
@@ -44,7 +44,7 @@ export function SecurityTabs({ data, force2fa }: { data: SecurityTabData; force2
       </TabsList>
 
       <TabsContent value="2fa" className="mt-4"><TwoFactorPanel data={data} force={force2fa} /></TabsContent>
-      <TabsContent value="password" className="mt-4"><ChangePasswordPanel has2fa={data.twoFactorEnabled} /></TabsContent>
+      <TabsContent value="password" className="mt-4 space-y-4"><ChangePasswordPanel has2fa={data.twoFactorEnabled} /><ChangeUsernamePanel current={data.username} /></TabsContent>
       <TabsContent value="email" className="mt-4"><ChangeEmailPanel email={data.email} verified={data.emailVerified} /></TabsContent>
       <TabsContent value="devices" className="mt-4"><TrustedDevicesPanel devices={data.trustedDevices} /></TabsContent>
       <TabsContent value="logs" className="mt-4"><SecurityLogsPanel events={data.events} /></TabsContent>
@@ -363,6 +363,59 @@ function ChangePasswordPanel({ has2fa }: { has2fa: boolean }) {
             {busy && <Loader2 className="mr-1 h-4 w-4 animate-spin" />} 确认修改
           </Button>
           {result && <p className="text-sm text-emerald-600">{result}</p>}
+        </form>
+      </CardContent>
+    </Card>
+  )
+}
+
+// ================= 修改登录用户名 =================
+function ChangeUsernamePanel({ current }: { current: string }) {
+  const router = useRouter()
+  const [newUsername, setNewUsername] = React.useState("")
+  const [password, setPassword] = React.useState("")
+  const [busy, setBusy] = React.useState(false)
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!newUsername.trim()) return toast.error("请填写新用户名")
+    setBusy(true)
+    try {
+      const res = await changeUsernameAction({ newUsername: newUsername.trim(), currentPassword: password })
+      if (res.code === 0) {
+        toast.success(`登录用户名已修改为 ${res.data?.username ?? newUsername.trim()}`)
+        setNewUsername("")
+        setPassword("")
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">修改登录用户名</CardTitle>
+        <CardDescription>
+          当前用户名：{current}。修改需验证当前密码；5 次/10分钟限速，全部变更记入审计与安全事件。
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={submit} className="space-y-4 max-w-sm">
+          <div className="space-y-1.5">
+            <Label>新用户名</Label>
+            <Input value={newUsername} onChange={(e) => setNewUsername(e.target.value)} placeholder="3-32 位字母/数字/下划线/点/横线" className="font-mono" />
+          </div>
+          <div className="space-y-1.5">
+            <Label>当前密码</Label>
+            <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+          </div>
+          <Button type="submit" variant="outline" disabled={busy || !newUsername.trim() || !password}>
+            {busy && <Loader2 className="mr-1 h-4 w-4 animate-spin" />} 修改用户名
+          </Button>
         </form>
       </CardContent>
     </Card>

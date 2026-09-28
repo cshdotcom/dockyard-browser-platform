@@ -17,6 +17,7 @@ import { createSession, destroySession } from "@/lib/external/steel"
 import { createNovncSession, destroyNovncSession, refreshNovncSecret, novncDialTarget, restartNovncBrowser, type NovncSession } from "@/lib/external/novnc"
 import { browserHardeningSummary, restartBrowserProcessInContainer, type BrowserHardeningInfo } from "@/lib/external/docker"
 import { resolveNetworkPolicy, type NetworkPolicy } from "@/lib/network-policy"
+import { resolveAccessPolicies, resolveDomainPolicyForUser, type DomainPolicy } from "@/lib/domain-policy"
 import { ENV } from "@/lib/env"
 import { moveToRecycle } from "@/lib/recycle"
 import { getConfigBool, getConfig, getConfigNumber } from "@/lib/config"
@@ -28,8 +29,14 @@ import { getConfigBool, getConfig, getConfigNumber } from "@/lib/config"
 // ============================================================
 
 // 网络策略快照序列化（落库展示 / MCP·OpenAPI 归属字段）
-function netPolicyJson(policy: NetworkPolicy): Prisma.InputJsonValue {
-  return JSON.parse(JSON.stringify(policy)) as Prisma.InputJsonValue
+function netPolicyJson(policy: NetworkPolicy, domain?: DomainPolicy | null): Prisma.InputJsonValue {
+  const snapshot: Record<string, unknown> = JSON.parse(JSON.stringify(policy))
+  if (domain) {
+    snapshot.domainMode = domain.mode
+    snapshot.domainBlack = domain.blackPatterns
+    snapshot.domainWhite = domain.whitePatterns
+  }
+  return snapshot as Prisma.InputJsonValue
 }
 
 // 组装代理URL：internal_singbox 类型读取实例内网socks地址
@@ -141,7 +148,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
       const proxyInfo = await buildProxyUrl(p.proxyNodeId)
       const steelNodeId = await pickSteelNode()
       // 生效网络访问策略快照（Steel 外部集群形态：策略随规格下发并落库；自托管形态由容器层执行）
-      const netPolicy = await resolveNetworkPolicy(ctx.userId)
+      const { network: netPolicy, domain: domPolicy } = await resolveAccessPolicies(ctx.userId)
       const session = await createSession({
         proxyUrl: proxyInfo.proxyUrl,
         userAgent: (templateConfig.ua as string) || undefined,
@@ -165,7 +172,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           tags,
           steelSessionId: session.sessionId,
           cdpUrl: session.cdpUrl,
-          networkPolicyJson: netPolicyJson(netPolicy),
+          networkPolicyJson: netPolicyJson(netPolicy, domPolicy),
           ttlMinutes: p.ttlMinutes || (await getConfigNumber("workspace.defaultTtlMinutes", 0)),
           idleTimeoutMinutes: p.idleTimeoutMinutes || (await getConfigNumber("workspace.defaultIdleTimeoutMin", 60)),
           createdByUserId: ctx.userId,
@@ -185,7 +192,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
       // ---- NoVNC 重度会话（独立配额校验在上面已做）----
       const proxyInfo = await buildProxyUrl(p.proxyNodeId)
       // 生效网络访问策略（管理员按用户/组控制：内网 / 容器安全位置）——创建时快照落库
-      const netPolicy = await resolveNetworkPolicy(ctx.userId)
+      const { network: netPolicy, domain: domPolicy } = await resolveAccessPolicies(ctx.userId)
       // 隔离Profile键：绑定“用户对应的配置的浏览器”，闪退/重建后自动还原同一环境
       const profileKey = p.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
       const novnc = await createNovncSession({
@@ -200,6 +207,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         startUrl: (templateConfig.startUrl as string) || undefined,
         labels: { "dockyard.owner": ctx.userId, "dockyard.profile-key": profileKey },
         networkPolicy: netPolicy,
+        domainPolicy: domPolicy,
       })
       const hardening = novnc.hardening || browserHardeningSummary({
         image: ENV.browserImage, cpuLimit: (templateConfig.cpuLimit as number) || 1, memLimitMb: (templateConfig.memLimitMb as number) || 1024,
@@ -224,7 +232,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           novncConnCount: 1,
           containerRef: novnc.containerName || null,
           hardeningJson: hardeningJsonInput,
-          networkPolicyJson: netPolicyJson(netPolicy),
+          networkPolicyJson: netPolicyJson(netPolicy, domPolicy),
           ttlMinutes: p.ttlMinutes,
           idleTimeoutMinutes: p.idleTimeoutMinutes,
           createdByUserId: ctx.userId,
@@ -293,7 +301,7 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
       const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
       const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
       // 重建时重新解析生效策略（管理员收紧/放宽即时作用于新容器）
-      const netPolicy = await resolveNetworkPolicy(ws.userId)
+      const { network: netPolicy, domain: domPolicy } = await resolveAccessPolicies(ws.userId)
       const novnc = await createNovncSession({
         proxyUrl: proxyInfo.proxyUrl,
         ttlMinutes: ws.ttlMinutes || undefined,
@@ -302,6 +310,7 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
         profileKey,
         labels: { "dockyard.owner": ws.userId, "dockyard.profile-key": profileKey },
         networkPolicy: netPolicy,
+        domainPolicy: domPolicy,
       })
       await db.browserWorkspace.update({
         where: { id },
@@ -381,6 +390,7 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
       const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
       const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
       const switchedPolicy = await resolveNetworkPolicy(ws.userId)
+      const switchedDomain = await resolveDomainPolicyForUser(ws.userId)
       const novnc = await createNovncSession({
         proxyUrl: proxyInfo.proxyUrl,
         ttlMinutes: ws.ttlMinutes || undefined,
@@ -390,6 +400,7 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
         labels: { "dockyard.owner": ws.userId, "dockyard.profile-key": profileKey },
         // 代理切换重建：策略重新解析，新代理地址同步锁入托管策略
         networkPolicy: switchedPolicy,
+        domainPolicy: switchedDomain,
       })
       await db.browserWorkspace.update({
         where: { id },
@@ -397,7 +408,7 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
           novncSessionId: novnc.novncSessionId, novncSecret: encrypt(novnc.secret),
           containerRef: novnc.containerName || null,
           hardeningJson: JSON.parse(JSON.stringify(novnc.hardening ? { ...novnc.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,
-          networkPolicyJson: netPolicyJson(switchedPolicy),
+          networkPolicyJson: netPolicyJson(switchedPolicy, switchedDomain),
           proxyNodeId: proxyNodeId || null, singboxInstanceId: proxyInfo.singboxInstanceId || null, status: "RUNNING",
         },
       })
@@ -619,7 +630,7 @@ export async function refreshVncKeyAction(input: unknown): Promise<ActionResult>
 }
 
 // ============================================================
-// LiveDesk VNC 连接票据：所有者/共享/管理员 → HMAC 票据（60s 单次有效）
+// HelmPort VNC 连接票据：所有者/共享/管理员 → HMAC 票据（60s 单次有效）
 // 五重隔离：WorkspaceUUID + 票据HMAC + 只读降级 + 桥侧防重放 + 桥侧只读丢帧
 // ============================================================
 
@@ -645,7 +656,7 @@ function b64url(buf: Buffer): string {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
 }
 
-// ---- 签发 VNC 连接票据（LiveDesk 客户端凭票据直连网关桥）----
+// ---- 签发 VNC 连接票据（HelmPort 客户端凭票据直连网关桥）----
 export async function getVncTicketAction(input: unknown): Promise<ActionResult<{
   ticket: string
   wsUrlQuery: string

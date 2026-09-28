@@ -48,7 +48,7 @@ export const ENV = {
   get appPort() {
     return Number(process.env.PORT || 3000)
   },
-  // ---- LiveDesk VNC 网关桥 ----
+  // ---- HelmPort VNC 网关桥 ----
   get vncBridgeSecret() {
     // 与 mini-services/vnc-bridge 共享的 HMAC 签名密钥（生产由 start.sh 随机生成注入两侧）
     return process.env.VNC_BRIDGE_SECRET || "dockyard-dev-vnc-secret"

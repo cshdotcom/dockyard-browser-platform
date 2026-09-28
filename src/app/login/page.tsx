@@ -1,5 +1,6 @@
 import { Suspense } from "react"
 import { getConfig } from "@/lib/config"
+import { getBootstrapState } from "@/lib/bootstrap"
 import { LoginForm } from "./login-form"
 
 export const dynamic = "force-dynamic"
@@ -15,6 +16,7 @@ export default async function LoginPage({
   const siteName = await getConfig<string>("ui.siteName", "Dockyard 浏览器工作平台")
   const announcement = await getConfig<string>("ui.loginAnnouncement", "")
   const allowRegister = await getConfig<boolean>("security.allowRegister", true)
+  const bootstrap = await getBootstrapState()
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-teal-50 via-white to-white dark:from-teal-950/40 dark:via-background dark:to-background p-4">
@@ -28,6 +30,22 @@ export default async function LoginPage({
         {announcement && (
           <div className="rounded-lg border border-teal-200 bg-teal-50 dark:border-teal-800 dark:bg-teal-950/40 p-3 text-sm text-teal-800 dark:text-teal-200">
             {announcement}
+          </div>
+        )}
+
+        {sp.notice === "bootstrap-done" && (
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/40 p-3 text-sm text-emerald-800 dark:text-emerald-200">
+            管理员账号初始化成功，请使用新账号登录
+          </div>
+        )}
+
+        {bootstrap.needsSetup && (
+          <div className="rounded-lg border border-teal-200 bg-teal-50 dark:border-teal-800 dark:bg-teal-950/40 p-3 text-sm text-teal-800 dark:text-teal-200 space-y-1">
+            <p className="font-medium">系统尚未初始化</p>
+            <p className="text-xs">
+              检测到库中没有任何账号。<a href="/setup" className="text-teal-600 hover:underline font-medium">前往初始化管理员 →</a>
+              （或部署时配置 ADMIN_USERNAME / ADMIN_PASSWORD 环境变量自动注册）
+            </p>
           </div>
         )}
 

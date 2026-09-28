@@ -16,6 +16,7 @@ import {
   type BrowserHardeningSpec,
 } from "./docker"
 import { writeNetworkPolicyFile, sessionNetworkGateway, type NetworkPolicy } from "../network-policy"
+import type { DomainPolicy } from "../domain-policy"
 
 export interface NovncSession {
   novncSessionId: string
@@ -64,6 +65,7 @@ export interface NovncProvisionParams {
   startUrl?: string
   labels?: Record<string, string>
   networkPolicy?: NetworkPolicy // 生效网络访问管控（内网/容器安全位置），自托管模式强制下发
+  domainPolicy?: DomainPolicy | null // 生效域名黑白名单（作用域合并后），同层下发
 }
 
 export async function createNovncSession(params: NovncProvisionParams): Promise<NovncSession> {
@@ -87,6 +89,10 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
         },
         // 网络访问管控下发（池侧按策略注入 Chromium 托管策略与网络隔离）
         networkPolicy: params.networkPolicy || { allowInternalNetwork: false, allowSecureLocationAccess: false },
+        // 域名黑白名单下发（黑名单直接拦截 / 白名单严格模式）
+        domainPolicy: params.domainPolicy
+          ? { mode: params.domainPolicy.mode, blackPatterns: params.domainPolicy.blackPatterns, whitePatterns: params.domainPolicy.whitePatterns }
+          : { mode: "BLACKLIST", blackPatterns: [], whitePatterns: [] },
       }),
     })
     if (!res.ok) throw new Error(`NoVNC API create failed: HTTP ${res.status}`)
@@ -116,7 +122,7 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
     const gatewayIp = params.networkPolicy ? await sessionNetworkGateway() : null
     const policyFile =
       params.userId && params.profileKey
-        ? await writeNetworkPolicyFile(`ws-${params.profileKey}`, { policy, gatewayIp, proxyUrl: params.proxyUrl || null }).catch(() => null)
+        ? await writeNetworkPolicyFile(`ws-${params.profileKey}`, { policy, gatewayIp, proxyUrl: params.proxyUrl || null, domainPolicy: params.domainPolicy || null }).catch(() => null)
         : null
     const spec: BrowserHardeningSpec = {
       image: ENV.browserImage,
@@ -130,6 +136,9 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       resolution: params.resolution || "1280x800",
       labels: params.labels,
       networkPolicy: { allowInternalNetwork: policy.allowInternalNetwork, allowSecureLocationAccess: policy.allowSecureLocationAccess },
+      domainPolicy: params.domainPolicy
+        ? { mode: params.domainPolicy.mode, blackPatterns: params.domainPolicy.blackPatterns, whitePatterns: params.domainPolicy.whitePatterns }
+        : { mode: "BLACKLIST", blackPatterns: [], whitePatterns: [] },
       policyFile,
       gatewayIp,
     }

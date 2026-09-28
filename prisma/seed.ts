@@ -1,5 +1,8 @@
-// 种子数据：超管账号 / 默认配置 / 内置定时任务 / 默认Steel节点与宿主机
+// 种子数据：超管账号（支持 ADMIN_* 环境变量引导，幂等可重复执行）/ 默认配置 / 内置定时任务 / 默认Steel节点与宿主机
 // 执行：bunx tsx prisma/seed.ts （或 bun prisma/seed.ts）
+// 管理员引导：
+//   ADMIN_USERNAME / ADMIN_EMAIL / ADMIN_PASSWORD —— 首次启动自动创建超管（已有则不覆盖，可用 ADMIN_PASSWORD_FORCE=1 强制同步密码）
+//   未提供环境变量且库中无任何管理员 → 登录页引导跳转 /setup 首启注册页
 import { PrismaClient } from "@prisma/client"
 import bcrypt from "bcryptjs"
 import { CONFIG_DEFAULTS } from "../src/lib/config"
@@ -23,40 +26,58 @@ async function main() {
   }
   console.log(`[seed] 系统配置 ${Object.keys(CONFIG_DEFAULTS).length} 项已就绪`)
 
-  // ---- 超管账号 ----
+  // ---- 超管账号（配置文件/环境变量引导；幂等，后期可经账号安全页修改）----
+  const adminUsername = process.env.ADMIN_USERNAME || "admin"
+  const adminEmail = process.env.ADMIN_EMAIL || "admin@dockyard.local"
   const adminPassword = process.env.ADMIN_PASSWORD || "Admin@2026"
-  const admin = await db.user.upsert({
-    where: { username: "admin" },
-    update: {},
-    create: {
-      username: "admin",
-      email: "admin@dockyard.local",
-      displayName: "超级管理员",
-      passwordHash: await bcrypt.hash(adminPassword, 12),
-      role: "SUPER_ADMIN",
-      enabled: true,
-      emailVerified: true,
-    },
+  const forceSync = process.env.ADMIN_PASSWORD_FORCE === "1"
+  const existingAdmin = await db.user.findFirst({
+    where: { OR: [{ username: adminUsername }, { email: adminEmail }], role: { in: ["SUPER_ADMIN", "ADMIN"] } },
   })
-  console.log(`[seed] 超管账号 admin 就绪（密码：${adminPassword}）`)
+  const admin = existingAdmin
+    ? forceSync && process.env.ADMIN_PASSWORD
+      ? await db.user.update({
+          where: { id: existingAdmin.id },
+          data: {
+            passwordHash: await bcrypt.hash(adminPassword, 12),
+            mustChangePassword: false,
+          },
+        })
+      : existingAdmin
+    : await db.user.create({
+        data: {
+          username: adminUsername,
+          email: adminEmail,
+          displayName: "超级管理员",
+          passwordHash: await bcrypt.hash(adminPassword, 12),
+          role: "SUPER_ADMIN",
+          enabled: true,
+          emailVerified: true,
+        },
+      })
+  console.log(
+    `[seed] 超管账号 ${admin.username} 就绪${existingAdmin ? (forceSync ? "（密码已按 ADMIN_PASSWORD 同步）" : "（已存在，未覆盖）") : `（密码：${process.env.ADMIN_PASSWORD ? "来自 ADMIN_PASSWORD 环境变量" : "Admin@2026 默认值，请尽快修改"}）`}`,
+  )
 
-  // ---- 默认演示用户 ----
-  const demoPassword = "Demo@2026"
-  await db.user.upsert({
-    where: { username: "demo" },
-    update: {},
-    create: {
-      username: "demo",
-      email: "demo@dockyard.local",
-      displayName: "演示用户",
-      passwordHash: await bcrypt.hash(demoPassword, 12),
-      role: "USER",
-      enabled: true,
-      emailVerified: true,
-      quota: { sessions: 5, novncSessions: 2, diskMb: 512 },
-    },
-  })
-  console.log(`[seed] 演示用户 demo 就绪（密码：${demoPassword}）`)
+  // ---- 默认演示用户（SEED_DEMO=0 可跳过，生产环境建议关闭）----
+  if (process.env.SEED_DEMO !== "0") {
+    const demoPassword = "Demo@2026"
+    await db.user.upsert({
+      where: { username: "demo" },
+      update: {},
+      create: {
+        username: "demo",
+        email: "demo@dockyard.local",
+        displayName: "演示用户",
+        passwordHash: await bcrypt.hash(demoPassword, 12),
+        role: "USER",
+        enabled: true,
+        emailVerified: true,
+        quota: { sessions: 5, novncSessions: 2, diskMb: 512 },
+      },
+    })
+    console.log(`[seed] 演示用户 demo 就绪（密码：${demoPassword}）`)
+  }
 
   // ---- 默认用户组 ----
   const defaultGroup = await db.group.upsert({
@@ -187,6 +208,64 @@ async function main() {
         createdByUserId: admin.id,
       },
     })
+  }
+
+  // ---- 内置策略模板（策略下发中心）----
+  const ptCount = await db.policyTemplate.count()
+  if (ptCount === 0) {
+    await db.policyTemplate.createMany({
+      data: [
+        {
+          name: "严格隔离基线",
+          description: "禁止内网 + 禁止容器安全位置 + 全局黑名单增强（默认零信任基线）",
+          builtin: true,
+          bundleJson: JSON.stringify({
+            allowInternalNetwork: false,
+            allowSecureLocationAccess: false,
+            domainRules: { mode: "BLACKLIST", patterns: [] },
+            ipRules: { mode: "BLACKLIST", values: [] },
+          }),
+          createdByUserId: admin.id,
+        },
+        {
+          name: "内网调研通道",
+          description: "允许内网（如内网知识库/测试环境）+ 仍禁止容器安全位置 + 域名黑名单",
+          builtin: true,
+          bundleJson: JSON.stringify({
+            allowInternalNetwork: true,
+            allowSecureLocationAccess: false,
+            domainRules: { mode: "BLACKLIST", patterns: ["*.gambling.example", "malware.test"] },
+            ipRules: { mode: "BLACKLIST", values: [] },
+          }),
+          createdByUserId: admin.id,
+        },
+        {
+          name: "白名单严格模式",
+          description: "仅允许业务白名单域名，其余全部阻断（最强管控）",
+          builtin: true,
+          bundleJson: JSON.stringify({
+            allowInternalNetwork: false,
+            allowSecureLocationAccess: false,
+            domainRules: { mode: "WHITELIST", patterns: ["*.company.example", "docs.company.example"] },
+            ipRules: { mode: "WHITELIST", values: [] },
+          }),
+          createdByUserId: admin.id,
+        },
+      ],
+    })
+    console.log("[seed] 内置策略模板 3 项就绪")
+  }
+
+  // ---- 全局域名黑名单演示规则（作用域示例）----
+  const drCount = await db.domainRule.count()
+  if (drCount === 0) {
+    await db.domainRule.createMany({
+      data: [
+        { pattern: "*.ads.example", type: "BLACK", note: "全局广告域名拦截", scopeType: "GLOBAL", createdByUserId: admin.id },
+        { pattern: "tracker.example", type: "BLACK", note: "全局追踪器拦截", scopeType: "GLOBAL", createdByUserId: admin.id },
+      ],
+    })
+    console.log("[seed] 全局域名规则 2 条就绪")
   }
 
   console.log("[seed] 完成 ✓")

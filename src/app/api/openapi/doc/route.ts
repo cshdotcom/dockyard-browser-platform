@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { MCP_OPERATIONS } from "@/server/mcp/engine"
+import { BROWSER_ACTIONS } from "@/lib/external/cdp-control"
 
 // OpenAPI 3.0 标准化接口文档自动生成：可直接被第三方平台/AI客户端/运维系统对接
 // 同时输出 MCP 工具描述（tools/list 兼容）
@@ -72,6 +73,46 @@ export async function GET() {
     },
   }
 
+  // —— 浏览器全量控制端点（Steel-Browser 全功能复制；与 MCP browser.* 同层）——
+  for (const def of BROWSER_ACTIONS) {
+    paths[`/api/openapi/browser/${def.action}`] = {
+      post: {
+        summary: `[浏览器控制] ${def.summary}`,
+        tags: ["Browser Control"],
+        security: [{ ApiKeyAuth: [] }],
+        description: `权限位：${def.perm === 8 ? "ADMIN" : def.perm === 4 ? "EXECUTE" : def.perm === 2 ? "WRITE" : "READ"}${def.danger ? "（高危）" : ""}；仅限资源所有者或 ADMIN 权限位工作区`,
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["workspaceId"],
+                properties: {
+                  workspaceId: { type: "string", description: "工作区 ID 或 UUID" },
+                  params: { type: "object", description: Object.entries(def.params).map(([k, v]) => `${k}: ${v}`).join("; ") || "无参数" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "{ code, msg, data: { action, workspaceId, mode: SIMULATED|LIVE_CDP, data, durationMs }, traceId }" },
+          "404": { description: "未知动作（目录见 GET /api/openapi/browser）" },
+          "403": { description: "网关关闭 / 无权控制该工作区" },
+          "429": { description: "限流（120次/分钟）" },
+        },
+      },
+    }
+  }
+  paths["/api/openapi/browser"] = {
+    get: {
+      summary: "浏览器控制动作目录（公开）",
+      tags: ["Browser Control"],
+      security: [],
+    },
+  }
+
   const spec = {
     openapi: "3.0.3",
     info: {
@@ -107,6 +148,12 @@ export async function GET() {
       danger: !!op.danger,
       requiredPermission: op.perm === 8 ? "ADMIN" : op.perm === 4 ? "EXECUTE" : op.perm === 2 ? "WRITE" : "READ",
       inputSchema: op.schema,
+    })),
+    "x-browser-actions": BROWSER_ACTIONS.map((a) => ({
+      action: a.action,
+      summary: a.summary,
+      params: a.params,
+      requiredPermission: a.perm === 8 ? "ADMIN" : a.perm === 4 ? "EXECUTE" : a.perm === 2 ? "WRITE" : "READ",
     })),
     "x-rate-limits": {
       perKeyPerSecond: "mcp.perKeyPerSecond 配置（默认20）",

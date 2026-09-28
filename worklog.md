@@ -211,3 +211,44 @@ Work Log:
 
 Stage Summary:
 - 用户本轮要求全部达成：网络访问管控 + 鉴权防护 + 源码推送 + 容器编译成功
+
+---
+Task ID: 8
+Agent: main
+Task: 本轮增量 — 域名/IP 作用域规则 + 批量策略下发 + MCP/OpenAPI 浏览器全量控制（进行中）
+
+Work Log:
+- Prisma：DomainRule/RiskListRule 增加作用域（GLOBAL/GROUP/USER + deploymentId 批次标记）+ 新增 PolicyDeployment/PolicyTemplate 模型；db push 后重新 seed（ADMIN_* 环境变量引导 + 内置 3 策略模板 + 全局域名规则示例）
+- src/lib/domain-policy.ts：域名规则三层解析（GLOBAL+组继承链+用户）+ 白名单严格模式语义 + 批量解析 + normalizeDomainPattern
+- network-policy.ts：Chromium 托管策略合并域名规则（URLBlocklist 黑名单 / URLAllowlist+blocklist=["*"] 白名单严格模式 / ! 例外语法）
+- 五处链路注入：工作区创建（cdp+novnc）/启动/切代理/看门狗自愈均解析并快照 domainPolicy；novnc.ts 下发池集群+自托管+策略文件；docker.ts spec 扩展
+- 规则管理页：域名规则作用域列/筛选/表单（组选择器+用户选择器+优先级）
+- 策略下发中心：policy-deployments actions（下发/回滚+顺序回滚保护/模板CRUD/目标选项器）+ /admin/policies 页面（三态开关/域名&IP黑白名单/目标多选/结果明细/批次历史回滚/模板）+ 导航入口
+- cdp-control.ts 浏览器全量控制层：30 个动作（navigate/screenshot/scrape/evaluate/click/type/press_key/scroll/hover/tabs×4/导航×3/cookies×2/block_urls/allow_urls/clear_url_filters/throttle/UA/viewport/geo/headers/wait_for/logs/dom_snapshot/status/debug_info）真实 CDP（WebSocket+Target.attach+连接池+日志环形缓冲）+ 模拟引擎（虚拟DOM/标签/截图 sharp PNG/白名单安全求值）
+- MCP：browser.* 30 操作注册（批量多工作区+失败隔离+单目标结果载荷入 resultJson 1MB 上限）；OpenAPI：/api/openapi/browser/[action] REST 网关 + doc 自动生成 Browser Control 端点组 + x-browser-actions
+
+Stage Summary:
+- 域名黑白名单+批量策略下发+MCP/OpenAPI 全量浏览器控制已落地（待 E2E）；HelmPort 查看器重构进行中
+
+---
+Task ID: 9
+Agent: main
+Task: 本轮增量收尾 — HelmPort 自研 RFB 客户端重构 + 全链路 E2E 验证
+
+Work Log:
+- HelmPort 重命名+Next.js 原生重构（替代 @novnc/novnc，已从依赖移除）：
+  · src/components/vnc/helmport/rfb-client.ts：自研 RFB 3.3/3.7/3.8 协议栈（版本协商回显服务端版本/安全类型选择/SecurityResult/ClientInit 单次防重发/ServerInit 像素格式解析/SetPixelFormat 强制 32bpp LE/SetEncodings Raw+CopyRect+桌面尺寸+光标伪编码/帧请求画质节流/键鼠输入/QEMU 扩展剪贴板 CompressionStream zlib + 经典 latin1 降级）
+  · helmport-viewer.tsx：品牌驾驶舱（ShipWheel 徽标/HelmPort by Dockyard）+ 键盘焦点捕获(keysym)/鼠标按钮位掩码/滚轮/触屏手势(长按右键+拖动)/剪贴板双通道抽屉/遥测 HUD/看门狗/自动重连重新取票/截图签名/归属水印/偏好持久化
+  · 全库改名：live-desk-viewer 删除、vnc-bridge 演示引擎 ServerInit 名/剪贴板回显/启动横幅、env/docker/network-policy/workspaces/start.sh 注释
+- 调试与修复（E2E 发现）：
+  · ClientInit 在 HandshakeInit 状态每次 pump 重发 → 多余 [1] 字节被桥判为协议错误断连 → 单次标记 clientInitSent
+  · zlib 流 write/close 全程 await + catch（Bun 事件式流错误兜底）；ctx null 守卫（Node 测试桩崩溃暴露）
+  · OpenAPI /api/openapi/browser 目录路由缺失（GET 返回 HTML 404）→ 补 route.ts
+  · cdp-control：BrowserWorkspace 无 lastActiveAt 字段 → cdpCallCount 递增；sim get_cookies 值脱敏对齐真实形态；sim set_viewport 返回 width/height
+  · policy-engine 回滚链式语义：作用域全清空+快照完整恢复（deploymentId 过滤导致链式回滚残留）
+  · .env 密钥再次丢失（AUTH_SECRET/ENCRYPTION_KEY/CRON_SECRET/VNC_BRIDGE_SECRET）→ 恢复 + 守护化重启 dev 服务器
+- 验证：round5 冒烟 95 项全过（域名作用域12/策略下发19/浏览器控制47/HTTP通道17/引导6）；Agent Browser：策略下发中心 UI（下发→结果弹窗→回滚全流程+DB断言）、HelmPort 全链路（握手/640x400 真实帧渲染/键鼠计数/中文剪贴板 17 字符完整往返 clipRt=1/183+帧/重连/隔离面板）、/setup 307、lint 零错、tsc 自有文件零错
+- scripts/test-round5.ts + scripts/test-helmport-rfb.ts 落库存档
+
+Stage Summary:
+- 本轮四项增量（作用域黑白名单+批量策略下发、MCP/OpenAPI 32动作浏览器全量控制、HelmPort 重命名重构、管理员三通道引导）全部实现并双通道验证通过

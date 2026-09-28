@@ -12,6 +12,7 @@ import { sessionStatus, destroySession } from "@/lib/external/steel"
 import { novncHealth, destroyNovncSession } from "@/lib/external/novnc"
 import { testConnectivity } from "@/lib/singbox"
 import { resolveNetworkPolicy } from "@/lib/network-policy"
+import { resolveDomainPolicyForUser } from "@/lib/domain-policy"
 
 const g = globalThis as unknown as {
   __dyTaskLocks?: Map<string, { lockedAt: number; heartbeat: number }>
@@ -462,6 +463,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
             const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${ws.id.slice(-16)}`
             // 崩溃自愈重建：重新解析当前生效策略（管理员收紧立即作用于新容器）
             const netPolicy = await resolveNetworkPolicy(ws.userId)
+            const domPolicy = await resolveDomainPolicyForUser(ws.userId)
             const rebuilt = await createNovncSession({
               ttlMinutes: ws.ttlMinutes || undefined,
               profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
@@ -469,6 +471,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
               profileKey,
               labels: { "dockyard.owner": ws.userId, "dockyard.recovered": "true" },
               networkPolicy: netPolicy,
+              domainPolicy: domPolicy,
             })
             await db.browserWorkspace.update({
               where: { id: ws.id },
@@ -477,7 +480,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
                 novncSessionId: rebuilt.novncSessionId, novncSecret: encrypt(rebuilt.secret),
                 containerRef: rebuilt.containerName || null,
                 hardeningJson: JSON.parse(JSON.stringify(rebuilt.hardening ? { ...rebuilt.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,
-                networkPolicyJson: JSON.parse(JSON.stringify(netPolicy)) as Prisma.InputJsonValue,
+                networkPolicyJson: JSON.parse(JSON.stringify({ ...netPolicy, domainMode: domPolicy.mode, domainBlack: domPolicy.blackPatterns, domainWhite: domPolicy.whitePatterns })) as Prisma.InputJsonValue,
               },
             })
             recovered++

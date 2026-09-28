@@ -1,20 +1,21 @@
 "use client"
 
 // ============================================================
-// Dockyard LiveDesk —— 品牌化现代 VNC 查看器
-// 替代原版老旧 noVNC 界面：现代驾驶舱风格 + 平台品牌一体化
-//   · 真实 RFB 客户端（@novnc/novnc）经统一网关桥 WebSocket 接入
+// Dockyard HelmPort —— 品牌化现代远程桌面查看器（全自研，零第三方 VNC 依赖）
+// 原名 LiveDesk（与第三方产品重名）→ 更名 HelmPort 并以 Next.js/React 原生重构：
+//   · 自研 RFB 3.3/3.7/3.8 协议客户端（src/components/vnc/helmport/rfb-client.ts）
 //   · 单次票据取票 → 断线自动重连（自动重新取票，退避重试）
 //   · 只读镜像：客户端 viewOnly + 服务端桥丢输入帧 双保险
-//   · 帧率/带宽/键鼠 HUD 实时遥测（WebSocket 数据面仪表化）
-//   · 品牌水印 / 截图加签 / 中文剪贴板双通道 / 触屏-鼠标模式记忆
+//   · 帧率/带宽/键鼠 HUD 实时遥测 + 停顿看门狗
+//   · 品牌水印 / 截图加签 / 中文剪贴板双通道（QEMU 扩展协议）
+//   · 触屏-鼠标模式记忆 / 画质档位 / 自适应缩放
 // ============================================================
 
 import * as React from "react"
 import { toast } from "sonner"
 import {
   Anchor, Camera, Clipboard, ClipboardCheck, Expand, Minimize2, RefreshCw, Loader2,
-  MousePointer2, Hand, ShieldCheck, Eye, TriangleAlert, Zap, Radio, Keyboard,
+  MousePointer2, Hand, ShieldCheck, Eye, TriangleAlert, Zap, Radio, Keyboard, ShipWheel,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -22,9 +23,11 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { getVncTicketAction } from "@/server/actions/workspaces"
+import { HelmPortRfb } from "./helmport/rfb-client"
+import { keysymFor } from "./helmport/keysyms"
 import { cn } from "@/lib/utils"
 
-export interface LiveDeskWorkspace {
+export interface HelmPortWorkspace {
   id: string
   uuid: string
   name: string
@@ -38,7 +41,13 @@ export interface LiveDeskWorkspace {
 
 type Phase = "idle" | "connecting" | "live" | "reconnecting" | "error"
 
-const QUALITY_MAP: Record<string, number> = { low: 3, mid: 6, high: 9 }
+const QUALITY_MAP: Record<string, number> = { low: 2, mid: 5, high: 9 }
+
+// 按钮位掩码：1=左 2=中 4=右 8=滚上 16=滚下
+const BTN_LEFT = 1
+const BTN_RIGHT = 4
+const BTN_SCROLL_UP = 8
+const BTN_SCROLL_DOWN = 16
 
 // 轻量设备指纹（水印标识用，不采集敏感信息）
 function deviceTag(): string {
@@ -53,13 +62,15 @@ function wsScheme(): string {
   return typeof location !== "undefined" && location.protocol === "https:" ? "wss" : "ws"
 }
 
-export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) {
-  const mountRef = React.useRef<HTMLDivElement | null>(null) // RFB 挂载容器（noVNC 在内部创建画布）
+export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) {
+  const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
   const stageRef = React.useRef<HTMLDivElement | null>(null)
-  const rfbRef = React.useRef<{ disconnect(): void } | null>(null)
+  const rfbRef = React.useRef<HelmPortRfb | null>(null)
   const statsRef = React.useRef({ frameTimes: [] as number[], bytesIn: 0, bytesOut: 0, lastMsgAt: 0 })
   const retryRef = React.useRef({ count: 0, timer: null as ReturnType<typeof setTimeout> | null, manual: false })
   const phaseRef = React.useRef<Phase>("idle")
+  const buttonMaskRef = React.useRef(0)
+  const touchRef = React.useRef<{ x: number; y: number; moved: boolean; timer: ReturnType<typeof setTimeout> | null; longFired: boolean } | null>(null)
 
   const [phase, setPhaseState] = React.useState<Phase>("idle")
   const [errMsg, setErrMsg] = React.useState("")
@@ -70,6 +81,7 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
   const [clipboardOpen, setClipboardOpen] = React.useState(false)
   const [clipboardText, setClipboardText] = React.useState("")
   const [clipboardReceived, setClipboardReceived] = React.useState("")
+  const [serverName, setServerName] = React.useState("")
 
   const readonly = workspace.mySharePermission === "VIEW" && !workspace.isOwner && !workspace.isAdmin
   const canOperate = !readonly
@@ -87,11 +99,11 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
 
   React.useEffect(() => {
     try {
-      const savedQ = localStorage.getItem(`ld-quality-${workspace.id}`)
+      const savedQ = localStorage.getItem(`hp-quality-${workspace.id}`)
       if (savedQ && QUALITY_MAP[savedQ]) setQuality(savedQ)
-      const savedScale = localStorage.getItem(`ld-scale-${workspace.id}`)
+      const savedScale = localStorage.getItem(`hp-scale-${workspace.id}`)
       if (savedScale === "fit" || savedScale === "1:1") setScaleFit(savedScale === "fit")
-      const savedWm = localStorage.getItem(`ld-wm-${workspace.id}`)
+      const savedWm = localStorage.getItem(`hp-wm-${workspace.id}`)
       if (savedWm === "0") setWatermark(false)
       const savedMode = localStorage.getItem(`vnc-mode-${workspace.id}`)
       if (savedMode === "mouse" || savedMode === "touch") setInputMode(savedMode)
@@ -100,13 +112,13 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
   }, [workspace.id])
 
   React.useEffect(() => {
-    try { localStorage.setItem(`ld-quality-${workspace.id}`, quality) } catch { /* noop */ }
+    try { localStorage.setItem(`hp-quality-${workspace.id}`, quality) } catch { /* noop */ }
   }, [quality, workspace.id])
   React.useEffect(() => {
-    try { localStorage.setItem(`ld-scale-${workspace.id}`, scaleFit ? "fit" : "1:1") } catch { /* noop */ }
+    try { localStorage.setItem(`hp-scale-${workspace.id}`, scaleFit ? "fit" : "1:1") } catch { /* noop */ }
   }, [scaleFit, workspace.id])
   React.useEffect(() => {
-    try { localStorage.setItem(`ld-wm-${workspace.id}`, watermark ? "1" : "0") } catch { /* noop */ }
+    try { localStorage.setItem(`hp-wm-${workspace.id}`, watermark ? "1" : "0") } catch { /* noop */ }
   }, [watermark, workspace.id])
   React.useEffect(() => {
     try { localStorage.setItem(`vnc-mode-${workspace.id}`, inputMode) } catch { /* noop */ }
@@ -130,10 +142,10 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
     return () => clearInterval(t)
   }, [])
 
-  // ---- 建立连接：取票 → 构造经统一网关的 WS → RFB 接管 ----
+  // ---- 建立连接：取票 → 构造经统一网关的 WS → 自研 RFB 客户端接管 ----
   const connect = React.useCallback(async () => {
     if (phaseRef.current === "connecting" || phaseRef.current === "live") return
-    if (!mountRef.current) return
+    if (!canvasRef.current) return
     setPhase("connecting")
     setErrMsg("")
     try {
@@ -151,93 +163,75 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
         url = base.startsWith("ws") ? `${base}/?${wsUrlQuery}` : `${wsScheme()}://${base.replace(/^https?:\/\//, "")}/?${wsUrlQuery}`
       }
 
-      // RFB 客户端（动态加载，避免 SSR/预渲染副作用）
-      // 注意：必须先完成动态 import 再创建 WebSocket —— 否则 socket 在 import 的
-      // 异步间隙中打开，桥推送的 RFB 版本横幅会在 onmessage 挂载前到达而丢失，
-      // 导致握手永久停滞。顺序：import → new WebSocket → 仪表化 → new RFB（全程同步）
-      const { default: RFB } = await import("@novnc/novnc")
-
-      // 仪表化 WebSocket：统计入向字节/帧 与 出向字节
+      // 仪表化 WebSocket（自研客户端用 addEventListener，多监听器共存）
       const sock = new WebSocket(url)
+      sock.binaryType = "arraybuffer"
       const st = statsRef.current
       st.bytesIn = 0; st.bytesOut = 0; st.frameTimes = []; st.lastMsgAt = 0
-      sock.binaryType = "arraybuffer"
-      // 拦截 onmessage 赋值（noVNC websock 内部直接赋值该属性）
-      const wmDesc = Object.getOwnPropertyDescriptor(WebSocket.prototype, "onmessage")!
-      let realOnMessage: ((ev: MessageEvent) => void) | null = null
-      Object.defineProperty(sock, "onmessage", {
-        configurable: true,
-        get: () => realOnMessage,
-        set: (h) => {
-          realOnMessage = h as ((ev: MessageEvent) => void) | null
-          wmDesc.set!.call(sock, (ev: MessageEvent) => {
-            st.lastMsgAt = Date.now()
-            const size = typeof ev.data === "string" ? ev.data.length : (ev.data as ArrayBuffer).byteLength
-            st.bytesIn += size
-            if (size > 20_000) st.frameTimes.push(Date.now()) // 帧带消息 ≈ 256KB
-            realOnMessage?.(ev)
-          })
-        },
+      sock.addEventListener("message", (ev) => {
+        st.lastMsgAt = Date.now()
+        const size = typeof ev.data === "string" ? ev.data.length : (ev.data as ArrayBuffer).byteLength
+        st.bytesIn += size
+        if (size > 100_000) st.frameTimes.push(Date.now()) // 帧带消息
       })
       const protoSend = WebSocket.prototype.send
-      sock.send = (data: string | ArrayBufferLike | Blob | ArrayBufferView) => {
+      sock.send = ((data: string | ArrayBufferLike | Blob | ArrayBufferView) => {
         try {
           const size = typeof data === "string" ? data.length : data instanceof Blob ? data.size : (data as ArrayBuffer).byteLength
           st.bytesOut += size
           protoSend.call(sock, data as string)
         } catch { /* 连接关闭竞态：忽略 */ }
-      }
+      }) as typeof sock.send
 
-      const rfb = new RFB(mountRef.current, sock, {
-        shared: true,
+      const canvas = canvasRef.current
+      const rfb = new HelmPortRfb(sock, {
+        canvas,
         viewOnly: ticketReadonly,
-        scaleViewport: scaleFit,
-        qualityLevel: QUALITY_MAP[quality] ?? 6,
-        background: [7, 11, 14],
+        qualityLevel: QUALITY_MAP[quality] ?? 5,
+        onConnected: (info) => {
+          retryRef.current.count = 0
+          setServerName(info.name)
+          setPhase("live")
+          try { stageRef.current?.focus() } catch { /* noop */ }
+        },
+        onClipboard: (text) => setClipboardReceived(text),
+        onSecurityFail: (reason) => {
+          setErrMsg(`安全握手失败：${reason}`)
+          retryRef.current.manual = true
+        },
+        onTelemetry: () => {
+          // 帧计数由 message 监听推断；此回调保留扩展位
+        },
+        onDisconnected: (reason) => {
+          rfbRef.current = null
+          if (retryRef.current.manual) {
+            retryRef.current.manual = false
+            setPhase("idle")
+            return
+          }
+          // 自动重连：票据单次有效 → 每次重连自动重新取票，退避 1/2/4/8/8s
+          const attempt = ++retryRef.current.count
+          if (attempt <= 5) {
+            setPhase("reconnecting")
+            let left = Math.min(1 << (attempt - 1), 8)
+            setRetryIn(left)
+            const cd = setInterval(() => { left--; setRetryIn(Math.max(0, left)) }, 1000)
+            retryRef.current.timer = setTimeout(() => {
+              clearInterval(cd)
+              connect()
+            }, Math.min(1 << (attempt - 1), 8) * 1000)
+          } else {
+            setPhase("error")
+            setErrMsg(reason || "连接已断开且重连预算耗尽")
+          }
+        },
       })
       rfbRef.current = rfb
-      rfb.addEventListener("connect", () => {
-        retryRef.current.count = 0
-        setPhase("live")
-        // 聚焦 noVNC 自建画布（键盘事件挂载于该画布）
-        try { (rfb as unknown as { focus(): void }).focus() } catch { /* noop */ }
-      })
-      rfb.addEventListener("clipboard", (e) => {
-        const text = e.detail?.text
-        if (text) setClipboardReceived(text)
-      })
-      rfb.addEventListener("securityfailure", (e) => {
-        setErrMsg(`安全握手失败：${e.detail?.reason || "未知原因"}`)
-        retryRef.current.manual = true
-      })
-      rfb.addEventListener("disconnect", (e) => {
-        rfbRef.current = null
-        if (retryRef.current.manual) {
-          retryRef.current.manual = false
-          setPhase("idle")
-          return
-        }
-        // 自动重连：票据单次有效 → 每次重连自动重新取票，退避 1/2/4/8/8s
-        const attempt = ++retryRef.current.count
-        if (attempt <= 5) {
-          setPhase("reconnecting")
-          let left = Math.min(1 << (attempt - 1), 8)
-          setRetryIn(left)
-          const cd = setInterval(() => { left--; setRetryIn(Math.max(0, left)) }, 1000)
-          retryRef.current.timer = setTimeout(() => {
-            clearInterval(cd)
-            connect()
-          }, Math.min(1 << (attempt - 1), 8) * 1000)
-        } else {
-          setPhase("error")
-          setErrMsg(e.detail?.reason || "连接已断开且重连预算耗尽")
-        }
-      })
     } catch (e) {
       setPhase("error")
       setErrMsg(e instanceof Error ? e.message : "连接建立失败")
     }
-  }, [workspace.id, quality, scaleFit])
+  }, [workspace.id, quality])
 
   const disconnect = React.useCallback(() => {
     retryRef.current.manual = true
@@ -266,13 +260,9 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
 
   // ---- 画质 / 缩放热调整 ----
   React.useEffect(() => {
-    const rfb = rfbRef.current as unknown as { qualityLevel: number } | null
-    if (rfb) rfb.qualityLevel = QUALITY_MAP[quality] ?? 6
+    const rfb = rfbRef.current
+    if (rfb) rfb.qualityLevel = QUALITY_MAP[quality] ?? 5
   }, [quality])
-  React.useEffect(() => {
-    const rfb = rfbRef.current as unknown as { scaleViewport: boolean } | null
-    if (rfb) rfb.scaleViewport = scaleFit
-  }, [scaleFit])
 
   React.useEffect(() => {
     const onFs = () => setFullscreen(!!document.fullscreenElement)
@@ -287,9 +277,119 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
     } catch { toast.error("当前环境不允许全屏") }
   }
 
+  // ================= 输入：坐标映射 =================
+  const toFbCoords = (clientX: number, clientY: number): { x: number; y: number } => {
+    const canvas = canvasRef.current
+    if (!canvas) return { x: 0, y: 0 }
+    const rect = canvas.getBoundingClientRect()
+    const sx = canvas.width / Math.max(1, rect.width)
+    const sy = canvas.height / Math.max(1, rect.height)
+    return {
+      x: Math.max(0, Math.min(canvas.width - 1, Math.floor((clientX - rect.left) * sx))),
+      y: Math.max(0, Math.min(canvas.height - 1, Math.floor((clientY - rect.top) * sy))),
+    }
+  }
+
+  // ================= 输入：鼠标（桌面） =================
+  const onStageMouseDown = (e: React.MouseEvent) => {
+    if (phase !== "live" || !canOperate || inputMode === "touch") return
+    e.preventDefault()
+    const btn = e.button === 0 ? BTN_LEFT : e.button === 1 ? 2 : e.button === 2 ? BTN_RIGHT : 0
+    buttonMaskRef.current |= btn
+    const { x, y } = toFbCoords(e.clientX, e.clientY)
+    rfbRef.current?.sendPointer(x, y, buttonMaskRef.current)
+  }
+  const onStageMouseMove = (e: React.MouseEvent) => {
+    if (phase !== "live" || !canOperate || inputMode === "touch") return
+    const { x, y } = toFbCoords(e.clientX, e.clientY)
+    rfbRef.current?.sendPointer(x, y, buttonMaskRef.current)
+  }
+  const onStageMouseUp = (e: React.MouseEvent) => {
+    if (phase !== "live" || !canOperate || inputMode === "touch") return
+    const btn = e.button === 0 ? BTN_LEFT : e.button === 1 ? 2 : e.button === 2 ? BTN_RIGHT : 0
+    buttonMaskRef.current &= ~btn
+    const { x, y } = toFbCoords(e.clientX, e.clientY)
+    rfbRef.current?.sendPointer(x, y, buttonMaskRef.current)
+  }
+  const onStageWheel = (e: React.WheelEvent) => {
+    if (phase !== "live" || !canOperate) return
+    e.preventDefault()
+    const { x, y } = toFbCoords(e.clientX, e.clientY)
+    const scrollBtn = e.deltaY < 0 ? BTN_SCROLL_UP : BTN_SCROLL_DOWN
+    rfbRef.current?.sendPointer(x, y, buttonMaskRef.current | scrollBtn)
+    rfbRef.current?.sendPointer(x, y, buttonMaskRef.current)
+  }
+
+  // ================= 输入：触屏（长按=右键 / 拖动=移动 / 双击缩放交由浏览器） =================
+  const onStageTouchStart = (e: React.TouchEvent) => {
+    if (phase !== "live" || !canOperate || inputMode !== "touch" || e.touches.length !== 1) return
+    const t = e.touches[0]
+    const { x, y } = toFbCoords(t.clientX, t.clientY)
+    touchRef.current = { x: t.clientX, y: t.clientY, moved: false, timer: null, longFired: false }
+    const rec = touchRef.current
+    rec.timer = setTimeout(() => {
+      if (touchRef.current === rec && !rec.moved) {
+        rec.longFired = true
+        buttonMaskRef.current |= BTN_RIGHT
+        rfbRef.current?.sendPointer(x, y, buttonMaskRef.current)
+        if (navigator.vibrate) navigator.vibrate(30)
+      }
+    }, 550)
+  }
+  const onStageTouchMove = (e: React.TouchEvent) => {
+    if (phase !== "live" || !canOperate || inputMode !== "touch" || !touchRef.current) return
+    const t = e.touches[0]
+    const rec = touchRef.current
+    if (Math.abs(t.clientX - rec.x) > 8 || Math.abs(t.clientY - rec.y) > 8) {
+      rec.moved = true
+      if (rec.timer) clearTimeout(rec.timer)
+      const { x, y } = toFbCoords(t.clientX, t.clientY)
+      // 拖动：按住左键移动
+      buttonMaskRef.current |= BTN_LEFT
+      rfbRef.current?.sendPointer(x, y, buttonMaskRef.current)
+    }
+  }
+  const onStageTouchEnd = (e: React.TouchEvent) => {
+    if (phase !== "live" || !canOperate || inputMode !== "touch" || !touchRef.current) return
+    const rec = touchRef.current
+    if (rec.timer) clearTimeout(rec.timer)
+    const last = e.changedTouches[0]
+    const { x, y } = toFbCoords(last.clientX, last.clientY)
+    if (!rec.moved && !rec.longFired) {
+      // 单击 = 左键点击
+      rfbRef.current?.sendPointer(x, y, buttonMaskRef.current | BTN_LEFT)
+      rfbRef.current?.sendPointer(x, y, buttonMaskRef.current & ~BTN_LEFT)
+    } else {
+      // 松开全部按钮
+      buttonMaskRef.current &= ~(BTN_LEFT | BTN_RIGHT)
+      rfbRef.current?.sendPointer(x, y, buttonMaskRef.current)
+    }
+    touchRef.current = null
+  }
+
+  // ================= 输入：键盘（keysym 直发，修饰键状态机） =================
+  const onStageKeyDown = (e: React.KeyboardEvent) => {
+    if (phase !== "live" || !canOperate) return
+    const keysym = keysymFor(e.nativeEvent)
+    if (keysym !== null) {
+      e.preventDefault()
+      rfbRef.current?.sendKey(keysym, true)
+      const name = e.key === " " ? "Space" : e.key === "Enter" ? "Enter" : e.key.length === 1 ? e.key : e.key.replace("Arrow", "↑")
+      setLastKeys((k) => [...k.slice(-5), name])
+    }
+  }
+  const onStageKeyUp = (e: React.KeyboardEvent) => {
+    if (phase !== "live" || !canOperate) return
+    const keysym = keysymFor(e.nativeEvent)
+    if (keysym !== null) {
+      e.preventDefault()
+      rfbRef.current?.sendKey(keysym, false)
+    }
+  }
+
   // ---- 截图（画布快照 + 品牌签名条）----
   const screenshot = () => {
-    const cv = mountRef.current?.querySelector("canvas") as HTMLCanvasElement | null
+    const cv = canvasRef.current
     if (!cv || phase !== "live") { toast.error("尚未连接远程桌面"); return }
     const out = document.createElement("canvas")
     const FOOTER = 46
@@ -307,31 +407,29 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
     ctx.fillRect(0, cv.height, out.width, 2)
     ctx.fillStyle = "#e6f7f2"
     ctx.font = "bold 14px ui-sans-serif, system-ui"
-    ctx.fillText("Dockyard LiveDesk", 14, cv.height + 28)
+    ctx.fillText("Dockyard HelmPort", 14, cv.height + 28)
     ctx.fillStyle = "#9fc4bb"
     ctx.font = "12px ui-sans-serif, system-ui"
     ctx.fillText(`${workspace.name} · ${workspace.ownerName} · ${new Date().toLocaleString()} · ${deviceTag()}`, 170, cv.height + 28)
     const a = document.createElement("a")
     a.href = out.toDataURL("image/png")
-    a.download = `livedesk-${workspace.name}-${Date.now()}.png`
+    a.download = `helmport-${workspace.name}-${Date.now()}.png`
     a.click()
     toast.success("截图已下载（含归属水印签名条）")
   }
 
-  // ---- 剪贴板双通道：RFB ClientCutText 直达 + 平台中转审计通道 ----
+  // ---- 剪贴板双通道：RFB 扩展直达 + 平台中转审计通道 ----
   const sendClipboard = async () => {
     const cleaned = clipboardText.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
     if (!cleaned) { toast.error("剪贴板内容为空"); return }
     const sliced = cleaned.slice(0, 5000)
     let okCount = 0
-    // 通道1：RFB 扩展剪贴板直达（QEMU 扩展协议：UTF-8 全字符 + zlib；中文完整支持）
+    let channelInfo = ""
+    // 通道1：自研 RFB 扩展剪贴板（QEMU 协议：UTF-8 全字符 + zlib；中文完整支持）
     try {
-      const rfb = rfbRef.current as unknown as { clipboardPasteFrom?: (t: string) => void; clipboardPasteFromLocal?: (t: string) => void } | null
-      const fn = rfb?.clipboardPasteFrom || rfb?.clipboardPasteFromLocal // 兼容 noVNC 1.7 与旧版方法名
-      if (fn && phase === "live" && canOperate) {
-        fn.call(rfb, sliced)
-        okCount++
-      }
+      const res = await rfbRef.current?.sendClipboard(sliced)
+      if (res === "extended") { okCount++; channelInfo = "RFB扩展" }
+      else if (res === "classic") { okCount++; channelInfo = "RFB经典" }
     } catch { /* 通道2兜底 */ }
     // 通道2：平台中转代理（后端 UTF-8 校验 + 管理员全局开关 + 审计）
     try {
@@ -341,17 +439,10 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
         body: JSON.stringify({ workspaceId: workspace.id, text: sliced }),
       })
       const json = await res.json()
-      if (json.code === 0) okCount++
+      if (json.code === 0) { okCount++; channelInfo = channelInfo ? `${channelInfo}+平台` : "平台" }
       else toast.error(json.msg)
     } catch { /* 平台通道不可用不影响直达通道 */ }
-    if (okCount > 0) toast.success(`剪贴板已投递（${okCount} 通道）`)
-  }
-
-  // ---- 键盘回显 HUD（画布获焦时的本地按键可视化）----
-  const onStageKeyDown = (e: React.KeyboardEvent) => {
-    if (phase !== "live") return
-    const name = e.key === " " ? "Space" : e.key === "Enter" ? "Enter" : e.key.length === 1 ? e.key : e.key.replace("Arrow", "↑")
-    setLastKeys((k) => [...k.slice(-5), name])
+    if (okCount > 0) toast.success(`剪贴板已投递（${channelInfo || "未知通道"}）`)
   }
 
   const statusPill = () => {
@@ -385,10 +476,10 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
           {/* 品牌标识 */}
           <div className="flex items-center gap-2 pr-2 mr-1 border-r border-slate-700/60">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-teal-400 to-emerald-600 shadow-md shadow-teal-500/20">
-              <Anchor className="h-4 w-4 text-slate-950" strokeWidth={2.4} />
+              <ShipWheel className="h-4 w-4 text-slate-950" strokeWidth={2.4} />
             </div>
             <div className="leading-tight">
-              <div className="text-sm font-bold tracking-tight text-slate-50">LiveDesk<span className="ml-1 text-[10px] font-normal text-teal-400/80 align-middle">by Dockyard</span></div>
+              <div className="text-sm font-bold tracking-tight text-slate-50">HelmPort<span className="ml-1 text-[10px] font-normal text-teal-400/80 align-middle">by Dockyard</span></div>
               <div className="text-[10px] text-slate-500 max-w-40 truncate">{workspace.name}</div>
             </div>
           </div>
@@ -424,7 +515,7 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
               </button>
               <button type="button" onClick={() => setInputMode("touch")} disabled={!canOperate}
                 className={cn("flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors", inputMode === "touch" ? "bg-teal-600 text-white shadow" : "text-slate-400 hover:text-slate-200")}
-                title="触屏模式（移动端默认：长按=右键 双指=缩放）">
+                title="触屏模式（移动端默认：长按=右键 拖动=移动）">
                 <Hand className="h-3.5 w-3.5" />
               </button>
             </div>
@@ -468,11 +559,28 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
       </div>
 
       {/* ===== 画面舞台 ===== */}
-      <div ref={stageRef} tabIndex={0} onKeyDown={onStageKeyDown}
-        className={cn("relative overflow-hidden rounded-xl border border-slate-800 bg-[#070b0e] outline-none transition-shadow",
-          phase === "live" ? "shadow-[0_0_32px_-8px_rgba(45,212,191,0.35)]" : "",
+      <div ref={stageRef} tabIndex={0}
+        onKeyDown={onStageKeyDown} onKeyUp={onStageKeyUp}
+        onMouseDown={onStageMouseDown} onMouseMove={onStageMouseMove} onMouseUp={onStageMouseUp}
+        onWheel={onStageWheel}
+        onTouchStart={onStageTouchStart} onTouchMove={onStageTouchMove} onTouchEnd={onStageTouchEnd}
+        onContextMenu={(e) => e.preventDefault()}
+        className={cn("relative overflow-hidden rounded-xl border border-slate-800 bg-[#070b0e] outline-none transition-shadow select-none",
+          phase === "live" ? "shadow-[0_0_32px_-8px_rgba(45,212,191,0.35)] cursor-default" : "",
           fullscreen ? "flex h-screen w-screen items-center justify-center" : "")}>
-        <div ref={mountRef} className={cn("flex w-full items-center justify-center overflow-auto", phase === "live" ? "min-h-0" : "min-h-[420px] md:min-h-[520px]")} />
+        {/* 画布：自适应缩放或 1:1 */}
+        <div className={cn("flex w-full items-center justify-center overflow-auto", phase === "live" ? "min-h-0" : "min-h-[420px] md:min-h-[520px]")}>
+          <canvas
+            ref={canvasRef}
+            width={1280}
+            height={800}
+            className={cn(
+              "block",
+              phase === "live" && scaleFit ? "max-w-full h-auto" : "",
+              phase !== "live" ? "invisible absolute" : "",
+            )}
+          />
+        </div>
 
         {/* 状态遮罩 */}
         {phase !== "live" && (
@@ -480,11 +588,11 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
             {phase === "idle" && (
               <>
                 <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-teal-400/20 to-emerald-600/20 border border-teal-500/30">
-                  <Anchor className="h-8 w-8 text-teal-400" />
+                  <ShipWheel className="h-8 w-8 text-teal-400" />
                 </div>
-                <p className="text-sm font-medium text-slate-200">LiveDesk 远程桌面 · {workspace.name}</p>
+                <p className="text-sm font-medium text-slate-200">HelmPort 远程桌面 · {workspace.name}</p>
                 <p className="max-w-md px-6 text-center text-xs leading-relaxed text-slate-500">
-                  会话经统一网关中转（工作区 UUID + HMAC 单次票据双因子校验），原始内网地址不暴露。
+                  会话经统一网关中转（工作区 UUID + HMAC 单次票据双因子校验），原始内网地址不暴露。自研 RFB 协议客户端（Next.js 原生实现）。
                   {readonly && " 您持有只读授权：画面镜像可见，键鼠与剪贴板输入将被服务端丢弃。"}
                 </p>
                 {(status === "RUNNING" || status === "IDLE") ? (
@@ -500,7 +608,7 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
               <>
                 <Loader2 className="h-10 w-10 animate-spin text-teal-400" />
                 <p className="text-sm text-slate-300">正在建立加密通道…</p>
-                <p className="text-xs text-slate-500">取票 → 网关桥 → RFB 握手</p>
+                <p className="text-xs text-slate-500">取票 → 网关桥 → RFB 握手（版本协商/安全类型/像素格式）</p>
               </>
             )}
             {phase === "reconnecting" && (
@@ -541,7 +649,7 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
         {phase === "live" && (
           <>
             <div className="pointer-events-none absolute left-2 top-2 rounded-md bg-slate-950/70 px-2 py-0.5 font-mono text-[10px] text-teal-300/80 backdrop-blur">
-              RFB · {workspace.uuid.slice(0, 8)} · {inputMode === "touch" ? "TOUCH" : "POINTER"}
+              RFB · {workspace.uuid.slice(0, 8)} · {inputMode === "touch" ? "TOUCH" : "POINTER"}{serverName ? ` · ${serverName.slice(0, 24)}` : ""}
             </div>
             {lastKeys.length > 0 && (
               <div className="pointer-events-none absolute bottom-2 left-2 flex gap-1">
@@ -556,7 +664,7 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
         {/* 触屏手势提示 */}
         {inputMode === "touch" && phase === "live" && (
           <div className="pointer-events-none absolute bottom-2 right-2 rounded-md bg-slate-950/70 px-2 py-1 text-[10px] text-slate-400 backdrop-blur">
-            单击=左键 · 长按=右键 · 双指=缩放
+            单击=左键 · 长按=右键 · 拖动=移动 · 滚轮=滚动
           </div>
         )}
       </div>
@@ -566,7 +674,7 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
         <div className="rounded-xl border bg-slate-950/60 p-3 space-y-2">
           <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <ClipboardCheck className="h-3.5 w-3.5 text-teal-500" />
-            中文剪贴板双通道：RFB 协议直达 + 平台审计中转（UTF-8 校验，上限 5000 字符，受管理员全局开关管控）
+            中文剪贴板双通道：自研 RFB QEMU 扩展直达（UTF-8 + zlib）+ 平台审计中转（上限 5000 字符，受管理员全局开关管控）
           </p>
           <div className="grid gap-2 md:grid-cols-2">
             <div className="space-y-1.5">
@@ -577,14 +685,19 @@ export function LiveDeskViewer({ workspace }: { workspace: LiveDeskWorkspace }) 
                 onChange={(e) => setClipboardText(e.target.value)}
                 disabled={!canOperate}
               />
-              <Button size="sm" onClick={sendClipboard} disabled={!canOperate} className="bg-teal-600 text-white hover:bg-teal-500">
-                <Clipboard className="h-3.5 w-3.5 mr-1" /> 投递到远程桌面
-              </Button>
+              <div className="flex gap-2">
+                <Button size="sm" onClick={sendClipboard} disabled={!canOperate} className="bg-teal-600 text-white hover:bg-teal-500">
+                  <Clipboard className="h-3.5 w-3.5 mr-1" /> 投递到远程桌面
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => rfbRef.current?.requestRemoteClipboard()} disabled={!canOperate}>
+                  拉取远程剪贴板
+                </Button>
+              </div>
             </div>
             <div className="space-y-1.5">
               <textarea
                 className="w-full rounded-lg border bg-muted/40 p-2 text-sm min-h-20 font-mono text-emerald-300"
-                placeholder="远程桌面回传的剪贴板内容将显示在这里…"
+                placeholder="远程桌面回传的剪贴板内容将显示在这里（打开抽屉时自动请求）…"
                 value={clipboardReceived}
                 readOnly
               />

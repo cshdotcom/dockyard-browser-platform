@@ -24,6 +24,9 @@ export interface DomainRuleRow {
   type: string
   enabled: boolean
   note: string | null
+  scopeType: string // GLOBAL | GROUP | USER
+  scopeLabel: string // 人读作用域标签
+  scopeTargetId: string | null // GROUP/USER 目标ID（编辑回填）
   createdByUsername: string
   createdAt: string
 }
@@ -37,6 +40,8 @@ interface Props {
   sortField?: string
   sortOrder?: "asc" | "desc"
   filters: Record<string, string>
+  groupOptions: { id: string; name: string }[]
+  userOptions: { id: string; name: string }[]
 }
 
 export function DomainRulesTable(props: Props) {
@@ -77,22 +82,27 @@ export function DomainRulesTable(props: Props) {
 
   const [formOpen, setFormOpen] = React.useState(false)
   const [editing, setEditing] = React.useState<DomainRuleRow | null>(null)
-  const [form, setForm] = React.useState({ pattern: "", type: "BLACK", enabled: true, note: "" })
+  const [form, setForm] = React.useState({ pattern: "", type: "BLACK", enabled: true, note: "", scopeType: "GLOBAL", groupId: "", userId: "", priority: 0 })
   const [formBusy, setFormBusy] = React.useState(false)
 
   const openCreate = () => {
     setEditing(null)
-    setForm({ pattern: "", type: "BLACK", enabled: true, note: "" })
+    setForm({ pattern: "", type: "BLACK", enabled: true, note: "", scopeType: "GLOBAL", groupId: "", userId: "", priority: 0 })
     setFormOpen(true)
   }
   const openEdit = (row: DomainRuleRow) => {
     setEditing(row)
-    setForm({ pattern: row.pattern, type: row.type, enabled: row.enabled, note: row.note || "" })
+    setForm({
+      pattern: row.pattern, type: row.type, enabled: row.enabled, note: row.note || "",
+      scopeType: row.scopeType, groupId: row.scopeType === "GROUP" ? row.scopeTargetId || "" : "", userId: row.scopeType === "USER" ? row.scopeTargetId || "" : "", priority: 0,
+    })
     setFormOpen(true)
   }
 
   const submitForm = async () => {
     if (!form.pattern.trim()) return toast.error("请填写域名模式")
+    if (form.scopeType === "GROUP" && !form.groupId) return toast.error("组级规则请选择用户组")
+    if (form.scopeType === "USER" && !form.userId) return toast.error("用户级规则请选择用户")
     setFormBusy(true)
     try {
       const res = await saveDomainRuleAction({
@@ -101,6 +111,10 @@ export function DomainRulesTable(props: Props) {
         type: form.type,
         enabled: form.enabled,
         note: form.note.trim() || null,
+        scopeType: form.scopeType,
+        groupId: form.scopeType === "GROUP" ? form.groupId : null,
+        userId: form.scopeType === "USER" ? form.userId : null,
+        priority: Number(form.priority) || 0,
       })
       if (res.code === 0) {
         toast.success(editing ? "已更新" : "已创建")
@@ -131,6 +145,24 @@ export function DomainRulesTable(props: Props) {
       title: "类型",
       render: (row: DomainRuleRow) => (
         <Badge className={row.type === "BLACK" ? "bg-red-600 hover:bg-red-600" : "bg-emerald-600 hover:bg-emerald-600"}>{row.type}</Badge>
+      ),
+    },
+    {
+      key: "scopeType",
+      title: "作用域",
+      render: (row: DomainRuleRow) => (
+        <Badge
+          variant="outline"
+          className={
+            row.scopeType === "USER"
+              ? "border-violet-400/50 text-violet-500"
+              : row.scopeType === "GROUP"
+                ? "border-amber-400/50 text-amber-500"
+                : "border-slate-400/50 text-slate-400"
+          }
+        >
+          {row.scopeLabel}
+        </Badge>
       ),
     },
     {
@@ -166,6 +198,7 @@ export function DomainRulesTable(props: Props) {
         sortOrder={sortOrder}
         filters={[
           { key: "type", placeholder: "类型", options: [{ label: "BLACK", value: "BLACK" }, { label: "WHITE", value: "WHITE" }] },
+          { key: "scopeType", placeholder: "作用域", options: [{ label: "全局", value: "GLOBAL" }, { label: "用户组", value: "GROUP" }, { label: "用户", value: "USER" }] },
           { key: "enabled", placeholder: "状态", options: [{ label: "生效", value: "true" }, { label: "停用", value: "false" }] },
         ]}
         rowActions={(row) => (
@@ -219,6 +252,50 @@ export function DomainRulesTable(props: Props) {
                 </div>
                 <Switch checked={form.enabled} onCheckedChange={(v) => setForm({ ...form, enabled: v })} />
               </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label>作用域</Label>
+                <Select value={form.scopeType} onValueChange={(v) => setForm({ ...form, scopeType: v, groupId: "", userId: "" })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="GLOBAL">全局（全部会话生效）</SelectItem>
+                    <SelectItem value="GROUP">用户组（仅组成员）</SelectItem>
+                    <SelectItem value="USER">指定用户</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {form.scopeType === "GROUP" ? (
+                <div className="space-y-1.5">
+                  <Label>目标用户组</Label>
+                  <Select value={form.groupId} onValueChange={(v) => setForm({ ...form, groupId: v })}>
+                    <SelectTrigger><SelectValue placeholder="选择用户组" /></SelectTrigger>
+                    <SelectContent className="max-h-64">
+                      {props.groupOptions.map((g) => (
+                        <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : form.scopeType === "USER" ? (
+                <div className="space-y-1.5">
+                  <Label>目标用户</Label>
+                  <Select value={form.userId} onValueChange={(v) => setForm({ ...form, userId: v })}>
+                    <SelectTrigger><SelectValue placeholder="选择用户" /></SelectTrigger>
+                    <SelectContent className="max-h-64">
+                      {props.userOptions.map((u) => (
+                        <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <Label>优先级（可选）</Label>
+                  <Input type="number" min={0} max={9999} value={form.priority} onChange={(e) => setForm({ ...form, priority: Number(e.target.value) })} placeholder="0" />
+                  <p className="text-[10px] text-muted-foreground">数字越大越先应用</p>
+                </div>
+              )}
             </div>
             <div className="space-y-1.5">
               <Label>备注（可选）</Label>

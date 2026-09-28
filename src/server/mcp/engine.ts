@@ -11,6 +11,7 @@ import { trackBehavior } from "@/lib/risk"
 import { moveToRecycle, restoreFromRecycle, purgeFromRecycle } from "@/lib/recycle"
 import { createSession, destroySession } from "@/lib/external/steel"
 import { createNovncSession, destroyNovncSession } from "@/lib/external/novnc"
+import { BROWSER_ACTIONS, executeBrowserAction } from "@/lib/external/cdp-control"
 
 export interface McpOpDef {
   code: string
@@ -19,7 +20,7 @@ export interface McpOpDef {
   danger?: boolean
   perm: number
   schema: Record<string, string>
-  execute: (ctx: ApiTokenContext, params: Record<string, unknown>, targets: string[]) => Promise<{ total: number; success: number; failed: number; failures: { target: string; reason: string }[] }>
+  execute: (ctx: ApiTokenContext, params: Record<string, unknown>, targets: string[]) => Promise<{ total: number; success: number; failed: number; failures: { target: string; reason: string }[]; data?: unknown }>
 }
 
 // ---- 任务是否应继续执行（暂停/取消检查点） ----
@@ -344,6 +345,46 @@ export const MCP_OPERATIONS: McpOpDef[] = [
   },
 ]
 
+// ============================================================
+// 浏览器全量控制操作（browser.*）：Steel-Browser 全功能复制，单目标/批量多工作区
+// 与 OpenAPI REST 网关共用同一执行层（src/lib/external/cdp-control.ts）
+// ============================================================
+for (const def of BROWSER_ACTIONS) {
+  MCP_OPERATIONS.push({
+    code: `browser.${def.action}`,
+    description: `[浏览器控制] ${def.summary}`,
+    batch: true, // 支持 targets 多工作区批量执行
+    danger: def.danger,
+    perm: def.perm,
+    schema: { workspaceId: "string（单目标）或 targets: workspaceId[]（批量）", ...def.params },
+    async execute(ctx, params, targets) {
+      const ids = (targets.length > 0 ? targets : params.workspaceId ? [String(params.workspaceId)] : []).slice(0, 50)
+      if (ids.length === 0) throw new Error("缺少目标工作区（workspaceId 或 targets）")
+      const cleanParams = { ...params }
+      delete cleanParams.workspaceId
+      let success = 0
+      const failures: { target: string; reason: string }[] = []
+      const results: unknown[] = []
+      for (const id of ids) {
+        try {
+          const res = await executeBrowserAction({
+            action: def.action,
+            workspaceIdOrUuid: id,
+            ctx: { userId: ctx.userId, username: ctx.username, isAdmin: (ctx.permissions & TOKEN_PERM.ADMIN) !== 0, via: "MCP" },
+            params: cleanParams,
+          })
+          // 截图等大载荷仅在单目标时内联返回（多目标时经 task.status 逐个回查）
+          if (ids.length === 1 || def.action !== "screenshot") results.push(res)
+          success++
+        } catch (e) {
+          failures.push({ target: id, reason: e instanceof Error ? e.message : String(e) })
+        }
+      }
+      return { total: ids.length, success, failed: failures.length, failures, data: ids.length === 1 ? (results[0] ?? null) : (results.length <= 10 ? results : undefined) }
+    },
+  })
+}
+
 // 逐目标执行（失败隔离：单条失败不整体崩溃）
 async function runPerTarget(
   targets: string[],
@@ -407,6 +448,15 @@ export async function runBatchOperation(input: {
     // 执行（带暂停/取消检查点的引擎由 execute 内部逐项检查 —— 此处整体执行）
     const result = await op.execute(input.ctx, input.params, input.targets)
     const status = result.failed > 0 ? "PARTIAL" : "SUCCESS"
+    // 任务结果载荷（浏览器控制单目标时含完整数据：截图/抓取/求值结果；上限 1MB）
+    let resultPayload: unknown = { total: result.total, success: result.success, failed: result.failed }
+    if (result.data !== undefined) {
+      try {
+        const serialized = JSON.stringify(result.data)
+        if (serialized.length <= 1_000_000) resultPayload = { total: result.total, success: result.success, failed: result.failed, data: result.data }
+        else resultPayload = { total: result.total, success: result.success, failed: result.failed, dataTruncated: true, dataBytes: serialized.length }
+      } catch { /* 不可序列化载荷丢弃 */ }
+    }
     await db.mcpTask.update({
       where: { id: task.id },
       data: {
@@ -416,7 +466,7 @@ export async function runBatchOperation(input: {
         successItems: result.success,
         failedItems: result.failed,
         failReasonsJson: JSON.stringify(result.failures.slice(0, 100)),
-        resultJson: JSON.stringify({ total: result.total, success: result.success, failed: result.failed }),
+        resultJson: JSON.stringify(resultPayload),
         finishedAt: new Date(),
       },
     })
@@ -464,7 +514,7 @@ export async function listTasks(userId: string, take: number) {
   }))
 }
 
-// 任务详情（含子项）
+// 任务详情（含子项 + 浏览器控制结果载荷）
 export async function getTaskDetail(taskUuid: string) {
   const task = await db.mcpTask.findUnique({ where: { taskUuid } })
   if (!task) return null
@@ -472,11 +522,16 @@ export async function getTaskDetail(taskUuid: string) {
   return {
     taskUuid: task.taskUuid, name: task.name, code: task.code, priority: task.priority, status: task.status,
     progress: task.progress, totalItems: task.totalItems, successItems: task.successItems, failedItems: task.failedItems,
-    params: task.paramsJson ? JSON.parse(task.paramsJson) : null,
-    failures: task.failReasonsJson ? JSON.parse(task.failReasonsJson) : [],
+    params: task.paramsJson ? safeParseJson(task.paramsJson) : null,
+    result: task.resultJson ? safeParseJson(task.resultJson) : null,
+    failures: task.failReasonsJson ? safeParseJson(task.failReasonsJson) : [],
     items: items.map((i) => ({ target: i.targetId, status: i.status, error: i.error })),
     createdAt: task.createdAt.toISOString(), finishedAt: task.finishedAt?.toISOString() ?? null,
   }
+}
+
+function safeParseJson(s: string): unknown {
+  try { return JSON.parse(s) } catch { return null }
 }
 
 // 任务控制：暂停 / 继续 / 终止 / 重试

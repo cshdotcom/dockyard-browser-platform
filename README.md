@@ -51,13 +51,14 @@
 ### 浏览器业务
 - 工作区生命周期（幂等防重/三级配额+预留水位/风控行为检测）
 - CDP 轻量会话：CDP指令网关转发（黑名单+限速）、HAR导出、网络节流（0.001精度）、脚本注入沙箱
-- **NoVNC 重度会话（LiveDesk）**：品牌化现代 RFB 查看器（@novnc/novnc 真实客户端）
+- **NoVNC 重度会话（HelmPort）**：品牌化现代 RFB 查看器（**全自研 RFB 协议客户端，零第三方 VNC 依赖，Next.js/React 原生实现**）
+  - 自研 RFB 3.3/3.7/3.8 协议栈：版本协商/安全握手/像素格式协商/Raw+CopyRect+桌面尺寸+光标伪编码（src/components/vnc/helmport/）
   - 单域名统一网关接入：HMAC 单次票据（60s 时效 + 防重放）→ VNC 网关桥 → 容器 RFB(TCP)
   - 断线自动重连（退避重试，每次自动重新取票）+ 画面停顿看门狗（15s 无帧强制重连）
   - 只读镜像双保险：客户端 viewOnly + 桥侧丢弃输入帧
   - 实时遥测 HUD（帧率/带宽/键鼠回显，WebSocket 数据面仪表化）
-  - **中文剪贴板双通道**：RFB QEMU 扩展剪贴板协议（UTF-8 + zlib 全字符）+ 平台审计中转代理
-  - 归属水印（平铺斜置）/ 品牌签名截图 / 画质三档 / 触屏-鼠标模式记忆持久化
+  - **中文剪贴板双通道**：自研 QEMU 扩展剪贴板（UTF-8 + zlib，CompressionStream 原生压缩）+ 平台审计中转代理
+  - 归属水印（平铺斜置）/ 品牌签名截图 / 画质三档 / 触屏-鼠标模式记忆持久化（长按=右键/拖动=移动/滚轮=滚动）
 - **硬隔离浏览器容器（防退出）**：
   - 只读根文件系统 + CapDrop=ALL + no-new-privileges + 非 root 运行
   - 唯一挂载本人 Profile 卷（其他用户资料不在容器命名空间内，任何形式不可读）
@@ -71,6 +72,17 @@
   - 策略创建时快照落库（networkPolicyJson）；防闪退自愈/代理切换重建时重新解析（管理员收紧立即作用于新容器）
   - 管理入口：用户列表「网络策略」列（生效值+覆盖来源）+ 行菜单三态控制（允许/禁止/继承）；组编辑双开关；工作区详情安全面板可视化
   - 鉴权：SUPER_ADMIN/ADMIN 全量，GROUP_ADMIN 仅限本组；普通用户前端无入口 + 后端强制 403；变更全部落审计（WARN）+ 安全事件
+- **域名黑白名单（三层作用域 + 真实拦截）**：
+  - 规则作用域：全局（GLOBAL）/ 用户组（GROUP，含继承链）/ 用户（USER），用户生效规则 = 三层并集
+  - 黑名单模式：命中即被 Chromium URLBlocklist 拦截；白名单模式（任一作用域存在 WHITE 规则即激活）：URLAllowlist 严格放行（`*` 全量阻断 + 白名单例外 `!` 前缀语义）
+  - 执行层与内网/安全位置封禁合并写入同一份只读 bind-mount 托管策略文件；MCP/OpenAPI `browser.block_urls`/`allow_urls` 运行时叠加
+  - 管理入口：规则管理页（作用域列/筛选/组、用户选择器）；工作区创建/重建时快照（domainMode/domainBlack/domainWhite）
+- **IP 黑白名单（作用域化）**：RiskListRule 支持 GLOBAL/GROUP/USER 作用域，经策略下发中心批量下发
+- **策略下发中心（/admin/policies，批量下发到用户/用户组）**：
+  - 策略包四要素：内网开关（三态：不修改/强制允许/强制禁止）+ 容器安全位置开关（三态）+ 域名黑白名单（替换式）+ IP 黑白名单（替换式）
+  - 全量前置快照（开关字段 + 同作用域域名/IP 规则）→ 一键回滚（含顺序回滚保护：更晚批次覆盖相同目标时必须先回滚新批次）
+  - 逐目标失败隔离、影响面统计（组员数展开）、下发结果明细表；策略模板（3 个内置 + 自定义保存/加载/删除）
+  - 鉴权：ADMIN 全量 / GROUP_ADMIN 仅本组目标（越权整批拒绝）；审计（POLICY_DEPLOY / POLICY_DEPLOY_ROLLBACK）+ 安全事件 + 限流
 - Profile 快照：挂载/创建/过期/配额
 - 会话模板（私有/组/全局+继承+变量）、UA池、域名黑白名单、请求篡改规则
 - 会话共享授权（时效/撤销）、代理切换（保留快照重启）
@@ -92,6 +104,17 @@
 ### MCP / OpenAPI 统一网关
 - 标准MCP协议（原生+JSON-RPC 2.0双风格）、tools/list
 - 批量任务体系：20+操作（批量创建工作区/批量启停销毁SingBox/批量用户管控/批量有效期/批量回收站/批量强制操作...）
+- **浏览器全量控制（browser.*，Steel-Browser 全功能复制，30 个动作）**：
+  - 页面：navigate / screenshot(PNG base64) / scrape(text·html·links) / evaluate(JS，awaitPromise) / get_url / dom_snapshot / wait_for
+  - 输入：click(选择器或坐标) / type(选择器或焦点) / press_key(含修饰键位掩码) / scroll / hover
+  - 标签：get_tabs / new_tab / close_tab / activate_tab；历史：back / forward / reload(忽略缓存)
+  - 网络：throttle(0.001精度含离线) / block_urls(运行时黑名单) / allow_urls(运行时白名单) / clear_url_filters / set_extra_headers
+  - 指纹：set_user_agent / set_viewport / set_geolocation；数据：get_cookies(值脱敏) / set_cookies / get_logs(控制台·网络环形缓冲)
+  - 会话：status / debug_info（连接池/浏览器版本/目标列表）
+  - 双形态执行：真实 CDP（WebSocket 直连 + Target.attach + 各域命令）或模拟引擎（无集群全链路验证：虚拟DOM/标签页/截图/sharp PNG/白名单安全求值）
+  - MCP 与 OpenAPI 共用同一执行层（BROWSER_ACTIONS 唯一事实源）；归属强制（本人或ADMIN权限位）+ 限流（180/分 MCP、120/分 REST）+ 全量审计
+  - OpenAPI REST：POST /api/openapi/browser/<action>（目录 GET /api/openapi/browser；文档 /api/openapi/doc 自动生成 Browser Control 端点组）
+  - 单目标结果载荷入任务 resultJson（截图/抓取/求值结果可经 task.status 回查，1MB 上限）
 - 任务优先级（高/中/低）、失败隔离、进度追踪、暂停/继续/终止/重试、异常报告
 - OpenAPI 3.0 文档自动生成（/api/openapi/doc）、资源查询统一归属字段输出
 - APIKey鉴权：哈希/过期/IP白名单/三级限流（秒/分/时）/权限位掩码/调用日志（含wasExpired标记）
@@ -99,7 +122,14 @@
 
 ## 四、快速开始
 
-### 演示账号（首次播种自动创建）
+### 管理员账号引导（三通道，均幂等，后期可修改）
+| 通道 | 说明 |
+|---|---|
+| 环境变量（配置文件） | `ADMIN_USERNAME` / `ADMIN_EMAIL` / `ADMIN_PASSWORD`，首次启动 seed 自动创建超管；`ADMIN_PASSWORD_FORCE=1` 可强制同步密码 |
+| 首启引导页 | 库中无任何管理员时自动开放 `/setup`（注册后永久关闭，登录页有引导入口） |
+| 后期修改 | 登录后「账号与安全」：修改密码（旧密码+TOTP校验）/ 修改登录用户名（当前密码验证）/ 换绑邮箱（双邮箱验证码） |
+
+### 演示账号（首次播种自动创建，SEED_DEMO=0 可关闭）
 | 账号 | 密码 | 角色 |
 |---|---|---|
 | admin | Admin@2026 | 超级管理员 |
@@ -137,7 +167,7 @@ docker run -d --name dockyard --network host \
 - 平台主镜像：`.github/workflows/docker-image.yml`
 - 硬隔离浏览器镜像（supervisor 防退出）：`.github/workflows/docker-browser.yml`（`docker/browser/`）
 
-> 镜像为 **All-In-One 独立服务端完整包**：内置全部依赖、WS枢纽、LiveDesk VNC 网关桥（票据HMAC鉴权）、数据库初始化与自检，启动脚本自动执行 `prisma db push` + 种子 + 目录/端口自检（主服务/WS枢纽/VNC桥三进程统一托管与优雅退出）。
+> 镜像为 **All-In-One 独立服务端完整包**：内置全部依赖、WS枢纽、HelmPort VNC 网关桥（票据HMAC鉴权）、数据库初始化与自检，启动脚本自动执行 `prisma db push` + 种子 + 目录/端口自检（主服务/WS枢纽/VNC桥三进程统一托管与优雅退出）。
 
 ### 外部服务对接（生产环境）
 | 环境变量 | 说明 | 缺省行为 |
@@ -146,7 +176,7 @@ docker run -d --name dockyard --network host \
 | BROWSER_IMAGE | 自托管硬隔离浏览器镜像 | GHCR 官方 dockyard-browser |
 | STEEL_BROWSER_URL | Steel-Browser API（仅内网） | 模拟会话模式 |
 | NOVNC_POOL_URL | NoVNC 池 API（仅内网） | 模拟桌面模式 |
-| VNC_BRIDGE_PORT / VNC_BRIDGE_SECRET / VNC_BRIDGE_PUBLIC | LiveDesk VNC 网关桥（端口/HMAC密钥/接入形态 gateway\|port\|url） | 3005 / 启动时随机生成 / port |
+| VNC_BRIDGE_PORT / VNC_BRIDGE_SECRET / VNC_BRIDGE_PUBLIC | HelmPort VNC 网关桥（端口/HMAC密钥/接入形态 gateway\|port\|url） | 3005 / 启动时随机生成 / port |
 | SMTP_HOST/PORT/USER/PASS | 邮件服务 | 模拟邮件（服务端日志输出） |
 
 未配置外部服务时平台全链路可跑（模拟适配器，含内置演示 RFB 帧缓冲引擎），生产配置后即真实调度。
