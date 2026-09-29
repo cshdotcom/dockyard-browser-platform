@@ -13,6 +13,8 @@ import { novncHealth, destroyNovncSession } from "@/lib/external/novnc"
 import { testConnectivity } from "@/lib/singbox"
 import { resolveNetworkPolicy } from "@/lib/network-policy"
 import { resolveDomainPolicyForUser } from "@/lib/domain-policy"
+import { resolveEndpointPolicyForUser } from "@/lib/endpoint-policy"
+import { activateDueScheduledDeployments } from "@/lib/policy-engine"
 
 const g = globalThis as unknown as {
   __dyTaskLocks?: Map<string, { lockedAt: number; heartbeat: number }>
@@ -464,6 +466,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
             // 崩溃自愈重建：重新解析当前生效策略（管理员收紧立即作用于新容器）
             const netPolicy = await resolveNetworkPolicy(ws.userId)
             const domPolicy = await resolveDomainPolicyForUser(ws.userId)
+            const epPolicy = await resolveEndpointPolicyForUser(ws.userId)
             const rebuilt = await createNovncSession({
               ttlMinutes: ws.ttlMinutes || undefined,
               profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
@@ -472,6 +475,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
               labels: { "dockyard.owner": ws.userId, "dockyard.recovered": "true" },
               networkPolicy: netPolicy,
               domainPolicy: domPolicy,
+              endpointPolicy: epPolicy,
             })
             await db.browserWorkspace.update({
               where: { id: ws.id },
@@ -480,7 +484,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
                 novncSessionId: rebuilt.novncSessionId, novncSecret: encrypt(rebuilt.secret),
                 containerRef: rebuilt.containerName || null,
                 hardeningJson: JSON.parse(JSON.stringify(rebuilt.hardening ? { ...rebuilt.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,
-                networkPolicyJson: JSON.parse(JSON.stringify({ ...netPolicy, domainMode: domPolicy.mode, domainBlack: domPolicy.blackPatterns, domainWhite: domPolicy.whitePatterns })) as Prisma.InputJsonValue,
+                networkPolicyJson: JSON.parse(JSON.stringify({ ...netPolicy, domainMode: domPolicy.mode, domainBlack: domPolicy.blackPatterns, domainWhite: domPolicy.whitePatterns, endpointBlack: epPolicy.blackPatterns, endpointWhite: epPolicy.whitePatterns })) as Prisma.InputJsonValue,
               },
             })
             recovered++
@@ -510,6 +514,12 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
       }
     }
     return { itemsProcessed: n, summary: `检查${vncSessions.length}个VNC会话：自愈重建${recovered}个，处置${n}个` }
+  },
+
+  // 18. 定时策略下发到点激活（SCHEDULED → PENDING 批次到 effectiveAt 自动执行）
+  async policy_deployment_activation(log) {
+    const r = await activateDueScheduledDeployments(log)
+    return { itemsProcessed: r.activated + r.failed, summary: `激活${r.activated}个定时策略批次${r.failed > 0 ? `，失败${r.failed}个` : ""}` }
   },
 }
 

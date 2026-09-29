@@ -266,3 +266,26 @@ Work Log:
 
 Stage Summary:
 - 用户本轮四项要求全部完成：作用域黑白名单+批量策略下发、MCP/OpenAPI 浏览器全量控制（Steel 全功能复制）、VNC 更名 HelmPort + Next.js 自研 RFB 重构、管理员配置/首启注册+后期可修改；源码推送 + 容器编译成功监控全绿
+
+---
+Task ID: 11
+Agent: main
+Task: 本轮增量 — 定时生效策略下发 / HelmPort 多监视器分辨率切换 / MCP 任务看板增强 / Setup Token 引导 / 端点级精确限制（host:port）+ 全功能 QA 截图
+
+Work Log:
+- Prisma：PolicyDeployment 增加 effectiveMode(IMMEDIATE/SCHEDULED)/effectiveAt/activatedAt/cancelledAt/cancelledByUserId；新增 NetworkEndpointRule（host:port 作用域规则表）；db push + seed（18 项任务含 policy_deployment_activation 每分钟 + 3 条端点演示规则）
+- Setup Token 机制：进程启动随机生成（SETUP_TOKEN 可固定）→ storage/setup-token.txt（0600）+ 控制台输出；未初始化每次重启变化（独立进程加载验证 token 不同）；/setup 注册强制输入密钥（timingSafeEqual 恒时校验；错误密钥 BOOTSTRAP_SETUP_TOKEN_FAIL 安全事件 + 拒绝创建）；注册成功 token 文件清理；login/setup 页脱敏提示（前4后4）
+- 端点级精确限制 src/lib/endpoint-policy.ts：normalizeEndpointPattern（IP/域名/CIDR→通配/host:*/端口区间/IPv6/去 scheme 与 path 仅对 URL 形态剥离——修复 CIDR 被误剥 bug；纯数字主机严格八位组校验拒绝 999.x）+ 三层解析（GLOBAL/GROUP/USER 含组继承链）+ 批量解析 + 解析期二次规范化（纵深防御）；buildChromiumManagedPolicy 合并注入（黑名单入 blocklist/白例外 ! 前缀/域名白名单严格模式叠加/端口区间展开）；环回全覆盖：localhost/*.localhost/127.*/0.0.0.0/[::1]/[::]/[fe80:*]/[fc*]/[fd*]/*.local
+- 注入链路五处：工作区创建（cdp+novnc）/启动/切代理/看门狗自愈/池集群下发（novnc.ts、docker.ts、workspaces.ts spec+快照 endpointBlack/endpointWhite）
+- 定时生效策略：deploySchema+effectiveAt；parseEffectiveAt（过去/超一年拒绝、5 秒内立即）；SCHEDULED→PENDING 不变更任何策略；activateDueScheduledDeployments（到点激活、updateMany PENDING 抢占防并发、以批次创建者为 operator）；cancelScheduledDeployment（仅 PENDING、到点前）；rollback 拒绝 CANCELLED/PENDING；快照保留规则原始 deploymentId（修复回滚污染）；引擎任务 #18 policy_deployment_activation 注册 seed
+- 策略下发中心 UI：生效方式选择器（立即/定时）+ datetime-local + 预设（+5min/+1h/明早9点/+1天）；端点级精确限制表单卡；批次历史定时徽章/待生效徽章/取消按钮/激活取消时间线；统计卡 +2（待生效/定时策略）
+- 规则管理新增"端点级限制"页签：CRUD actions（保存自动规范化）/表单（作用域组/用户选择器）/统计卡/交互表格
+- HelmPort 多监视器：rfb-client 增加 ExtendedDesktopSize(-308) 伪编码请求+解析（结果码/屏布局）、SetDesktopSize(type=8) 发送、onDesktopSize 回调、desktopSize getter、viewOnly 本地拦截、剪贴板 action 精确匹配（修复 CAPS 误判 PROVIDE 导致 Bun 流崩溃）；vnc-bridge 演示引擎支持 SetDesktopSize（动态 W/H/多屏布局/帧缓冲重建/EDS 响应 result 0/1/2）+ 多屏渲染（每屏边界高亮/M 徽章/独立网格）；查看器工具栏显示器选择器（5 单屏+2 双屏+1 三屏预设）、HUD 分辨率显示、localStorage 偏好持久化+重连自动应用、失败 toast
+- MCP 任务看板增强：状态分布环形图/14 天趋势/操作类型 Top10/发起用户 Top10（recharts）+ 平均耗时/子项汇总统计卡 + 发起用户筛选
+- 脚本级 QA（scripts/test-round6.ts 86 项 + scripts/test-multimonitor-rfb.ts 17 项，全过）：token 文件/错误拒绝/重启变化；端点规范化 15 形态/三层作用域/Chromium 匹配模拟（127.0.0.1:9222/localhost:3000/[::1]:9222 环回 14 URL 全命中/端口精确不误伤/区间命中+越界放行/白例外）；定时 PENDING→取消→到点激活→回滚全链路/非法端点整批拒绝/组级下发；多监视器单屏/双屏/三屏切换确认+帧输出+无效尺寸 result=2+只读双保险
+- 浏览器真实 QA（51 张截图压缩 -57.8% → download/qa-r6-screenshots.zip 3.0MB）：/setup 空库全流程（错误 token 被拒+安全事件+0 账号→正确 token 创建 SUPER_ADMIN+审计+token 文件清理+跳转登录）；全站 30+ 页面截图；HelmPort 经统一网关(:81 Caddy XTransformPort) 640→1280×720→双屏 2560×720→三屏 3840×720→断开重连偏好自动恢复（canvas 尺寸逐项验证）；策略下发中心 UI 排期→PENDING 徽章→取消→CANCELLED（DB 断言）；cron 真实激活闭环（HTTP /api/cron 触发 policy_deployment_activation→SUCCESS+开关变更+端点规则落库+回滚）；端点规则弹窗创建 CIDR 自动规范化；MCP 看板 4 图表渲染（补种 26 任务）；VLM 三重抽查（双屏 2 屏/三屏 3 屏/策略中心端点卡+待生效徽章）确认真实渲染
+- 修复：.env 密钥再次丢失（AUTH_SECRET/ENCRYPTION_KEY/CRON_SECRET/VNC_BRIDGE_SECRET 恢复+守护重启）；next-server OOM 重启（scripts/daemon-restart.py setsid 守护化+完整路径）；gateway 模式经 :81 统一网关打通（localhost:3000 无 XTransformPort 转发→改用 :81）
+- lint 零错误
+
+Stage Summary:
+- 本轮五项增量（定时生效策略、HelmPort 多监视器、MCP 看板增强、Setup Token 引导、端点级精确限制）全部双通道实测通过；103 项引擎断言 + 51 张浏览器截图存档 download/

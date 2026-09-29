@@ -5,11 +5,12 @@ import { parseListQuery, pageSkipTake, safeOrderBy, fmtDate } from "@/lib/utils-
 import { StatCard } from "@/components/shared/confirm"
 import { UaTable, type UaRow } from "./ua-table"
 import { DomainRulesTable, type DomainRuleRow } from "./domain-rules-table"
+import { EndpointRulesTable, type EndpointRuleRow } from "./endpoint-rules-table"
 import { ModifyRulesTable, type ModifyRuleRow } from "./modify-rules-table"
-import { MonitorSmartphone, Globe, Shuffle, CheckCircle2, CircleSlash, Info } from "lucide-react"
+import { MonitorSmartphone, Globe, Shuffle, CheckCircle2, CircleSlash, Info, Plug, ServerCog } from "lucide-react"
 import { cn } from "@/lib/utils"
 
-// 规则管理（管理员）：UA池 / 域名规则 / 请求篡改
+// 规则管理（管理员）：UA池 / 域名规则 / 端点级精确限制 / 请求篡改
 export const metadata = { title: "规则管理" }
 
 export default async function AdminRulesPage({
@@ -21,14 +22,14 @@ export default async function AdminRulesPage({
   const sp = await searchParams
   const q = parseListQuery(sp)
   const f = q.filters
-  const tab = f.tab === "domain" ? "domain" : f.tab === "modify" ? "modify" : "ua"
+  const tab = f.tab === "domain" ? "domain" : f.tab === "endpoint" ? "endpoint" : f.tab === "modify" ? "modify" : "ua"
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">规则管理</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          浏览器指纹 UA 池 / 域名黑白规则 / 请求篡改规则的统一维护（全部审计）
+          浏览器指纹 UA 池 / 域名黑白规则 / 端点级精确限制（host:port）/ 请求篡改规则的统一维护（全部审计）
         </p>
       </div>
 
@@ -36,6 +37,7 @@ export default async function AdminRulesPage({
         {[
           { key: "ua", label: "UA池" },
           { key: "domain", label: "域名规则" },
+          { key: "endpoint", label: "端点级限制" },
           { key: "modify", label: "请求篡改" },
         ].map((t) => (
           <Link
@@ -53,6 +55,7 @@ export default async function AdminRulesPage({
 
       {tab === "ua" && <UaTab q={q} f={f} />}
       {tab === "domain" && <DomainTab q={q} f={f} />}
+      {tab === "endpoint" && <EndpointTab q={q} f={f} />}
       {tab === "modify" && <ModifyTab q={q} f={f} />}
     </div>
   )
@@ -173,6 +176,94 @@ async function DomainTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Re
         </div>
       </div>
       <DomainRulesTable
+        rows={list}
+        total={total}
+        page={q.page}
+        pageSize={q.pageSize}
+        keyword={q.keyword}
+        sortField={q.sortField}
+        sortOrder={q.sortOrder}
+        filters={f}
+        groupOptions={groupOpts.map((g) => ({ id: g.id, name: g.name }))}
+        userOptions={userOpts.map((u) => ({ id: u.id, name: u.username }))}
+      />
+    </div>
+  )
+}
+
+async function EndpointTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Record<string, string> }) {
+  const where: Record<string, unknown> = {}
+  if (q.keyword) {
+    where.OR = [{ pattern: { contains: q.keyword } }, { note: { contains: q.keyword } }]
+  }
+  if (f.type) where.type = f.type
+  if (f.enabled) where.enabled = f.enabled === "true"
+  if (f.scopeType) where.scopeType = f.scopeType
+
+  const [rows, total, statTotal, statBlack, statWhite, statEnabled, statScoped, groupOpts, userOpts] = await Promise.all([
+    db.networkEndpointRule.findMany({
+      where,
+      ...pageSkipTake(q),
+      orderBy: safeOrderBy(q, ["createdAt", "pattern"], { createdAt: "desc" }),
+    }),
+    db.networkEndpointRule.count({ where }),
+    db.networkEndpointRule.count(),
+    db.networkEndpointRule.count({ where: { type: "BLACK" } }),
+    db.networkEndpointRule.count({ where: { type: "WHITE" } }),
+    db.networkEndpointRule.count({ where: { enabled: true } }),
+    db.networkEndpointRule.count({ where: { scopeType: { in: ["GROUP", "USER"] } } }),
+    db.group.findMany({ where: { deletedAt: null }, select: { id: true, name: true }, take: 200 }),
+    db.user.findMany({ where: { deletedAt: null }, select: { id: true, username: true }, take: 500 }),
+  ])
+
+  const creators = await db.user.findMany({ select: { id: true, username: true }, take: 300 })
+  const usernameById = new Map(creators.map((u) => [u.id, u.username]))
+  const groupNameById = new Map(groupOpts.map((g) => [g.id, g.name]))
+
+  const list: EndpointRuleRow[] = rows.map((r) => ({
+    id: r.id,
+    pattern: r.pattern,
+    type: r.type,
+    enabled: r.enabled,
+    note: r.note,
+    scopeType: r.scopeType || "GLOBAL",
+    scopeLabel:
+      (r.scopeType || "GLOBAL") === "GROUP" && r.groupId
+        ? `组：${groupNameById.get(r.groupId) || r.groupId.slice(0, 8)}`
+        : (r.scopeType || "GLOBAL") === "USER" && r.userId
+          ? `用户：${usernameById.get(r.userId) || r.userId.slice(0, 8)}`
+          : "全局",
+    scopeTargetId: (r.scopeType === "GROUP" ? r.groupId : r.scopeType === "USER" ? r.userId : null) || null,
+    createdByUsername: r.createdByUserId ? usernameById.get(r.createdByUserId) || "-" : "-",
+    createdAt: fmtDate(r.createdAt),
+  }))
+
+  return (
+    <div className="space-y-6">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard title="端点规则总数" value={statTotal} sub="当前筛选" icon={<Plug className="h-4 w-4" />} />
+        <StatCard title="封禁端点" value={statBlack} sub="BLACK（host:port）" icon={<CircleSlash className="h-4 w-4" />} tone="danger" />
+        <StatCard title="放行例外" value={statWhite} sub="WHITE 例外" icon={<CheckCircle2 className="h-4 w-4" />} tone="success" />
+        <StatCard title="用户/组级规则" value={statScoped} sub="GROUP + USER 作用域" icon={<ServerCog className="h-4 w-4" />} tone="warning" />
+      </div>
+      <div className="rounded-lg border border-teal-200 dark:border-teal-900 bg-teal-50/50 dark:bg-teal-950/20 p-4 flex gap-3">
+        <Info className="h-4 w-4 text-teal-600 shrink-0 mt-0.5" />
+        <div className="text-sm text-muted-foreground space-y-1">
+          <p>
+            端点级精确限制：<code className="font-mono text-xs">10.0.0.5:8080</code> 精确端口、
+            <code className="font-mono text-xs">192.168.1.0/24:443</code> CIDR 展开为通配、
+            <code className="font-mono text-xs">*.corp.com:22</code> 域名+端口、
+            <code className="font-mono text-xs">127.0.0.1:*</code> 任意端口、
+            <code className="font-mono text-xs">host:80-90</code> 端口区间、
+            <code className="font-mono text-xs">[::1]:9222</code> IPv6。
+          </p>
+          <p className="text-xs">
+            内网整体放行时仍可封指定端点；禁止内网时 127.0.0.1 / localhost / ::1 全端口拦截（含全部环回形态）。
+            规则经 Chromium 托管策略注入容器（与内网/域名策略合并写入同一份只读策略文件），新会话起生效。
+          </p>
+        </div>
+      </div>
+      <EndpointRulesTable
         rows={list}
         total={total}
         page={q.page}

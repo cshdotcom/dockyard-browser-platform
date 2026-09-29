@@ -15,7 +15,7 @@ import * as React from "react"
 import { toast } from "sonner"
 import {
   Anchor, Camera, Clipboard, ClipboardCheck, Expand, Minimize2, RefreshCw, Loader2,
-  MousePointer2, Hand, ShieldCheck, Eye, TriangleAlert, Zap, Radio, Keyboard, ShipWheel,
+  MousePointer2, Hand, ShieldCheck, Eye, TriangleAlert, Zap, Radio, Keyboard, ShipWheel, Monitor,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -23,7 +23,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { getVncTicketAction } from "@/server/actions/workspaces"
-import { HelmPortRfb } from "./helmport/rfb-client"
+import { HelmPortRfb, edsResultMessage, type RfbDesktopSize, type RfbScreen } from "./helmport/rfb-client"
 import { keysymFor } from "./helmport/keysyms"
 import { cn } from "@/lib/utils"
 
@@ -42,6 +42,44 @@ export interface HelmPortWorkspace {
 type Phase = "idle" | "connecting" | "live" | "reconnecting" | "error"
 
 const QUALITY_MAP: Record<string, number> = { low: 2, mid: 5, high: 9 }
+
+// ---- 多监视器分辨率预设（SetDesktopSize / ExtendedDesktopSize 协议驱动）----
+interface MonitorPreset {
+  key: string
+  label: string
+  w: number
+  h: number
+  cols: number // 横向并排监视器数（1=单屏 2=双屏 3=三屏）
+}
+const MONITOR_PRESETS: MonitorPreset[] = [
+  { key: "m-640x400", label: "640×400", w: 640, h: 400, cols: 1 },
+  { key: "m-1280x720", label: "1280×720", w: 1280, h: 720, cols: 1 },
+  { key: "m-1600x900", label: "1600×900", w: 1600, h: 900, cols: 1 },
+  { key: "m-1920x1080", label: "1920×1080", w: 1920, h: 1080, cols: 1 },
+  { key: "m-2560x1440", label: "2560×1440", w: 2560, h: 1440, cols: 1 },
+  { key: "m-2x1280x720", label: "双屏 2×1280×720", w: 2560, h: 720, cols: 2 },
+  { key: "m-2x1920x1080", label: "双屏 2×1920×1080", w: 3840, h: 1080, cols: 2 },
+  { key: "m-3x1280x720", label: "三屏 3×1280×720", w: 3840, h: 720, cols: 3 },
+]
+
+// 由预设构造屏幕布局（横向并排）
+function presetScreens(p: MonitorPreset): RfbScreen[] {
+  const sw = Math.floor(p.w / p.cols)
+  const out: RfbScreen[] = []
+  for (let i = 0; i < p.cols; i++) {
+    out.push({ id: i, x: i * sw, y: 0, width: i === p.cols - 1 ? p.w - i * sw : sw, height: p.h, flags: 0 })
+  }
+  return out
+}
+
+// 当前布局 → 预设键（匹配则返回预设 key，否则 custom）
+function desktopToPresetKey(d: RfbDesktopSize): string {
+  const match = MONITOR_PRESETS.find(
+    (p) => p.w === d.width && p.h === d.height && p.cols === d.screens.length &&
+      presetScreens(p).every((s, i) => d.screens[i] && d.screens[i].x === s.x && d.screens[i].width === s.width),
+  )
+  return match ? match.key : "custom"
+}
 
 // 按钮位掩码：1=左 2=中 4=右 8=滚上 16=滚下
 const BTN_LEFT = 1
@@ -82,6 +120,10 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
   const [clipboardText, setClipboardText] = React.useState("")
   const [clipboardReceived, setClipboardReceived] = React.useState("")
   const [serverName, setServerName] = React.useState("")
+  // —— 多监视器分辨率切换 ——
+  const [desktop, setDesktop] = React.useState<RfbDesktopSize | null>(null)
+  const pendingResizeRef = React.useRef<string | null>(null) // 用户发起的切换请求（结果 toast 用）
+  const appliedPresetRef = React.useRef<string | null>(null) // 连接后已自动应用的偏好（避免重复下发）
 
   const readonly = workspace.mySharePermission === "VIEW" && !workspace.isOwner && !workspace.isAdmin
   const canOperate = !readonly
@@ -192,7 +234,22 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
           retryRef.current.count = 0
           setServerName(info.name)
           setPhase("live")
+          appliedPresetRef.current = null
           try { stageRef.current?.focus() } catch { /* noop */ }
+        },
+        onDesktopSize: (size) => {
+          setDesktop(size)
+          const expected = pendingResizeRef.current
+          if (size.resultCode !== 0) {
+            // 失败：仅在用户主动发起时提示
+            if (expected) {
+              toast.error(edsResultMessage(size.resultCode))
+              pendingResizeRef.current = null
+            }
+          } else if (expected) {
+            pendingResizeRef.current = null
+            toast.success(`分辨率已切换：${size.width}×${size.height} · ${size.screens.length} 显示器`)
+          }
         },
         onClipboard: (text) => setClipboardReceived(text),
         onSecurityFail: (reason) => {
@@ -239,7 +296,38 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
     retryRef.current.count = 0
     rfbRef.current?.disconnect()
     setPhase("idle")
+    setDesktop(null)
   }, [])
+
+  // ---- 多监视器分辨率切换：SetDesktopSize 请求 → 服务端 EDS 确认 ----
+  const applyMonitorPreset = React.useCallback((preset: MonitorPreset, viaUser: boolean) => {
+    const rfb = rfbRef.current
+    if (!rfb) return
+    if (viaUser) {
+      try { localStorage.setItem(`hp-monitor-${workspace.id}`, preset.key) } catch { /* noop */ }
+    }
+    const screens = presetScreens(preset)
+    const ok = rfb.sendSetDesktopSize(preset.w, preset.h, screens)
+    if (!ok) {
+      if (viaUser) toast.error("当前状态无法切换分辨率（未连接或尺寸超出范围）")
+      return
+    }
+    if (viaUser) pendingResizeRef.current = preset.key
+  }, [workspace.id])
+
+  // 连接建立后自动应用本会话记忆的分辨率偏好（新连接默认尺寸不同才下发）
+  React.useEffect(() => {
+    if (phase !== "live" || !desktop) return
+    if (appliedPresetRef.current) return
+    appliedPresetRef.current = "done"
+    try {
+      const saved = localStorage.getItem(`hp-monitor-${workspace.id}`)
+      const preset = MONITOR_PRESETS.find((p) => p.key === saved)
+      if (preset && (preset.w !== desktop.width || preset.h !== desktop.height || preset.cols !== desktop.screens.length)) {
+        applyMonitorPreset(preset, false)
+      }
+    } catch { /* localStorage 不可用：跳过 */ }
+  }, [phase, desktop, workspace.id, applyMonitorPreset])
 
   // RUNNING 状态自动接入
   React.useEffect(() => {
@@ -493,6 +581,34 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
           )}
 
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
+            {/* 多监视器分辨率切换（SetDesktopSize / ExtendedDesktopSize 协议） */}
+            <Select
+              value={desktop ? desktopToPresetKey(desktop) : undefined}
+              onValueChange={(k) => {
+                const p = MONITOR_PRESETS.find((m) => m.key === k)
+                if (p) applyMonitorPreset(p, true)
+              }}
+              disabled={readonly || phase !== "live"}
+            >
+              <SelectTrigger className="h-8 w-[150px] border-slate-700 bg-slate-900 text-xs" title="多监视器分辨率切换">
+                <Monitor className="h-3 w-3 mr-1 text-teal-400" />
+                <SelectValue placeholder={phase === "live" ? "分辨率" : "未连接"} />
+              </SelectTrigger>
+              <SelectContent>
+                <p className="px-2 py-1 text-[10px] text-muted-foreground">单屏</p>
+                {MONITOR_PRESETS.filter((p) => p.cols === 1).map((p) => (
+                  <SelectItem key={p.key} value={p.key}>{p.label}</SelectItem>
+                ))}
+                <p className="px-2 py-1 text-[10px] text-muted-foreground border-t mt-1">多监视器</p>
+                {MONITOR_PRESETS.filter((p) => p.cols > 1).map((p) => (
+                  <SelectItem key={p.key} value={p.key}>{p.label}</SelectItem>
+                ))}
+                {desktop && desktopToPresetKey(desktop) === "custom" && (
+                  <SelectItem value="custom" disabled>自定义 {desktop.width}×{desktop.height} · {desktop.screens.length} 屏</SelectItem>
+                )}
+              </SelectContent>
+            </Select>
+
             {/* 画质 */}
             <Select value={quality} onValueChange={setQuality} disabled={readonly}>
               <SelectTrigger className="h-8 w-[92px] border-slate-700 bg-slate-900 text-xs">
@@ -544,6 +660,10 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
 
         {/* 次级设置行 */}
         <div className="mt-2 flex flex-wrap items-center gap-3 border-t border-slate-800/80 pt-2 text-[11px] text-slate-500">
+          <span className="inline-flex items-center gap-1 font-mono text-teal-400/90">
+            <Monitor className="h-3 w-3" />
+            {desktop ? `${desktop.width}×${desktop.height} · ${desktop.screens.length} 显示器` : "分辨率待协商"}
+          </span>
           <label className="flex cursor-pointer items-center gap-1.5 hover:text-slate-300">
             <input type="checkbox" checked={scaleFit} onChange={(e) => setScaleFit(e.target.checked)} className="accent-teal-500 h-3 w-3" />
             自适应缩放

@@ -19,6 +19,14 @@ const DEMO_H = 400
 const FRAME_MS = 500 // 演示帧率：2fps 全帧 raw
 const BAND_ROWS = 100 // 每条矩形带 100 行 → 单消息 256KB，规避 WS 单消息上限
 
+// ---- RFB 多监视器布局（SetDesktopSize / ExtendedDesktopSize）----
+interface ScreenLayout { id: number; x: number; y: number; w: number; h: number; flags: number }
+const ENC_EDS = -308 // ExtendedDesktopSize 伪编码
+
+function layoutEqual(a: ScreenLayout[], b: ScreenLayout[]): boolean {
+  return a.length === b.length && a.every((s, i) => s.x === b[i].x && s.y === b[i].y && s.w === b[i].w && s.h === b[i].h && s.id === b[i].id)
+}
+
 // ---------------- 票据 ----------------
 // ticket = b64url(payloadJson) + "." + b64url(hmac(payloadB64))
 // payload: { v: workspaceId, ro: 0|1, exp: epochSec, n: nonce, tgt: {k:"demo"} | {k:"tcp",h,p} }
@@ -152,11 +160,17 @@ class DemoRfbSession {
   private pending = false
   private lastSendAt = 0
   private hsStage = 0 // 握手状态：0=待版本 1=待安全类型选择 2=待共享标志 3=协议消息
+  private W = DEMO_W // 帧缓冲宽（多监视器总宽，SetDesktopSize 可变）
+  private H = DEMO_H // 帧缓冲高
+  private screens: ScreenLayout[] = [{ id: 0, x: 0, y: 0, w: DEMO_W, h: DEMO_H, flags: 0 }]
+  private clientWantsEds = false // 客户端已请求 ExtendedDesktopSize 伪编码
+  private edsAnnounced = false // 初始布局已宣告
   private fb = new Uint8Array(DEMO_W * DEMO_H * 4)
   private ptr = { x: DEMO_W / 2, y: DEMO_H / 2, active: false }
   private blooms: { x: number; y: number; r: number; hue: number; age: number }[] = []
   private keysTotal = 0
   private pointersTotal = 0
+  private resizes = 0
   private remoteClipboard: string | null = null
   private timer: ReturnType<typeof setInterval>
   constructor(
@@ -208,8 +222,8 @@ class DemoRfbSession {
   private sendServerInit() {
     const name = Buffer.from("Dockyard HelmPort · Isolated Sandbox Framebuffer", "utf8")
     const head = Buffer.alloc(24)
-    head.writeUInt16BE(DEMO_W, 0)
-    head.writeUInt16BE(DEMO_H, 2)
+    head.writeUInt16BE(this.W, 0)
+    head.writeUInt16BE(this.H, 2)
     // PixelFormat(16B)：32bpp / depth24 / LE / trueColor / max255×3 / shift16,8,0
     head.writeUInt8(32, 4); head.writeUInt8(24, 5); head.writeUInt8(0, 6); head.writeUInt8(1, 7)
     head.writeUInt16BE(255, 8); head.writeUInt16BE(255, 10); head.writeUInt16BE(255, 12)
@@ -249,7 +263,15 @@ class DemoRfbSession {
         const n = this.buf.readUInt16BE(2)
         const need = 4 + 4 * n
         if (this.buf.length < need) return
+        for (let i = 0; i < n; i++) {
+          if (this.buf.readInt32BE(4 + 4 * i) === ENC_EDS) this.clientWantsEds = true
+        }
         this.buf = this.buf.subarray(need)
+        // 客户端请求 EDS 伪编码 → 宣告当前屏幕布局（含多监视器）
+        if (this.clientWantsEds && !this.edsAnnounced) {
+          this.edsAnnounced = true
+          this.sendExtDesktopSize(0, this.W, this.H, this.screens)
+        }
       } else if (t === 3) { // FramebufferUpdateRequest: 10
         if (this.buf.length < 10) return
         this.buf = this.buf.subarray(10)
@@ -262,7 +284,7 @@ class DemoRfbSession {
         if (!this.readonly && down) {
           this.keysTotal++
           this.stats.keys++
-          this.blooms.push({ x: 60 + Math.random() * (DEMO_W - 120), y: 80 + Math.random() * (DEMO_H - 160), r: 2, hue: (keysym * 47) % 360, age: 0 })
+          this.blooms.push({ x: 60 + Math.random() * (this.W - 120), y: 80 + Math.random() * (this.H - 160), r: 2, hue: (keysym * 47) % 360, age: 0 })
           if (this.blooms.length > 24) this.blooms.shift()
           this.kick()
         }
@@ -272,11 +294,32 @@ class DemoRfbSession {
         const y = this.buf.readUInt16BE(4)
         this.buf = this.buf.subarray(6)
         if (!this.readonly) {
-          this.ptr = { x: Math.min(x, DEMO_W - 1), y: Math.min(y, DEMO_H - 1), active: true }
+          this.ptr = { x: Math.min(x, this.W - 1), y: Math.min(y, this.H - 1), active: true }
           this.pointersTotal++
           this.stats.pointers++
           this.kick()
         }
+      } else if (t === 8) { // SetDesktopSize: 1 + 2w + 2h + 1n + 1pad + 16n（多监视器分辨率切换）
+        if (this.buf.length < 7) return
+        const w = this.buf.readUInt16BE(1)
+        const h = this.buf.readUInt16BE(3)
+        const n = this.buf[5]
+        const need = 7 + 16 * n
+        if (this.buf.length < need) return
+        const screens: ScreenLayout[] = []
+        for (let i = 0; i < n; i++) {
+          const base = 7 + 16 * i
+          screens.push({
+            id: this.buf.readUInt32BE(base),
+            x: this.buf.readUInt16BE(base + 4),
+            y: this.buf.readUInt16BE(base + 6),
+            w: this.buf.readUInt16BE(base + 8),
+            h: this.buf.readUInt16BE(base + 10),
+            flags: this.buf.readUInt32BE(base + 12),
+          })
+        }
+        this.buf = this.buf.subarray(need)
+        this.applyDesktopSize(w, h, screens)
       } else if (t === 6) { // ClientCutText：经典(latin1) 与 扩展(UTF-8+zlib) 双通道
         if (this.buf.length < 8) return
         const cutLen = this.buf.readInt32BE(4)
@@ -342,6 +385,66 @@ class DemoRfbSession {
     if (this.hsStage !== 3) return
     if (Date.now() - this.lastSendAt > 150) this.sendFrame()
   }
+
+  // ---- 多监视器分辨率切换（SetDesktopSize 处理 + ExtendedDesktopSize 响应）----
+  // 校验：200≤W≤3840 / 200≤H≤2160 / 1-4 屏，屏均在帧缓冲范围内且尺寸合理
+  private applyDesktopSize(w: number, h: number, screens: ScreenLayout[]) {
+    if (this.readonly) {
+      // 只读会话：服务端拒绝调整（result=1 PROHIBITED），回送当前布局
+      this.sendExtDesktopSize(1, this.W, this.H, this.screens)
+      return
+    }
+    const valid =
+      w >= 200 && w <= 3840 && h >= 200 && h <= 2160 &&
+      screens.length >= 1 && screens.length <= 4 &&
+      screens.every((s) => s.w >= 200 && s.h >= 200 && s.x >= 0 && s.y >= 0 && s.x + s.w <= w && s.y + s.h <= h)
+    if (!valid) {
+      this.sendExtDesktopSize(2, this.W, this.H, this.screens) // INVALID：回送当前布局
+      return
+    }
+    const changed = w !== this.W || h !== this.H || !layoutEqual(screens, this.screens)
+    this.W = w
+    this.H = h
+    this.screens = screens
+    this.resizes++
+    this.fb = new Uint8Array(w * h * 4)
+    this.ptr = { x: Math.round(w / 2), y: Math.round(h / 2), active: this.ptr.active }
+    this.blooms = []
+    // 响应：result=0 + 新布局（客户端据此重设画布并全量重绘）
+    this.sendExtDesktopSize(0, w, h, screens)
+    if (changed) {
+      this.pending = true
+      this.sendFrame() // 立即按新尺寸出帧
+    }
+  }
+
+  // FramebufferUpdate 包裹的 ExtendedDesktopSize 矩形：
+  // rect.x=结果码 rect.y=0 rect.w/h=帧缓冲尺寸 encoding=-308 负载=1B屏数+3B填充+16B/屏
+  private sendExtDesktopSize(result: number, w: number, h: number, screens: ScreenLayout[]) {
+    if (this.closed) return
+    const payload = Buffer.alloc(4 + 16 * screens.length)
+    payload.writeUInt8(screens.length, 0)
+    screens.forEach((s, i) => {
+      const base = 4 + 16 * i
+      payload.writeUInt32BE(s.id, base)
+      payload.writeUInt16BE(s.x, base + 4)
+      payload.writeUInt16BE(s.y, base + 6)
+      payload.writeUInt16BE(s.w, base + 8)
+      payload.writeUInt16BE(s.h, base + 10)
+      payload.writeUInt32BE(s.flags, base + 12)
+    })
+    const head = Buffer.alloc(16)
+    head.writeUInt8(0, 0) // FramebufferUpdate
+    head.writeUInt16BE(1, 2) // numRects = 1
+    head.writeUInt16BE(result, 4) // x = 结果码（0=成功 1=禁止 2=无效 3=资源不足）
+    head.writeUInt16BE(0, 6) // y = 0
+    head.writeUInt16BE(w, 8)
+    head.writeUInt16BE(h, 10)
+    head.writeInt32BE(ENC_EDS, 12)
+    this.ws.send(Buffer.concat([head, payload]))
+    this.stats.lastAt = Date.now()
+  }
+
   private tick() {
     if (this.closed || this.hsStage !== 3) return
     if (this.pending || (this.lastSendAt > 0 && Date.now() - this.lastSendAt > 2500)) this.sendFrame()
@@ -350,19 +453,20 @@ class DemoRfbSession {
     if (this.closed) return
     this.pending = false
     this.render(Date.now())
-    for (let y = 0; y < DEMO_H; y += BAND_ROWS) {
-      const h = Math.min(BAND_ROWS, DEMO_H - y)
+    const W = this.W, H = this.H
+    for (let y = 0; y < H; y += BAND_ROWS) {
+      const h = Math.min(BAND_ROWS, H - y)
       const head = Buffer.alloc(12)
       head.writeUInt8(0, 0) // FramebufferUpdate
       head.writeUInt16BE(1, 2) // 1 rect
       head.writeUInt16BE(0, 4) // x
       head.writeUInt16BE(y, 6) // y
-      head.writeUInt16BE(DEMO_W, 8) // w
+      head.writeUInt16BE(W, 8) // w
       head.writeUInt16BE(h, 10) // h
       // 编码 int32 BE 0 (raw) 追加在 rect 头后
       const enc = Buffer.alloc(4)
       enc.writeInt32BE(0, 0)
-      const data = Buffer.from(this.fb.buffer, this.fb.byteOffset + y * DEMO_W * 4, DEMO_W * h * 4)
+      const data = Buffer.from(this.fb.buffer, this.fb.byteOffset + y * W * 4, W * h * 4)
       const msg = Buffer.concat([head, enc, data])
       this.ws.send(new Uint8Array(msg))
     }
@@ -371,10 +475,10 @@ class DemoRfbSession {
     this.stats.lastAt = Date.now()
   }
 
-  // ---- 演示帧渲染 ----
+  // ---- 演示帧渲染（支持多监视器布局：每屏边界高亮 + 屏号与分辨率标注）----
   private render(t: number) {
     const fb = this.fb
-    const W = DEMO_W, H = DEMO_H
+    const W = this.W, H = this.H
     const put = (i: number, r: number, g: number, b: number) => {
       fb[i] = b; fb[i + 1] = g; fb[i + 2] = r // LE: (r<<16)|(g<<8)|b → 字节序 B,G,R,0
     }
@@ -399,21 +503,28 @@ class DemoRfbSession {
         }
       }
     }
-    // 3) 网格
-    for (let y = 0; y < H; y += 40) for (let x = 0; x < W; x++) { const i = (y * W + x) * 4; put(i, fb[i + 2] + 6, fb[i + 1] + 10, fb[i] + 10) }
-    for (let x = 0; x < W; x += 40) for (let y = 0; y < H; y++) { const i = (y * W + x) * 4; put(i, fb[i + 2] + 6, fb[i + 1] + 10, fb[i] + 10) }
-    // 4) 顶部状态条
+    // 3) 网格（每屏内独立网格）
+    for (const scr of this.screens) {
+      const sw = Math.max(1, scr.w), sh = Math.max(1, scr.h)
+      for (let y = scr.y; y < scr.y + sh; y += 40) for (let x = scr.x; x < scr.x + sw; x++) { if (y < H && x < W) { const i = (y * W + x) * 4; put(i, fb[i + 2] + 6, fb[i + 1] + 10, fb[i] + 10) } }
+      for (let x = scr.x; x < scr.x + sw; x += 40) for (let y = scr.y; y < scr.y + sh; y++) { if (y < H && x < W) { const i = (y * W + x) * 4; put(i, fb[i + 2] + 6, fb[i + 1] + 10, fb[i] + 10) } }
+    }
+    // 4) 顶部状态条（整幅）
     for (let y = 0; y < 30; y++) for (let x = 0; x < W; x++) {
       const i = (y * W + x) * 4
       put(i, 6, 12, 16)
     }
     for (let x = 0; x < W; x++) put((29 * W + x) * 4, 20, 240, 190) // 顶部亮线
-    // 5) 时钟 + 计数器（3x5 字体 ×2）
+    // 5) 时钟 + 分辨率 + 屏数（3x5 字体 ×2）
     const d = new Date()
     const hh = String(d.getHours()).padStart(2, "0"), mm = String(d.getMinutes()).padStart(2, "0"), ss = String(d.getSeconds()).padStart(2, "0")
     this.text(`${hh}:${mm}:${ss}`, 12, 8, 2, 94, 244, 212)
-    // 6) 中央品牌锚标（16x16 ×6，带光晕）
-    const scale = 6, lw = 16, cx = Math.round(W / 2 - (lw * scale) / 2), cy = Math.round(H / 2 - (lw * scale) / 2) - 10
+    this.text(`M${this.screens.length} ${W}x${H}`, 150, 8, 2, 120, 200, 255)
+    // 6) 中央品牌锚标（16x16 ×6）—— 居中于主屏（屏 0）
+    const main = this.screens[0]
+    const scale = 6, lw = 16
+    const cx = Math.round(main.x + main.w / 2 - (lw * scale) / 2)
+    const cy = Math.round(main.y + main.h / 2 - (lw * scale) / 2) - 10
     for (let r = 0; r < lw; r++) for (let c = 0; c < lw; c++) {
       if (LOGO_ROWS[r][c] !== "#") continue
       for (let dy = 0; dy < scale; dy++) for (let dx = 0; dx < scale; dx++) {
@@ -421,9 +532,9 @@ class DemoRfbSession {
         if (i > 0 && i < fb.length - 3) put(i, 32, 225, 178)
       }
     }
-    // 7) 底部计数条
+    // 7) 底部计数条（整幅）
     for (let y = H - 26; y < H; y++) for (let x = 0; x < W; x++) { const i = (y * W + x) * 4; put(i, 5, 9, 12) }
-    this.text(`${this.keysTotal}-${this.pointersTotal}-${this.stats.frames}`, 12, H - 16, 1, 130, 160, 155)
+    this.text(`${this.keysTotal}-${this.pointersTotal}-${this.stats.frames}-R${this.resizes}`, 12, H - 16, 1, 130, 160, 155)
     // 8) 按键绽放环
     for (const bl of this.blooms) {
       bl.r += 1.6; bl.age++
@@ -456,9 +567,29 @@ class DemoRfbSession {
       const i = (y * W + x) * 4
       put(i, 30, 235, 185)
     }
+    // 10) 多监视器边界高亮 + 每屏标签（M1/M2/... + 分辨率）
+    this.screens.forEach((scr, idx) => {
+      const hue = (idx * 57) % 360
+      const [er, eg] = hslToRgb(hue / 360, 0.8, 0.62)
+      // 边框（3px 亮色 + 内侧 1px 暗色）
+      const border = (bx: number, by: number) => {
+        if (bx < 0 || bx >= W || by < 0 || by >= H) return
+        const i = (by * W + bx) * 4
+        if (i < fb.length - 3) put(i, er, eg, 210)
+      }
+      for (let x = scr.x; x < scr.x + scr.w; x++) { border(x, scr.y); border(x, scr.y + 1); border(x, scr.y + 2); border(x, scr.y + scr.h - 1) }
+      for (let y = scr.y; y < scr.y + scr.h; y++) { border(scr.x, y); border(scr.x + 1, y); border(scr.x + 2, y); border(scr.x + scr.w - 1, y) }
+      // 屏标签（左上角徽章底 + 文字）
+      const label = `M${idx + 1} ${scr.w}x${scr.h}`
+      const lw2 = label.length * 4 * 2 + 8
+      for (let y = scr.y + 40; y < scr.y + 40 + 18; y++) for (let x = scr.x + 40; x < scr.x + 40 + lw2; x++) {
+        if (x < W && y < H) { const i = (y * W + x) * 4; if (i < fb.length - 3) put(i, 8, 16, 20) }
+      }
+      this.text(label, scr.x + 44, scr.y + 45, 2, er, eg, 220)
+    })
   }
   private text(s: string, x0: number, y0: number, scale: number, r: number, g: number, b: number) {
-    const fb = this.fb, W = DEMO_W, H = DEMO_H
+    const fb = this.fb, W = this.W, H = this.H
     let x = x0
     for (const ch of s) {
       const glyph = FONT3x5[ch] || FONT3x5[" "]

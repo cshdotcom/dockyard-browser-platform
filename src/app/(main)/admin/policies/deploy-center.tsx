@@ -11,7 +11,7 @@ import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import {
   Layers, Users, ShieldCheck, Undo2, Send, Search, Loader2, Save, Trash2, ChevronDown, ChevronRight,
-  Network, Lock, Globe, CircleSlash, CheckCircle2, Ban, Info,
+  Network, Lock, Globe, CircleSlash, CheckCircle2, Ban, Info, Clock, Timer, CalendarClock, XCircle, Plug,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -25,7 +25,8 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { ConfirmDialog } from "@/components/shared/confirm"
 import { cn } from "@/lib/utils"
 import {
-  deployPolicyAction, rollbackDeploymentAction, savePolicyTemplateAction, deletePolicyTemplateAction,
+  deployPolicyAction, rollbackDeploymentAction, cancelScheduledDeploymentAction,
+  savePolicyTemplateAction, deletePolicyTemplateAction,
 } from "@/server/actions/policy-deployments"
 
 export interface DeploymentRow {
@@ -33,6 +34,10 @@ export interface DeploymentRow {
   name: string
   note: string | null
   status: string
+  effectiveMode: string
+  effectiveAt: string | null
+  activatedAt: string | null
+  cancelledAt: string | null
   totalTargets: number
   successTargets: number
   failedTargets: number
@@ -59,7 +64,7 @@ interface Props {
   templates: TemplateRow[]
   targetGroups: TargetOptionGroup[]
   targetUsers: TargetOptionUser[]
-  stats: { title: string; value: number; sub: string; icon: React.ReactNode }[]
+  stats: { title: string; value: number; sub: string; icon: React.ReactNode; tone?: "default" | "warning" | "success" | "danger" }[]
 }
 
 type TriState = "keep" | "allow" | "deny"
@@ -73,6 +78,9 @@ interface BundleForm {
   ipEnabled: boolean
   ipMode: "BLACKLIST" | "WHITELIST"
   ipText: string
+  endpointEnabled: boolean
+  endpointMode: "BLACKLIST" | "WHITELIST"
+  endpointText: string
 }
 
 const DEFAULT_FORM: BundleForm = {
@@ -84,6 +92,9 @@ const DEFAULT_FORM: BundleForm = {
   ipEnabled: false,
   ipMode: "BLACKLIST",
   ipText: "",
+  endpointEnabled: false,
+  endpointMode: "BLACKLIST",
+  endpointText: "",
 }
 
 function triValue(t: TriState): boolean | null {
@@ -134,6 +145,8 @@ function bundleSummary(b: Record<string, unknown>): string[] {
   if (d) parts.push(d.mode === "WHITELIST" ? `域名白名单 ${d.patterns?.length || 0} 项` : `域名黑名单 ${d.patterns?.length || 0} 项`)
   const i = b.ipRules as { mode?: string; values?: string[] } | null
   if (i) parts.push(i.mode === "WHITELIST" ? `IP 白名单 ${i.values?.length || 0} 项` : `IP 黑名单 ${i.values?.length || 0} 项`)
+  const e = b.endpointRules as { mode?: string; patterns?: string[] } | null
+  if (e) parts.push(e.mode === "WHITELIST" ? `端点放行例外 ${e.patterns?.length || 0} 项` : `端点封禁 ${e.patterns?.length || 0} 项`)
   return parts
 }
 
@@ -143,6 +156,8 @@ const statusBadge = (status: string) => {
     case "PARTIAL": return <Badge className="bg-amber-600 hover:bg-amber-600">部分成功</Badge>
     case "FAILED": return <Badge className="bg-red-600 hover:bg-red-600">失败</Badge>
     case "RUNNING": return <Badge className="bg-teal-600 hover:bg-teal-600">执行中</Badge>
+    case "PENDING": return <Badge className="bg-sky-600 hover:bg-sky-600"><Clock className="h-3 w-3 mr-1" />待生效</Badge>
+    case "CANCELLED": return <Badge variant="outline" className="border-slate-400/60 text-slate-500"><XCircle className="h-3 w-3 mr-1" />已取消</Badge>
     case "ROLLED_BACK": return <Badge variant="outline" className="border-violet-400/50 text-violet-500">已回滚</Badge>
     default: return <Badge variant="outline">{status}</Badge>
   }
@@ -161,12 +176,28 @@ export function PolicyDeployCenter(props: Props) {
   const [resultData, setResultData] = React.useState<{
     status: string; total: number; success: number; failed: number
     failures: { target: string; reason: string }[]; affectedUsers: number
+    scheduled: boolean; effectiveAt: string | null
   } | null>(null)
   const [rollingBack, setRollingBack] = React.useState<DeploymentRow | null>(null)
+  const [cancelling, setCancelling] = React.useState<DeploymentRow | null>(null)
   const [expanded, setExpanded] = React.useState<string | null>(null)
   const [saveTplOpen, setSaveTplOpen] = React.useState(false)
   const [tplName, setTplName] = React.useState("")
   const [tplDesc, setTplDesc] = React.useState("")
+
+  // —— 定时生效 ——
+  const [effectiveMode, setEffectiveMode] = React.useState<"IMMEDIATE" | "SCHEDULED">("IMMEDIATE")
+  const [effectiveAt, setEffectiveAt] = React.useState("") // datetime-local
+
+  const effectiveAtLocalIso = React.useMemo(() => {
+    if (effectiveMode !== "SCHEDULED" || !effectiveAt) return null
+    return new Date(effectiveAt).toISOString()
+  }, [effectiveMode, effectiveAt])
+
+  const applyPreset = (minutes: number) => {
+    const d = new Date(Date.now() + minutes * 60_000)
+    setEffectiveAt(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`)
+  }
 
   const totalTargets = selectedGroups.size + selectedUsers.size
   const affectedEstimate = React.useMemo(() => {
@@ -192,10 +223,13 @@ export function PolicyDeployCenter(props: Props) {
     ipRules: form.ipEnabled
       ? { mode: form.ipMode, values: form.ipText.split(/[\n,，\s]+/).map((s) => s.trim()).filter(Boolean) }
       : null,
+    endpointRules: form.endpointEnabled
+      ? { mode: form.endpointMode, patterns: form.endpointText.split(/[\n,，\s]+/).map((s) => s.trim()).filter(Boolean) }
+      : null,
   })
 
   const hasContent = () =>
-    triValue(form.internal) !== null || triValue(form.secure) !== null || form.domainEnabled || form.ipEnabled
+    triValue(form.internal) !== null || triValue(form.secure) !== null || form.domainEnabled || form.ipEnabled || form.endpointEnabled
 
   const loadTemplate = (tpl: TemplateRow) => {
     const b = (tpl.bundle || {}) as Record<string, unknown>
@@ -208,11 +242,18 @@ export function PolicyDeployCenter(props: Props) {
       ipEnabled: !!b.ipRules,
       ipMode: ((b.ipRules as { mode?: string } | null)?.mode === "WHITELIST" ? "WHITELIST" : "BLACKLIST"),
       ipText: ((b.ipRules as { values?: string[] } | null)?.values || []).join("\n"),
+      endpointEnabled: !!b.endpointRules,
+      endpointMode: ((b.endpointRules as { mode?: string } | null)?.mode === "WHITELIST" ? "WHITELIST" : "BLACKLIST"),
+      endpointText: ((b.endpointRules as { patterns?: string[] } | null)?.patterns || []).join("\n"),
     })
     toast.success(`已加载模板「${tpl.name}」`)
   }
 
   const doDeploy = async () => {
+    if (effectiveMode === "SCHEDULED" && !effectiveAt) {
+      toast.error("请选择定时生效时间")
+      return
+    }
     setBusy("deploy")
     try {
       const res = await deployPolicyAction({
@@ -221,6 +262,7 @@ export function PolicyDeployCenter(props: Props) {
         bundle: buildBundle(),
         targetGroupIds: [...selectedGroups],
         targetUserIds: [...selectedUsers],
+        effectiveAt: effectiveAtLocalIso,
       })
       if (res.code === 0 && res.data) {
         setResultData({
@@ -230,6 +272,8 @@ export function PolicyDeployCenter(props: Props) {
           failed: res.data.failedTargets,
           failures: res.data.failures,
           affectedUsers: res.data.affectedUsers,
+          scheduled: res.data.scheduled,
+          effectiveAt: res.data.effectiveAt,
         })
         setConfirmOpen(false)
         router.refresh()
@@ -240,6 +284,25 @@ export function PolicyDeployCenter(props: Props) {
       toast.error(e instanceof Error ? e.message : "下发失败")
     } finally {
       setBusy("")
+    }
+  }
+
+  const doCancel = async () => {
+    if (!cancelling) return
+    setBusy("cancel")
+    try {
+      const res = await cancelScheduledDeploymentAction({ id: cancelling.id })
+      if (res.code === 0) {
+        toast.success(`已取消定时批次「${res.data?.name || cancelling.name}」（策略未发生任何变更）`)
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "取消失败")
+    } finally {
+      setBusy("")
+      setCancelling(null)
     }
   }
 
@@ -299,18 +362,18 @@ export function PolicyDeployCenter(props: Props) {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">策略下发中心</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          按用户 / 用户组批量下发访问控制策略包（内网访问 · 容器安全位置 · 域名黑白名单 · IP 黑白名单），全量前置快照、一键回滚、逐目标失败隔离
+          按用户 / 用户组批量下发访问控制策略包（内网访问 · 容器安全位置 · 域名黑白名单 · IP 黑白名单 · 端点级精确限制），支持定时生效；全量前置快照、一键回滚、逐目标失败隔离
         </p>
       </div>
 
       {/* 统计卡 */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
         {props.stats.map((s) => (
-          <div key={s.title} className="rounded-lg border p-4 flex items-center gap-3">
-            <div className="h-9 w-9 rounded-lg bg-teal-600/10 text-teal-600 flex items-center justify-center shrink-0">{s.icon}</div>
+          <div key={s.title} className={cn("rounded-lg border p-4 flex items-center gap-3", s.tone === "warning" && "border-amber-300/60 bg-amber-50/50 dark:border-amber-800/50 dark:bg-amber-950/20")}>
+            <div className={cn("h-9 w-9 rounded-lg flex items-center justify-center shrink-0", s.tone === "warning" ? "bg-amber-600/10 text-amber-600" : "bg-teal-600/10 text-teal-600")}>{s.icon}</div>
             <div className="min-w-0">
               <p className="text-xl font-semibold leading-none">{s.value}</p>
-              <p className="text-xs text-muted-foreground mt-1">{s.title} · {s.sub}</p>
+              <p className="text-xs text-muted-foreground mt-1 truncate">{s.title} · {s.sub}</p>
             </div>
           </div>
         ))}
@@ -404,6 +467,42 @@ export function PolicyDeployCenter(props: Props) {
               </>
             ) : (
               <p className="text-[11px] text-muted-foreground">关闭时不修改目标现有 IP 规则</p>
+            )}
+          </div>
+
+          {/* 端点级精确限制（host:port） */}
+          <div className="rounded-xl border p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold flex items-center gap-1.5">
+                {form.endpointMode === "WHITELIST" ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <Plug className="h-4 w-4 text-red-600" />}
+                端点级精确限制（host:port）
+              </h2>
+              <div className="flex items-center gap-2">
+                <Select value={form.endpointMode} onValueChange={(v) => setForm({ ...form, endpointMode: v as "BLACKLIST" | "WHITELIST" })} disabled={!form.endpointEnabled}>
+                  <SelectTrigger className="h-7 w-[130px] text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="BLACKLIST">封禁（精确拦截）</SelectItem>
+                    <SelectItem value="WHITELIST">放行例外（白例外）</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Switch checked={form.endpointEnabled} onCheckedChange={(v) => setForm({ ...form, endpointEnabled: v })} />
+              </div>
+            </div>
+            {form.endpointEnabled ? (
+              <>
+                <Textarea
+                  value={form.endpointText}
+                  onChange={(e) => setForm({ ...form, endpointText: e.target.value })}
+                  placeholder={"10.0.0.5:8080&#10;192.168.1.0/24:443&#10;*.corp.example:22&#10;127.0.0.1:9222&#10;[::1]:5900（每行一个，host:port 精确到端口）"}
+                  className="font-mono text-xs min-h-20"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  支持 IP/域名/CIDR + 精确端口；<code className="mx-0.5">host:*</code> 任意端口、<code className="mx-0.5">host:80-90</code> 端口区间、<code className="mx-0.5">[::1]:port</code> IPv6。
+                  内网整体放行时仍可封指定端点；127.0.0.1 / localhost 等环回地址在禁止内网时全端口拦截
+                </p>
+              </>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">关闭时不修改目标现有端点规则</p>
             )}
           </div>
 
@@ -540,13 +639,76 @@ export function PolicyDeployCenter(props: Props) {
               <Label className="text-xs">备注（可选）</Label>
               <Input value={deployNote} onChange={(e) => setDeployNote(e.target.value)} placeholder="下发原因 / 工单号" className="h-8 text-xs" />
             </div>
+
+            {/* —— 定时生效 —— */}
+            <div className="rounded-lg border border-sky-200 dark:border-sky-900 bg-sky-50/60 dark:bg-sky-950/25 p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs flex items-center gap-1.5 text-sky-800 dark:text-sky-300">
+                  <CalendarClock className="h-3.5 w-3.5" />
+                  生效方式
+                </Label>
+                <div className="flex items-center rounded-lg border p-0.5">
+                  {(["IMMEDIATE", "SCHEDULED"] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setEffectiveMode(m)}
+                      className={cn(
+                        "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                        effectiveMode === m ? "bg-sky-600 text-white" : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {m === "IMMEDIATE" ? "立即生效" : "定时生效"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {effectiveMode === "SCHEDULED" && (
+                <div className="space-y-2">
+                  <Input
+                    type="datetime-local"
+                    value={effectiveAt}
+                    onChange={(e) => setEffectiveAt(e.target.value)}
+                    className="h-8 text-xs"
+                  />
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      { label: "+5 分钟", min: 5 },
+                      { label: "+1 小时", min: 60 },
+                      { label: "明早 9 点", min: 0, next9: true },
+                      { label: "+1 天", min: 1440 },
+                    ].map((p) => (
+                      <button
+                        key={p.label}
+                        type="button"
+                        onClick={() => {
+                          if (p.next9) {
+                            const d = new Date(Date.now() + 24 * 3600_000)
+                            d.setHours(9, 0, 0, 0)
+                            setEffectiveAt(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T09:00`)
+                          } else applyPreset(p.min!)
+                        }}
+                        className="rounded-md border px-2 py-0.5 text-[10px] text-muted-foreground hover:border-sky-400/60 hover:text-sky-600 transition-colors"
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-sky-700 dark:text-sky-300/80 flex items-start gap-1">
+                    <Clock className="h-3 w-3 mt-0.5 shrink-0" />
+                    批次将以 PENDING 状态落库，到点由定时任务（每分钟）自动激活；激活前可随时取消
+                  </p>
+                </div>
+              )}
+            </div>
+
             <Button
               className="w-full bg-teal-600 hover:bg-teal-700 font-semibold"
-              disabled={!hasContent() || totalTargets === 0}
+              disabled={!hasContent() || totalTargets === 0 || (effectiveMode === "SCHEDULED" && !effectiveAt)}
               onClick={() => setConfirmOpen(true)}
             >
-              <Send className="h-4 w-4 mr-1.5" />
-              下发策略（{totalTargets} 目标）
+              {effectiveMode === "SCHEDULED" ? <CalendarClock className="h-4 w-4 mr-1.5" /> : <Send className="h-4 w-4 mr-1.5" />}
+              {effectiveMode === "SCHEDULED" ? `排期定时策略（${totalTargets} 目标）` : `下发策略（${totalTargets} 目标）`}
             </Button>
             <p className="text-[11px] text-muted-foreground flex items-start gap-1">
               <Info className="h-3 w-3 mt-0.5 shrink-0" />
@@ -573,16 +735,34 @@ export function PolicyDeployCenter(props: Props) {
                     {expanded === d.id ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                   </button>
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium truncate">{d.name}</p>
+                    <p className="text-sm font-medium truncate flex items-center gap-1.5">
+                      {d.name}
+                      {d.effectiveMode === "SCHEDULED" && (
+                        <Badge variant="outline" className="border-sky-400/50 text-sky-600 text-[10px] shrink-0">
+                          <Timer className="h-2.5 w-2.5 mr-0.5" />定时
+                        </Badge>
+                      )}
+                    </p>
                     <p className="text-[11px] text-muted-foreground truncate">
-                      {d.createdByUsername} · {d.deployedAt || "-"}{d.rolledBackAt ? ` · 回滚于 ${d.rolledBackAt}` : ""}
+                      {d.createdByUsername}
+                      {d.status === "PENDING" && d.effectiveAt ? ` · 定时生效：${d.effectiveAt}` : d.deployedAt ? ` · ${d.deployedAt}` : " · 未执行"}
+                      {d.activatedAt ? ` · 激活于 ${d.activatedAt}` : ""}
+                      {d.cancelledAt ? ` · 取消于 ${d.cancelledAt}` : ""}
+                      {d.rolledBackAt ? ` · 回滚于 ${d.rolledBackAt}` : ""}
                       {bundleSummary(d.bundle).length > 0 && ` · ${bundleSummary(d.bundle).join(" / ")}`}
                     </p>
                   </div>
                   {statusBadge(d.status)}
-                  <Badge variant="outline" className="text-[10px]">
-                    {d.successTargets}/{d.totalTargets} 成功{d.failedTargets > 0 ? ` · ${d.failedTargets} 失败` : ""}
-                  </Badge>
+                  {d.status !== "PENDING" && d.status !== "CANCELLED" && (
+                    <Badge variant="outline" className="text-[10px]">
+                      {d.successTargets}/{d.totalTargets} 成功{d.failedTargets > 0 ? ` · ${d.failedTargets} 失败` : ""}
+                    </Badge>
+                  )}
+                  {d.status === "PENDING" && d.effectiveMode === "SCHEDULED" && (
+                    <Button size="sm" variant="outline" className="h-7 border-slate-400/50 text-slate-500 hover:bg-slate-500/10" onClick={() => setCancelling(d)}>
+                      <XCircle className="h-3 w-3 mr-1" /> 取消
+                    </Button>
+                  )}
                   {d.status !== "ROLLED_BACK" && (d.status === "SUCCESS" || d.status === "PARTIAL") && (
                     <Button size="sm" variant="outline" className="h-7 border-violet-400/50 text-violet-500 hover:bg-violet-500/10" onClick={() => setRollingBack(d)}>
                       <Undo2 className="h-3 w-3 mr-1" /> 回滚
@@ -635,8 +815,8 @@ export function PolicyDeployCenter(props: Props) {
           </DialogHeader>
           <div className="space-y-3 text-sm">
             <p>
-              批次「{deployName || "（未命名）"}」将下发给 <b>{selectedGroups.size}</b> 个用户组与 <b>{selectedUsers.size}</b> 个用户
-              （影响约 {affectedEstimate} 名用户）。
+              批次「{deployName || "（未命名）"}」将{effectiveMode === "SCHEDULED" ? "定时排期给" : "下发给"} <b>{selectedGroups.size}</b> 个用户组与 <b>{selectedUsers.size}</b> 个用户
+              （影响约 {affectedEstimate} 名用户）{effectiveMode === "SCHEDULED" && effectiveAt ? `，生效时刻 ${effectiveAt.replace("T", " ")}` : ""}。
             </p>
             <ul className="list-disc pl-5 text-xs text-muted-foreground space-y-1">
               {bundleSummary(buildBundle() as Record<string, unknown>).map((s) => (
@@ -645,13 +825,16 @@ export function PolicyDeployCenter(props: Props) {
             </ul>
             <p className="text-xs text-amber-600 dark:text-amber-400 flex items-start gap-1">
               <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-              域名/IP 规则为替换式下发；下发前自动全量快照，可一键回滚。该操作将记入审计与安全事件。
+              {effectiveMode === "SCHEDULED"
+                ? "定时批次不立即变更任何策略；到点由定时任务自动激活执行，激活前可取消。排期与激活均记入审计与安全事件。"
+                : "域名/IP/端点规则为替换式下发；下发前自动全量快照，可一键回滚。该操作将记入审计与安全事件。"}
             </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmOpen(false)} disabled={busy === "deploy"}>取消</Button>
             <Button className="bg-teal-600 hover:bg-teal-700" onClick={doDeploy} disabled={busy === "deploy"}>
-              {busy === "deploy" && <Loader2 className="h-4 w-4 mr-1 animate-spin" />} 确认下发
+              {busy === "deploy" && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}
+              {effectiveMode === "SCHEDULED" ? "确认排期" : "确认下发"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -667,8 +850,18 @@ export function PolicyDeployCenter(props: Props) {
             <div className="space-y-3 text-sm">
               <div className="flex items-center gap-2">
                 {statusBadge(resultData.status)}
-                <span>成功 {resultData.success} / 共 {resultData.total} · 影响约 {resultData.affectedUsers} 名用户</span>
+                {resultData.scheduled ? (
+                  <span>已排期 {resultData.total} 个目标 · 定时生效：{resultData.effectiveAt ? new Date(resultData.effectiveAt).toLocaleString() : "-"}</span>
+                ) : (
+                  <span>成功 {resultData.success} / 共 {resultData.total} · 影响约 {resultData.affectedUsers} 名用户</span>
+                )}
               </div>
+              {resultData.scheduled && (
+                <p className="text-xs text-sky-700 dark:text-sky-300 bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-900 rounded-lg p-3 flex items-start gap-1.5">
+                  <Clock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  批次当前为待生效（PENDING）：未变更任何策略；到点后由「定时策略下发到点激活」任务自动执行，激活前可在批次历史中取消。
+                </p>
+              )}
               {resultData.failures.length > 0 && (
                 <div className="rounded-lg border border-red-200 dark:border-red-900 bg-red-50/50 dark:bg-red-950/20 p-3 max-h-48 overflow-y-auto">
                   {resultData.failures.map((f, i) => (
@@ -678,7 +871,7 @@ export function PolicyDeployCenter(props: Props) {
                   ))}
                 </div>
               )}
-              <p className="text-xs text-muted-foreground">前置状态已快照，可在批次历史中一键回滚。</p>
+              <p className="text-xs text-muted-foreground">{resultData.scheduled ? "排期与到点激活均记入审计与安全事件。" : "前置状态已快照，可在批次历史中一键回滚。"}</p>
             </div>
           )}
           <DialogFooter>
@@ -697,6 +890,18 @@ export function PolicyDeployCenter(props: Props) {
         confirmText="确认回滚"
         loading={busy === "rollback"}
         onConfirm={doRollback}
+      />
+
+      {/* ===== 取消定时批次确认 ===== */}
+      <ConfirmDialog
+        open={!!cancelling}
+        onOpenChange={(v) => !busy && setCancelling(v ? cancelling : null)}
+        title="取消定时策略批次"
+        description={`批次「${cancelling?.name}」尚未生效（定时于 ${cancelling?.effectiveAt || "-"}）。取消后不发生任何策略变更，批次转入已取消状态；不可恢复（如需重新下发请新建批次）。`}
+        destructive
+        confirmText="确认取消批次"
+        loading={busy === "cancel"}
+        onConfirm={doCancel}
       />
 
       {/* ===== 存为模板弹窗 ===== */}

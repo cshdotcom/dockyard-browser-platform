@@ -32,6 +32,7 @@ export interface BrowserHardeningSpec {
   labels?: Record<string, string>
   networkPolicy?: { allowInternalNetwork: boolean; allowSecureLocationAccess: boolean }
   domainPolicy?: { mode: string; blackPatterns: string[]; whitePatterns: string[] }
+  endpointPolicy?: { blackPatterns: string[]; whitePatterns: string[] } // 端点级精确限制（host:port）
   policyFile?: string | null // 网络策略托管策略 JSON（只读 bind-mount 进 /etc/chromium/policies/managed/）
   gatewayIp?: string | null // 会话网络网关（平台内部端点封禁目标）
 }
@@ -56,6 +57,8 @@ export interface BrowserHardeningInfo {
   // —— 网络访问管控（管理员按用户/组下发）——
   allowInternalNetwork: boolean
   allowSecureLocationAccess: boolean
+  domainPolicy?: { mode: string; blackPatterns: string[]; whitePatterns: string[] }
+  endpointPolicy?: { blackPatterns: string[]; whitePatterns: string[] }
   policyManagedChromium: boolean // Chromium 托管策略文件已注入（只读、不可篡改）
   iccDisabledNetwork: boolean // 会话网络容器互访封禁（跨用户网络不可达）
 }
@@ -86,6 +89,7 @@ export function browserHardeningSummary(spec: BrowserHardeningSpec): BrowserHard
     allowInternalNetwork: spec.networkPolicy?.allowInternalNetwork ?? false,
     allowSecureLocationAccess: spec.networkPolicy?.allowSecureLocationAccess ?? false,
     domainPolicy: spec.domainPolicy ?? { mode: "BLACKLIST", blackPatterns: [], whitePatterns: [] },
+    endpointPolicy: spec.endpointPolicy ?? { blackPatterns: [], whitePatterns: [] },
     policyManagedChromium: !!spec.policyFile,
     iccDisabledNetwork: true,
   }

@@ -13,6 +13,7 @@
 
 import { db } from "./db"
 import { resolveNetworkPolicy, type NetworkPolicy } from "./network-policy"
+import { resolveEndpointPolicyForUser, type EndpointPolicy } from "./endpoint-policy"
 
 export interface ScopedDomainRule {
   id: string
@@ -213,15 +214,20 @@ export function describeDomainPolicy(p: DomainPolicy): string {
 }
 
 // ============================================================
-// 组合解析：一次取齐 网络访问策略（内网/安全位置） + 域名黑白名单策略
+// 组合解析：一次取齐 网络访问策略（内网/安全位置） + 域名黑白名单策略 + 端点级精确限制策略
 // 供工作区创建/启动/切代理/看门狗自愈统一调用
 // ============================================================
 export interface AccessPolicyBundle {
   network: NetworkPolicy
   domain: DomainPolicy
+  endpoint: EndpointPolicy
 }
 
 export async function resolveAccessPolicies(userId: string): Promise<AccessPolicyBundle> {
-  const [network, domain] = await Promise.all([resolveNetworkPolicy(userId), resolveDomainPolicyForUser(userId)])
-  return { network, domain }
+  const [network, domain, endpoint] = await Promise.all([
+    resolveNetworkPolicy(userId),
+    resolveDomainPolicyForUser(userId),
+    resolveEndpointPolicyForUser(userId),
+  ])
+  return { network, domain, endpoint }
 }

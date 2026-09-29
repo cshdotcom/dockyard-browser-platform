@@ -13,9 +13,11 @@ import { z } from "zod"
 import { requireAdmin, adminGroupIds } from "@/lib/permissions"
 import { db } from "@/lib/db"
 import { writeAudit } from "@/lib/audit"
-import { deployPolicyBundle, rollbackPolicyBundle, bundleSchema, type PolicyOperator } from "@/lib/policy-engine"
+import {
+  deployPolicyBundle, rollbackPolicyBundle, cancelScheduledDeployment, bundleSchema, type PolicyOperator,
+} from "@/lib/policy-engine"
 
-// ---- 下发（鉴权 → 引擎）----
+// ---- 下发（鉴权 → 引擎；支持定时生效）----
 export async function deployPolicyAction(input: unknown): Promise<ActionResult<{
   deploymentId: string
   status: string
@@ -24,11 +26,22 @@ export async function deployPolicyAction(input: unknown): Promise<ActionResult<{
   failedTargets: number
   failures: Array<{ target: string; reason: string }>
   affectedUsers: number
+  scheduled: boolean
+  effectiveAt: string | null
 }>> {
   return actionHandler(async () => {
     const ctx = await requireAdmin()
     const operator: PolicyOperator = { userId: ctx.userId, username: ctx.username, role: ctx.role }
     return deployPolicyBundle(operator, input)
+  })
+}
+
+// ---- 取消定时待生效批次（鉴权 → 引擎）----
+export async function cancelScheduledDeploymentAction(input: unknown): Promise<ActionResult<{ id: string; name: string }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAdmin()
+    const operator: PolicyOperator = { userId: ctx.userId, username: ctx.username, role: ctx.role }
+    return cancelScheduledDeployment(operator, input)
   })
 }
 
@@ -109,6 +122,10 @@ export async function listDeploymentsAction(input: unknown): Promise<ActionResul
     id: string
     name: string
     status: string
+    effectiveMode: string
+    effectiveAt: string | null
+    activatedAt: string | null
+    cancelledAt: string | null
     totalTargets: number
     successTargets: number
     failedTargets: number
@@ -146,6 +163,10 @@ export async function listDeploymentsAction(input: unknown): Promise<ActionResul
           id: r.id,
           name: r.name,
           status: r.status,
+          effectiveMode: r.effectiveMode || "IMMEDIATE",
+          effectiveAt: r.effectiveAt?.toISOString() ?? null,
+          activatedAt: r.activatedAt?.toISOString() ?? null,
+          cancelledAt: r.cancelledAt?.toISOString() ?? null,
           totalTargets: r.totalTargets,
           successTargets: r.successTargets,
           failedTargets: r.failedTargets,

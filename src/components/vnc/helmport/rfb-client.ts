@@ -26,12 +26,47 @@ const ENC_RAW = 0
 const ENC_COPYRECT = 1
 const ENC_DESKTOP_SIZE = -223
 const ENC_CURSOR = -239
+const ENC_EXT_DESKTOP_SIZE = -308 // ExtendedDesktopSize 伪编码（多监视器分辨率切换）
+
+// ---- RFB 屏幕布局（SetDesktopSize / ExtendedDesktopSize）----
+export interface RfbScreen {
+  id: number
+  x: number
+  y: number
+  width: number
+  height: number
+  flags: number
+}
+
+// ExtendedDesktopSize 响应码（rect.x 字段）
+export const EDS_RESULT_SUCCESS = 0
+export const EDS_RESULT_PROHIBITED = 1
+export const EDS_RESULT_INVALID = 2
+export const EDS_RESULT_INSUFFICIENT = 3
+
+// 响应码 → 人读原因（查看器 toast 用）
+export function edsResultMessage(code: number): string {
+  switch (code) {
+    case EDS_RESULT_SUCCESS: return "分辨率切换成功"
+    case EDS_RESULT_PROHIBITED: return "服务端禁止该客户端调整分辨率（只读会话）"
+    case EDS_RESULT_INVALID: return "请求的分辨率/布局无效（超出允许范围）"
+    case EDS_RESULT_INSUFFICIENT: return "服务端资源不足，无法应用该分辨率"
+    default: return `服务端返回未知结果码 ${code}`
+  }
+}
 
 export interface RfbServerInfo {
   width: number
   height: number
   name: string
   version: string
+}
+
+export interface RfbDesktopSize {
+  width: number
+  height: number
+  screens: RfbScreen[]
+  resultCode: number
 }
 
 export interface RfbTelemetry {
@@ -51,6 +86,7 @@ export interface HelmPortRfbOptions {
   onClipboard?: (text: string) => void
   onBell?: () => void
   onTelemetry?: (t: RfbTelemetry) => void
+  onDesktopSize?: (size: RfbDesktopSize) => void // 多监视器分辨率切换回调（服务端确认后的新布局）
 }
 
 enum State {
@@ -78,6 +114,8 @@ export class HelmPortRfb {
   private zlibStreams = new Map<number, { parts: Uint8Array[] }>()
   private manualClose = false
   private clientInitSent = false
+  private requestedEds = false // 客户端是否请求了 ExtendedDesktopSize 伪编码
+  private lastDesktopSize: RfbDesktopSize | null = null
 
   constructor(ws: WebSocket, opts: HelmPortRfbOptions) {
     this.ws = ws
@@ -234,13 +272,14 @@ export class HelmPortRfb {
         setFmt[16] = 0
         this.sendRaw(setFmt)
 
-        // SetEncodings：Raw + CopyRect + 桌面尺寸 + 光标伪编码
-        const encodings = [ENC_RAW, ENC_COPYRECT, ENC_DESKTOP_SIZE, ENC_CURSOR]
+        // SetEncodings：Raw + CopyRect + 桌面尺寸 + 光标伪编码 + 扩展桌面尺寸（多监视器）
+        const encodings = [ENC_RAW, ENC_COPYRECT, ENC_DESKTOP_SIZE, ENC_CURSOR, ENC_EXT_DESKTOP_SIZE]
         const setEnc = new Uint8Array(4 + 4 * encodings.length)
         setEnc[0] = 2
         set16(setEnc, 2, encodings.length)
         encodings.forEach((enc, i) => set32s(setEnc, 4 + 4 * i, enc))
         this.sendRaw(setEnc)
+        this.requestedEds = true
 
         // QEMU 扩展剪贴板能力宣告
         this.sendExtClipboard(CLIP_ACTION_CAPS | CLIP_ACTION_REQUEST | CLIP_ACTION_NOTIFY | CLIP_ACTION_PROVIDE, CLIP_FORMAT_TEXT, new Uint8Array(0))
@@ -249,6 +288,8 @@ export class HelmPortRfb {
         this.requestFramebufferUpdate(false)
         this.state = State.Running
         this.opts.onConnected?.({ width: this.fbW, height: this.fbH, name, version: this.serverVersion })
+        this.lastDesktopSize = { width: this.fbW, height: this.fbH, screens: [{ id: 0, x: 0, y: 0, width: this.fbW, height: this.fbH, flags: 0 }], resultCode: EDS_RESULT_SUCCESS }
+        this.opts.onDesktopSize?.(this.lastDesktopSize)
 
         // 保活：3 秒无增量则补发请求（x11vnc 某些配置需要）
         this.keepaliveTimer = setInterval(() => {
@@ -302,6 +343,41 @@ export class HelmPortRfb {
             this.canvas.width = w
             this.canvas.height = h
             this.ctx = this.canvas.getContext("2d", { alpha: false })
+            this.lastDesktopSize = { width: w, height: h, screens: [{ id: 0, x: 0, y: 0, width: w, height: h, flags: 0 }], resultCode: EDS_RESULT_SUCCESS }
+            this.opts.onDesktopSize?.(this.lastDesktopSize)
+          } else if (enc === ENC_EXT_DESKTOP_SIZE) {
+            // ExtendedDesktopSize：x=结果码 y=0；负载 = 1B屏数 + 3B填充 + 16B/屏
+            if (this.buf.length < off + 4) return false
+            const numScreens = this.buf[off]
+            const payloadLen = 4 + 16 * numScreens
+            if (this.buf.length < off + payloadLen) return false
+            const screens: RfbScreen[] = []
+            for (let si = 0; si < numScreens; si++) {
+              const base = off + 4 + 16 * si
+              screens.push({
+                id: view32(this.buf, base),
+                x: view16(this.buf, base + 4),
+                y: view16(this.buf, base + 6),
+                width: view16(this.buf, base + 8),
+                height: view16(this.buf, base + 10),
+                flags: view32(this.buf, base + 12),
+              })
+            }
+            off += payloadLen
+            // 布局变更：w/h 为帧缓冲断尺寸，x 为请求结果码
+            this.fbW = w
+            this.fbH = h
+            this.canvas.width = w
+            this.canvas.height = h
+            this.ctx = this.canvas.getContext("2d", { alpha: false })
+            if (this.ctx) {
+              this.ctx.fillStyle = "#070b0e"
+              this.ctx.fillRect(0, 0, w, h)
+            }
+            this.lastDesktopSize = { width: w, height: h, screens, resultCode: x }
+            this.opts.onDesktopSize?.(this.lastDesktopSize)
+            // 尺寸变更后请求全量重绘
+            this.requestFramebufferUpdate(false)
           } else if (enc === ENC_CURSOR) {
             const pixels = w * h * 4
             const maskBytes = Math.ceil(w / 8) * h
@@ -452,6 +528,38 @@ export class HelmPortRfb {
     this.sendRaw(msg)
   }
 
+  // ================= 多监视器分辨率切换（SetDesktopSize 客户端消息 type=8） =================
+  // 报文布局：type(1) + fbWidth(2) + fbHeight(2) + numberOfScreens(1) + pad(1) + 16B/屏
+  // 服务端确认后以 ExtendedDesktopSize 矩形回送新布局（onDesktopSize 回调）；
+  // 部分服务端另以 DesktopSize 伪编码矩形通告尺寸。
+  sendSetDesktopSize(width: number, height: number, screens: RfbScreen[]): boolean {
+    if (this.state !== State.Running) return false
+    if (this.opts.viewOnly) return false // 只读镜像：本地拦截（服务端另有 PROHIBITED 双保险）
+    if (width < 200 || width > 3840 || height < 200 || height > 2160) return false
+    if (screens.length < 1 || screens.length > 4) return false
+    const msg = new Uint8Array(7 + 16 * screens.length)
+    msg[0] = 8 // SetDesktopSize
+    set16(msg, 1, width)
+    set16(msg, 3, height)
+    msg[5] = screens.length
+    msg[6] = 0 // padding
+    screens.forEach((scr, i) => {
+      const base = 7 + 16 * i
+      set32(msg, base, scr.id)
+      set16(msg, base + 4, scr.x)
+      set16(msg, base + 6, scr.y)
+      set16(msg, base + 8, scr.width)
+      set16(msg, base + 10, scr.height)
+      set32(msg, base + 12, scr.flags)
+    })
+    this.sendRaw(msg)
+    return true
+  }
+
+  get desktopSize(): RfbDesktopSize | null {
+    return this.lastDesktopSize
+  }
+
   // ================= 剪贴板（QEMU 扩展 + 经典降级） =================
 
   async sendClipboard(text: string): Promise<"extended" | "classic" | "failed"> {
@@ -508,8 +616,9 @@ export class HelmPortRfb {
     const action = flags & 0xff000000
     const formats = flags & 0xffff
     const payload = data.subarray(4)
-    if ((action & CLIP_ACTION_PROVIDE) !== 0 && (formats & CLIP_FORMAT_TEXT) !== 0) {
-      // 服务端提供文本：zlib 解压 → u32 size + utf8
+    // 动作精确匹配（与桥服务端一致）：CAPS 混合位不被误判为 PROVIDE（避免对空负载误 zlib）
+    if (action === CLIP_ACTION_PROVIDE && (formats & CLIP_FORMAT_TEXT) !== 0) {
+      // 服务端提供文本：zlib 解压 → u32 size + utf8（解压失败静默降级）
       inflateZlib(payload)
         .then((raw) => {
           if (raw.length < 4) return
@@ -518,7 +627,7 @@ export class HelmPortRfb {
           if (text) this.opts.onClipboard?.(text)
         })
         .catch(() => { /* 解压失败忽略 */ })
-    } else if ((action & CLIP_ACTION_NOTIFY) !== 0 && (formats & CLIP_FORMAT_TEXT) !== 0) {
+    } else if (action === CLIP_ACTION_NOTIFY && (formats & CLIP_FORMAT_TEXT) !== 0) {
       // 服务端宣告有内容 → 主动请求
       this.sendExtClipboard(CLIP_ACTION_REQUEST, CLIP_FORMAT_TEXT, new Uint8Array(0))
     }

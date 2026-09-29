@@ -32,9 +32,15 @@ export default async function SetupPage() {
             <code className="mx-1 rounded bg-teal-600/10 px-1 font-mono text-[11px]">ADMIN_PASSWORD</code>
             自动完成注册。管理员账号后期可在「账号与安全」页面修改用户名、邮箱与密码。
           </p>
+          <p className="text-xs leading-relaxed border-t border-teal-200/60 dark:border-teal-800/60 pt-1.5">
+            <span className="font-medium">启动密钥：</span>注册需输入本次服务启动生成的 Setup Token
+            （管理员初始化完成前每次重启都会变化，当前提示 <code className="mx-1 rounded bg-teal-600/10 px-1 font-mono text-[11px] font-semibold">{state.setupTokenHint || "-"}</code>）。
+            完整密钥在服务器控制台启动日志或数据目录 <code className="mx-1 rounded bg-teal-600/10 px-1 font-mono text-[11px]">storage/setup-token.txt</code>，
+            也可用环境变量 <code className="mx-1 rounded bg-teal-600/10 px-1 font-mono text-[11px]">SETUP_TOKEN</code> 固定指定。
+          </p>
         </div>
 
-        <SetupForm />
+        <SetupForm tokenHint={state.setupTokenHint} />
 
         <p className="text-center text-xs text-muted-foreground">
           已有管理员？<a href="/login" className="text-teal-600 hover:underline">直接登录</a>

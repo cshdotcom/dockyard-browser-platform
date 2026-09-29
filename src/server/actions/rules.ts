@@ -440,3 +440,119 @@ export async function listTemplateOptionsAction(): Promise<ActionResult<{ id: st
     return rows
   })
 }
+
+// ============================================================
+// 端点级精确限制规则 NetworkEndpointRule（host:port 精确到端口）
+// 与域名规则同一作用域模型（GLOBAL/GROUP/USER）；
+// 执行层：Chromium 托管策略 URLBlocklist（与内网/域名策略合并注入）
+// ============================================================
+
+const endpointSchema = z.object({
+  id: zId.optional(),
+  pattern: z.string().min(1, "端点模式不能为空").max(253),
+  type: z.enum(["BLACK", "WHITE"]),
+  enabled: z.boolean(),
+  note: z.string().max(300).optional().nullable(),
+  scopeType: z.enum(["GLOBAL", "GROUP", "USER"]).default("GLOBAL"),
+  groupId: zId.nullish(),
+  userId: zId.nullish(),
+  priority: z.number().int().min(0).max(9999).default(0),
+})
+
+export async function saveEndpointRuleAction(input: unknown): Promise<ActionResult<{ id: string }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAdmin()
+    const p = zodValidate(endpointSchema, input)
+    // 模式规范化（host:port / host:* / CIDR:port / [::1]:port / 端口区间）
+    const { normalizeEndpointPattern } = await import("@/lib/endpoint-policy")
+    const normalized = normalizeEndpointPattern(p.pattern)
+    if (!normalized) {
+      throw new Error("非法端点模式：支持 host:port / host:* / 10.0.0.0/24:443 / *.corp.com:22 / [::1]:9222 / host:80-90")
+    }
+    const scope = await sanitizeDomainScope(p)
+    const dup = await db.networkEndpointRule.findFirst({
+      where: {
+        pattern: normalized, type: p.type, scopeType: scope.scopeType, groupId: scope.groupId, userId: scope.userId,
+        ...(p.id ? { id: { not: p.id } } : {}),
+      },
+    })
+    if (dup) throw new Error("相同端点模式（同作用域/同类型）已存在")
+    const scopeData = { scopeType: scope.scopeType, groupId: scope.groupId, userId: scope.userId, priority: p.priority ?? 0 }
+    if (p.id) {
+      const existing = await db.networkEndpointRule.findUnique({ where: { id: p.id } })
+      if (!existing) throw new Error("端点规则不存在")
+      const row = await db.networkEndpointRule.update({
+        where: { id: p.id },
+        data: { pattern: normalized, type: p.type, enabled: p.enabled, note: p.note || null, ...scopeData },
+      })
+      await writeAudit({
+        operatorUserId: ctx.userId,
+        operatorName: ctx.username,
+        operationType: "ENDPOINT_RULE_UPDATE",
+        resourceType: "ENDPOINT_RULE",
+        resourceId: row.id,
+        resourceName: row.pattern,
+        before: { pattern: existing.pattern, type: existing.type, enabled: existing.enabled, note: existing.note, scopeType: existing.scopeType },
+        after: { pattern: row.pattern, type: row.type, enabled: row.enabled, note: row.note, ...scopeData },
+      })
+      return { id: row.id }
+    }
+    const row = await db.networkEndpointRule.create({
+      data: { pattern: normalized, type: p.type, enabled: p.enabled, note: p.note || null, createdByUserId: ctx.userId, ...scopeData },
+    })
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "ENDPOINT_RULE_CREATE",
+      resourceType: "ENDPOINT_RULE",
+      resourceId: row.id,
+      resourceName: row.pattern,
+      after: { pattern: row.pattern, type: row.type, enabled: row.enabled, note: row.note, ...scopeData },
+    })
+    return { id: row.id }
+  })
+}
+
+export async function toggleEndpointRuleAction(input: unknown): Promise<ActionResult<{ id: string; enabled: boolean }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAdmin()
+    const { id } = zodValidate(z.object({ id: zId }), input)
+    const existing = await db.networkEndpointRule.findUnique({ where: { id } })
+    if (!existing) throw new Error("端点规则不存在")
+    const row = await db.networkEndpointRule.update({ where: { id }, data: { enabled: !existing.enabled } })
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "ENDPOINT_RULE_UPDATE",
+      resourceType: "ENDPOINT_RULE",
+      resourceId: id,
+      resourceName: row.pattern,
+      before: { enabled: existing.enabled },
+      after: { enabled: row.enabled },
+      extra: { change: row.enabled ? "启用" : "逻辑停用" },
+    })
+    return { id, enabled: row.enabled }
+  })
+}
+
+export async function deleteEndpointRuleAction(input: unknown): Promise<ActionResult<{ id: string }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAdmin()
+    const { id } = zodValidate(z.object({ id: zId }), input)
+    const existing = await db.networkEndpointRule.findUnique({ where: { id } })
+    if (!existing) throw new Error("端点规则不存在")
+    await db.networkEndpointRule.delete({ where: { id } })
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "ENDPOINT_RULE_DELETE",
+      resourceType: "ENDPOINT_RULE",
+      resourceId: id,
+      resourceName: existing.pattern,
+      severity: "WARN",
+      before: { pattern: existing.pattern, type: existing.type, enabled: existing.enabled, note: existing.note },
+      after: { deleted: true, physical: true },
+    })
+    return { id }
+  })
+}

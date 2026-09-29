@@ -63,6 +63,7 @@ interface Props {
   sortField?: string
   sortOrder?: "asc" | "desc"
   filters: Record<string, string>
+  userOptions?: { id: string; name: string }[]
 }
 
 const PRIORITY_CLS: Record<string, string> = {
@@ -207,6 +208,9 @@ export function McpTasksTable(props: Props) {
             options: ["PENDING", "RUNNING", "PAUSED", "SUCCESS", "FAILED", "PARTIAL", "ROLLED_BACK", "CANCELLED"].map((s) => ({ label: s, value: s })),
           },
           { key: "priority", placeholder: "优先级", options: [{ label: "高", value: "HIGH" }, { label: "中", value: "MEDIUM" }, { label: "低", value: "LOW" }] },
+          ...(props.userOptions && props.userOptions.length > 0
+            ? [{ key: "userId", placeholder: "发起用户", options: props.userOptions.map((u) => ({ label: u.name, value: u.id })) }]
+            : []),
         ]}
         rowActions={(row) => (
           <DropdownMenu>

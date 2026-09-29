@@ -123,6 +123,7 @@ async function main() {
     { code: "self_check", name: "平台智能自检", cron: "0 */1 * * *", timeout: 120 },
     { code: "share_expire", name: "过期共享授权清理", cron: "*/5 * * * *", timeout: 60 },
     { code: "novnc_health", name: "NoVNC会话健康探测与闲置回收", cron: "*/2 * * * *", timeout: 120 },
+    { code: "policy_deployment_activation", name: "定时策略下发到点激活", cron: "* * * * *", timeout: 120 },
   ]
   for (const t of tasks) {
     await db.scheduleTask.upsert({
@@ -266,6 +267,19 @@ async function main() {
       ],
     })
     console.log("[seed] 全局域名规则 2 条就绪")
+  }
+
+  // ---- 全局端点级精确限制演示规则（host:port 精确到端口示例）----
+  const eprCount = await db.networkEndpointRule.count()
+  if (eprCount === 0) {
+    await db.networkEndpointRule.createMany({
+      data: [
+        { pattern: "127.0.0.1:9222", type: "BLACK", note: "环回 CDP 端口精确封禁（任意进程）", scopeType: "GLOBAL", priority: 100, createdByUserId: admin.id },
+        { pattern: "10.0.0.5:8080", type: "BLACK", note: "内网指定端点封禁示例（内网放行时仍拦截）", scopeType: "GLOBAL", createdByUserId: admin.id },
+        { pattern: "*.corp.example:22", type: "BLACK", note: "内网域 SSH 端口封禁", scopeType: "GLOBAL", createdByUserId: admin.id },
+      ],
+    })
+    console.log("[seed] 全局端点规则 3 条就绪")
   }
 
   console.log("[seed] 完成 ✓")

@@ -44,7 +44,8 @@ export default async function LoginPage({
             <p className="font-medium">系统尚未初始化</p>
             <p className="text-xs">
               检测到库中没有任何账号。<a href="/setup" className="text-teal-600 hover:underline font-medium">前往初始化管理员 →</a>
-              （或部署时配置 ADMIN_USERNAME / ADMIN_PASSWORD 环境变量自动注册）
+              （注册需输入服务启动生成的 Setup Token，密钥提示：<code className="mx-1 rounded bg-teal-600/10 px-1 font-mono text-[11px] font-semibold">{bootstrap.setupTokenHint}</code>，
+              完整值见启动日志或 storage/setup-token.txt；或部署时配置 ADMIN_USERNAME / ADMIN_PASSWORD 环境变量自动注册）
             </p>
           </div>
         )}

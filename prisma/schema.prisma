@@ -959,7 +959,13 @@ model PolicyDeployment {
   bundleJson      String   // 下发的策略包内容（规范化后）
   targetUsers     Json? // 目标用户ID列表
   targetGroups    Json? // 目标用户组ID列表
-  status          String   @default("PENDING") // PENDING | RUNNING | SUCCESS | PARTIAL | FAILED | ROLLED_BACK
+  status          String   @default("PENDING") // PENDING(定时待生效) | RUNNING | SUCCESS | PARTIAL | FAILED | ROLLED_BACK | CANCELLED
+  // —— 定时生效：IMMEDIATE 立即执行；SCHEDULED 到 effectiveAt 由定时任务自动激活 ——
+  effectiveMode   String   @default("IMMEDIATE") // IMMEDIATE | SCHEDULED
+  effectiveAt     DateTime? // 定时生效时刻（仅 SCHEDULED）
+  activatedAt     DateTime? // 实际激活执行时刻
+  cancelledAt     DateTime? // 定时批次被取消时刻
+  cancelledByUserId String?
   totalTargets    Int      @default(0)
   successTargets  Int      @default(0)
   failedTargets   Int      @default(0)
@@ -975,7 +981,29 @@ model PolicyDeployment {
   updatedAt       DateTime @updatedAt
 
   @@index([status, createdAt])
+  @@index([status, effectiveAt])
   @@index([createdByUserId])
+}
+
+// 端点级精确限制规则（host:port / host:* / CIDR:port / 方案级）
+// 与域名规则同一作用域模型（GLOBAL/GROUP/USER 三层合并），供策略下发中心批量落规则
+model NetworkEndpointRule {
+  id             String   @id @default(cuid())
+  pattern        String // 形如 10.0.0.5:8080 / 192.168.1.*:443 / *.corp.com:22 / 127.0.0.1:* / [::1]:9222
+  type           String   @default("BLACK") // BLACK | WHITE（WHITE=显式放行例外）
+  enabled        Boolean  @default(true)
+  note           String?
+  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER
+  groupId        String? // scopeType=GROUP 时生效
+  userId         String? // scopeType=USER 时生效
+  deploymentId   String?  // 来源策略下发批次（回滚时整批清理）
+  priority       Int      @default(0)
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+
+  @@index([scopeType, groupId])
+  @@index([scopeType, userId])
+  @@index([type, enabled])
 }
 
 model PolicyTemplate {

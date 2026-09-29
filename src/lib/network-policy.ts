@@ -25,6 +25,8 @@ import { ENV } from "./env"
 import { mkdir, writeFile } from "fs/promises"
 import { join } from "path"
 import type { DomainPolicy } from "./domain-policy"
+import type { EndpointPolicy } from "./endpoint-policy"
+import { expandEndpointPattern } from "./endpoint-policy"
 
 export interface NetworkPolicy {
   allowInternalNetwork: boolean
@@ -35,16 +37,19 @@ export interface NetworkPolicy {
 }
 
 // ---- 内网网段（IPv4 通配符模式，Chromium URLBlocklist 语法）----
+// 含全部环回形态：localhost（任意端口）/ 127.0.0.0/8 全段（127.*）/ 0.0.0.0 / ::1 / [::]
 const PRIVATE_HOST_PATTERNS: string[] = [
   "localhost",
-  "127.*",
-  "0.0.0.0",
+  "*.localhost", // 某些实现将 *.localhost 视为环回
+  "127.*", // 127.0.0.1 - 127.255.255.254 全段任意端口
+  "0.0.0.0", // “未指定地址” —— 某些栈上会被解析为本机
   "10.*",
   "192.168.*",
   ...Array.from({ length: 16 }, (_, i) => `172.${16 + i}.*`),
   "169.254.*", // 链路本地 + 云元数据 169.254.169.254
   "100.64.*", // CGNAT 起始段（收口常见内网穿透网段）
-  "[::1]",
+  "[::1]", // IPv6 环回
+  "[::]", // IPv6 未指定地址
   "[fe80:*]",
   "[fc*]",
   "[fd*]",
@@ -168,6 +173,7 @@ export interface ChromiumPolicyOptions {
   gatewayIp?: string | null // 会话网络网关（宿主服务入口）
   proxyUrl?: string | null // 锁定代理（ProxyMode=fixed_servers，用户不可改）
   domainPolicy?: DomainPolicy | null // 域名黑白名单（作用域合并后）
+  endpointPolicy?: EndpointPolicy | null // 端点级精确限制（host:port 作用域合并后）
 }
 
 export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<string, unknown> {
@@ -211,6 +217,23 @@ export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<
       for (const w of dp.whitePatterns) {
         for (const s of SCHEMES) blocklist.push("!" + s + w)
       }
+    }
+  }
+
+  // —— 端点级精确限制（host:port）——：内网放行后仍可封指定端点；
+  //     与域名白名单严格模式叠加共存
+  if (opts.endpointPolicy) {
+    const ep = opts.endpointPolicy
+    // 展开端口区间（如 10.0.0.5:8000-8003 → 4 条）后按方案冗余覆盖
+    const epBlack = ep.blackPatterns.flatMap(expandEndpointPattern)
+    const epWhite = ep.whitePatterns.flatMap(expandEndpointPattern)
+    if (whitelistMode || (opts.domainPolicy && opts.domainPolicy.mode === "WHITELIST")) {
+      // 白名单严格模式：端点 WHITE 加入放行集；BLACK 作为集内排除
+      for (const w of epWhite) for (const s of SCHEMES) allowlist.push(s + w)
+      for (const b of epBlack) for (const s of SCHEMES) allowlist.push("!" + s + b)
+    } else {
+      for (const b of epBlack) for (const s of SCHEMES) blocklist.push(s + b)
+      for (const w of epWhite) for (const s of SCHEMES) blocklist.push("!" + s + w) // 黑名单内例外放行
     }
   }
 

@@ -2,7 +2,7 @@ import { db } from "@/lib/db"
 import { requireAdmin } from "@/lib/permissions"
 import { fmtDate } from "@/lib/utils-server"
 import { PolicyDeployCenter, type DeploymentRow, type TargetOptionUser, type TargetOptionGroup, type TemplateRow } from "./deploy-center"
-import { ShieldCheck, Users, Layers, Undo2 } from "lucide-react"
+import { ShieldCheck, Users, Layers, Undo2, Clock, Timer } from "lucide-react"
 
 // 策略下发中心（管理员）：按用户/用户组批量下发访问控制策略包 + 批次历史 + 回滚
 export const metadata = { title: "策略下发中心" }
@@ -10,7 +10,7 @@ export const metadata = { title: "策略下发中心" }
 export default async function AdminPoliciesPage() {
   const ctx = await requireAdmin()
 
-  const [deployments, templates, targetOptions, statTotal, statUsers, statGroups, statRollback] = await Promise.all([
+  const [deployments, templates, targetOptions, statTotal, statUsers, statGroups, statRollback, statPending, statScheduled] = await Promise.all([
     db.policyDeployment.findMany({ orderBy: { createdAt: "desc" }, take: 50 }),
     db.policyTemplate.findMany({ where: { deletedAt: null }, orderBy: [{ builtin: "desc" }, { createdAt: "desc" }], take: 100 }),
     (async () => {
@@ -56,6 +56,8 @@ export default async function AdminPoliciesPage() {
     db.user.count({ where: { deletedAt: null } }),
     db.group.count({ where: { deletedAt: null } }),
     db.policyDeployment.count({ where: { status: "ROLLED_BACK" } }),
+    db.policyDeployment.count({ where: { status: "PENDING" } }),
+    db.policyDeployment.count({ where: { effectiveMode: "SCHEDULED", status: { in: ["PENDING", "RUNNING"] } } }),
   ])
 
   const creatorIds = [...new Set(deployments.map((r) => r.createdByUserId).filter(Boolean) as string[])]
@@ -72,6 +74,10 @@ export default async function AdminPoliciesPage() {
       name: r.name,
       note: r.note,
       status: r.status,
+      effectiveMode: r.effectiveMode || "IMMEDIATE",
+      effectiveAt: r.effectiveAt ? fmtDate(r.effectiveAt) : null,
+      activatedAt: r.activatedAt ? fmtDate(r.activatedAt) : null,
+      cancelledAt: r.cancelledAt ? fmtDate(r.cancelledAt) : null,
       totalTargets: r.totalTargets,
       successTargets: r.successTargets,
       failedTargets: r.failedTargets,
@@ -93,6 +99,8 @@ export default async function AdminPoliciesPage() {
 
   const stats = [
     { title: "下发批次", value: statTotal, sub: "含历史", icon: <Layers className="h-4 w-4" /> },
+    { title: "待生效批次", value: statPending, sub: "PENDING（定时/未激活）", icon: <Clock className="h-4 w-4" />, tone: "warning" as const },
+    { title: "定时策略", value: statScheduled, sub: "SCHEDULED 排期中", icon: <Timer className="h-4 w-4" /> },
     { title: "可选用户", value: statUsers, sub: "全部活跃用户", icon: <Users className="h-4 w-4" /> },
     { title: "可选用户组", value: statGroups, sub: "树形组织", icon: <ShieldCheck className="h-4 w-4" /> },
     { title: "已回滚批次", value: statRollback, sub: "快照恢复", icon: <Undo2 className="h-4 w-4" /> },
