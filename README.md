@@ -156,11 +156,11 @@ docker run -d --name dockyard --network host \
   -e CRON_SECRET=请修改 \
   -e ADMIN_PASSWORD=初始超管密码 \
   -e DOCKER_API_URL=http://127.0.0.1:2375 \
-  -e BROWSER_IMAGE=ghcr.io/<owner>/dockyard-browser-platform-browser:latest \
+  -e BROWSER_IMAGE=ghcr.io/cshdotcom/dockyard-browser-platform-browser:latest \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v dockyard-data:/app/db \
   -v dockyard-storage:/app/storage \
-  ghcr.io/<owner>/dockyard-browser-platform:latest
+  ghcr.io/cshdotcom/dockyard-browser-platform:latest
 ```
 
 镜像由 GitHub Actions 自动构建推送至 GHCR：
