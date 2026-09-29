@@ -1,23 +1,47 @@
 :81 {
-	@transform_port_query {
-		query XTransformPort=*
-	}
+        # ---- HelmPort VNC 桥：路径路由（客户端同源 /vnc-ws 直达，无需端口参数） ----
+        @vnc_ws path /vnc-ws /vnc-ws/*
+        handle @vnc_ws {
+                uri strip_prefix /vnc-ws
+                reverse_proxy localhost:3005 {
+                        header_up Host {host}
+                        header_up X-Forwarded-For {remote_host}
+                        header_up X-Forwarded-Proto {scheme}
+                        header_up X-Real-IP {remote_host}
+                }
+        }
 
-	handle @transform_port_query {
-		reverse_proxy localhost:{query.XTransformPort} {
-			header_up Host {host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up X-Real-IP {remote_host}
-		}
-	}
+        # ---- WS 事件枢纽：路径路由（客户端同源 /hub-ws 直达，无需端口参数） ----
+        @hub_ws path /hub-ws /hub-ws/*
+        handle @hub_ws {
+                reverse_proxy localhost:3003 {
+                        header_up Host {host}
+                        header_up X-Forwarded-For {remote_host}
+                        header_up X-Forwarded-Proto {scheme}
+                        header_up X-Real-IP {remote_host}
+                }
+        }
 
-	handle {
-		reverse_proxy localhost:3000 {
-			header_up Host {host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up X-Real-IP {remote_host}
-		}
-	}
+        # ---- 兼容旧 XTransformPort 查询参数模式（历史入口） ----
+        @transform_port_query {
+                query XTransformPort=*
+        }
+        handle @transform_port_query {
+                reverse_proxy localhost:{query.XTransformPort} {
+                        header_up Host {host}
+                        header_up X-Forwarded-For {remote_host}
+                        header_up X-Forwarded-Proto {scheme}
+                        header_up X-Real-IP {remote_host}
+                }
+        }
+
+        # ---- 主应用 ----
+        handle {
+                reverse_proxy localhost:3000 {
+                        header_up Host {host}
+                        header_up X-Forwarded-For {remote_host}
+                        header_up X-Forwarded-Proto {scheme}
+                        header_up X-Real-IP {remote_host}
+                }
+        }
 }

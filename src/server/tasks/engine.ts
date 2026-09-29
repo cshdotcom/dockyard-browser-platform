@@ -64,7 +64,8 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
     let n = 0
     const now = Date.now()
     for (const ws of active) {
-      const lastActive = ws.updatedAt?.getTime() ?? ws.createdAt.getTime()
+      // 闲置判定基准：最近活跃（取票/CDP指令）优先，回退 updatedAt / createdAt
+      const lastActive = (ws.lastActiveAt ?? ws.updatedAt ?? ws.createdAt).getTime()
       const idleMs = now - lastActive
       const idleLimit = ws.idleTimeoutMinutes * 60_000
       const ttlMs = ws.ttlMinutes * 60_000
@@ -76,9 +77,10 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
         log(`回收 ${ws.name}（${reason}）`)
         if (ws.mode === "cdp_light" && ws.steelSessionId) await destroySession(ws.steelSessionId).catch(() => {})
         if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId).catch(() => {})
+        const runtimeDelta = ws.startedAt ? Math.max(0, Math.floor((Date.now() - ws.startedAt.getTime()) / 1000)) : 0
         await db.browserWorkspace.update({
           where: { id: ws.id },
-          data: { status: "DESTROYED", crashCategory: reason, steelSessionId: null, novncSessionId: null },
+          data: { status: "DESTROYED", crashCategory: reason, steelSessionId: null, novncSessionId: null, startedAt: null, runtimeAccumSec: { increment: runtimeDelta } },
         })
         if (ws.proxyNodeId) await db.proxyNode.update({ where: { id: ws.proxyNodeId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
         if (ws.singboxInstanceId) await db.singboxInstance.update({ where: { id: ws.singboxInstanceId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
@@ -481,6 +483,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
               where: { id: ws.id },
               data: {
                 status: "RUNNING", crashCategory: `自愈重建#${fails}`,
+                startedAt: new Date(),
                 novncSessionId: rebuilt.novncSessionId, novncSecret: encrypt(rebuilt.secret),
                 containerRef: rebuilt.containerName || null,
                 hardeningJson: JSON.parse(JSON.stringify(rebuilt.hardening ? { ...rebuilt.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,

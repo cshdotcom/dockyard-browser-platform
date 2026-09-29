@@ -1,13 +1,17 @@
 "use client"
 
-// 工作区管控交互表格：7 种单行强制操作 + 6 种批量操作（逐条 try/catch 结果报告）
+// 工作区管控交互表格（增强版）：
+//   · 列显隐配置（localStorage 持久化，默认精简视图）
+//   · 全景列：归属双用户/模式/状态/运行时长/时间三列/容器健康/代理出口/策略快照/TTL/调用统计/删除记录
+//   · 批量筛选：用户/状态/模式/代理/创建时间范围/活跃时间范围/运行时长下限 + 活跃/回收站双视图
+//   · 7 种单行强制操作 + 6 种批量操作（逐条 try/catch 结果报告）
 
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 import {
   Loader2, MoreHorizontal, Square, RotateCw, Trash2, Flame, Unplug, Timer, UserRoundCog,
-  AlertTriangle, X,
+  AlertTriangle, X, Columns3, ShieldCheck, ShieldX, Container, History, ArrowRightLeft,
 } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
@@ -15,6 +19,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
@@ -31,8 +36,11 @@ export interface AdminWorkspaceRow {
   status: string
   ownerUsername: string
   creatorUsername: string
+  transferred: boolean
   groupName: string
   proxyNodeName: string
+  proxyType: string
+  proxyExit: string
   singboxName: string
   steelNodeName: string
   ttlMinutes: number
@@ -41,7 +49,29 @@ export interface AdminWorkspaceRow {
   novncConnCount: number
   hasNovncSession: boolean
   freezeReason: string | null
+  crashCategory: string | null
+  containerRef: string
+  containerState: string
+  containerStatus: string
+  policySummary: {
+    allowInternalNetwork: boolean
+    allowSecureLocationAccess: boolean
+    domainMode: string
+    domainBlack: number
+    domainWhite: number
+    endpointBlack: number
+    endpointWhite: number
+  }
+  runtimeSec: number
+  runtimeText: string
   createdAt: string
+  startedAtText: string
+  lastActiveAtText: string
+  lastActiveAt: string
+  deletedAtText: string
+  deletedByUsername: string
+  deletedByType: string
+  deletedReason: string
 }
 
 export interface UserOption {
@@ -60,6 +90,9 @@ interface Props {
   sortField?: string
   sortOrder?: "asc" | "desc"
   filters: Record<string, string>
+  view: "active" | "deleted"
+  userOptions: UserOption[]
+  proxyOptions: { id: string; name: string }[]
   transferTargets: UserOption[]
 }
 
@@ -69,8 +102,33 @@ interface BatchOutcome {
   failures: { id: string; reason: string }[]
 }
 
+// ---- 列显隐配置：默认列 + 全量列清单（localStorage 持久化） ----
+const COLS_STORAGE_KEY = "admin-ws-cols-v1"
+const ALL_COL_KEYS = [
+  "name", "mode", "status", "owner", "runtime", "lastActiveAt", "container", "proxy", "createdAt",
+  "groupName", "startedAt", "policy", "ttl", "stats", "deleted",
+] as const
+type ColKey = (typeof ALL_COL_KEYS)[number]
+const DEFAULT_VISIBLE: ColKey[] = ["name", "mode", "status", "owner", "runtime", "lastActiveAt", "container", "proxy", "createdAt"]
+
+function loadVisibleCols(view: "active" | "deleted"): Set<ColKey> {
+  if (view === "deleted") {
+    // 回收站视图：删除记录列强制显示
+    return new Set<ColKey>([...DEFAULT_VISIBLE, "deleted", "startedAt"])
+  }
+  try {
+    const saved = localStorage.getItem(COLS_STORAGE_KEY)
+    if (saved) {
+      const arr = JSON.parse(saved) as string[]
+      const valid = arr.filter((k) => (ALL_COL_KEYS as readonly string[]).includes(k)) as ColKey[]
+      if (valid.length > 0) return new Set(valid)
+    }
+  } catch { /* 静默降级 */ }
+  return new Set(DEFAULT_VISIBLE)
+}
+
 export function WorkspacesTable(props: Props) {
-  const { rows, total, page, pageSize, keyword, sortField, sortOrder, filters, transferTargets } = props
+  const { rows, total, page, pageSize, keyword, sortField, sortOrder, filters, view, userOptions, proxyOptions, transferTargets } = props
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -78,6 +136,33 @@ export function WorkspacesTable(props: Props) {
   const [sel, setSel] = React.useState<string[]>([])
   React.useEffect(() => setSel([]), [rows])
   const [busy, setBusy] = React.useState("")
+
+  // ---- 列显隐状态 ----
+  const [visibleCols, setVisibleCols] = React.useState<Set<ColKey>>(() => loadVisibleCols(view))
+  React.useEffect(() => {
+    setVisibleCols(loadVisibleCols(view))
+  }, [view])
+
+  const toggleCol = (k: ColKey) => {
+    setVisibleCols((prev) => {
+      const next = new Set(prev)
+      if (next.has(k)) {
+        if (next.size <= 1) return prev // 至少保留一列
+        next.delete(k)
+      } else next.add(k)
+      if (view === "active") {
+        try { localStorage.setItem(COLS_STORAGE_KEY, JSON.stringify([...next])) } catch { /* noop */ }
+      }
+      return next
+    })
+  }
+  const resetCols = () => {
+    const next = new Set<ColKey>(view === "deleted" ? [...DEFAULT_VISIBLE, "deleted", "startedAt"] : DEFAULT_VISIBLE)
+    setVisibleCols(next)
+    if (view === "active") {
+      try { localStorage.setItem(COLS_STORAGE_KEY, JSON.stringify([...next])) } catch { /* noop */ }
+    }
+  }
 
   const pushQuery = (patch: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString())
@@ -163,15 +248,117 @@ export function WorkspacesTable(props: Props) {
     }
   }
 
-  const columns = [
+  // ---- 筛选表单的本地状态（提交时一次性合并到 URL） ----
+  const [dateForm, setDateForm] = React.useState({
+    createdFrom: filters.createdFrom || "",
+    createdTo: filters.createdTo || "",
+    activeFrom: filters.activeFrom || "",
+    activeTo: filters.activeTo || "",
+    runtimeMin: filters.runtimeMin || "",
+  })
+  React.useEffect(() => {
+    setDateForm({
+      createdFrom: filters.createdFrom || "",
+      createdTo: filters.createdTo || "",
+      activeFrom: filters.activeFrom || "",
+      activeTo: filters.activeTo || "",
+      runtimeMin: filters.runtimeMin || "",
+    })
+  }, [filters.createdFrom, filters.createdTo, filters.activeFrom, filters.activeTo, filters.runtimeMin])
+
+  const hasTimeFilters = !!(filters.createdFrom || filters.createdTo || filters.activeFrom || filters.activeTo || filters.runtimeMin)
+
+  // ---- 容器健康渲染 ----
+  const renderContainer = (row: AdminWorkspaceRow) => {
+    if (!row.containerRef) {
+      // CDP 模式或池化会话：无独立容器引用
+      return row.mode === "novnc_full" ? (
+        <span className="text-xs text-muted-foreground">池化/无容器</span>
+      ) : (
+        <span className="text-xs text-muted-foreground">Steel 托管</span>
+      )
+    }
+    if (!row.containerState) {
+      return (
+        <Badge variant="outline" className="text-xs">未知容器</Badge>
+      )
+    }
+    if (row.containerState === "running") {
+      return (
+        <div className="text-xs">
+          <span className="inline-flex items-center gap-1">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            <span className="font-medium">运行中</span>
+          </span>
+          {row.containerStatus && <p className="text-muted-foreground truncate max-w-32">{row.containerStatus}</p>}
+        </div>
+      )
+    }
+    if (row.containerState === "paused") {
+      return <Badge className="bg-amber-500 hover:bg-amber-500 text-xs">已暂停</Badge>
+    }
+    if (row.containerState === "exited" || row.containerState === "dead") {
+      return (
+        <div className="text-xs">
+          <span className="inline-flex items-center gap-1 text-red-600 font-medium">
+            <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+            {row.containerState === "dead" ? "已死锁" : "已退出"}
+          </span>
+          {row.containerStatus && <p className="text-muted-foreground truncate max-w-32">{row.containerStatus}</p>}
+        </div>
+      )
+    }
+    return <Badge variant="outline" className="text-xs">{row.containerState}</Badge>
+  }
+
+  // ---- 策略快照渲染 ----
+  const renderPolicy = (row: AdminWorkspaceRow) => {
+    const p = row.policySummary
+    const items: React.ReactNode[] = []
+    items.push(
+      p.allowInternalNetwork ? (
+        <Badge key="in" variant="outline" className="text-[10px] px-1 py-0 gap-0.5 text-emerald-700 border-emerald-300">
+          <ShieldCheck className="h-2.5 w-2.5" />内网
+        </Badge>
+      ) : (
+        <Badge key="in" variant="outline" className="text-[10px] px-1 py-0 gap-0.5 text-muted-foreground">
+          <ShieldX className="h-2.5 w-2.5" />内网
+        </Badge>
+      ),
+    )
+    items.push(
+      p.allowSecureLocationAccess ? (
+        <Badge key="sec" variant="outline" className="text-[10px] px-1 py-0 gap-0.5 text-emerald-700 border-emerald-300">
+          <ShieldCheck className="h-2.5 w-2.5" />安全位
+        </Badge>
+      ) : (
+        <Badge key="sec" variant="outline" className="text-[10px] px-1 py-0 gap-0.5 text-muted-foreground">
+          <ShieldX className="h-2.5 w-2.5" />安全位
+        </Badge>
+      ),
+    )
+    const counts: string[] = []
+    if (p.domainMode) counts.push(`域${p.domainMode === "whitelist" ? "白" : "黑"}${p.domainBlack + p.domainWhite}`)
+    if (p.endpointBlack + p.endpointWhite > 0) counts.push(`端点${p.endpointBlack + p.endpointWhite}`)
+    return (
+      <div className="space-y-1">
+        <div className="flex flex-wrap gap-1 max-w-36">{items}</div>
+        {counts.length > 0 && <p className="text-[10px] text-muted-foreground">{counts.join(" · ")}</p>}
+      </div>
+    )
+  }
+
+  // ---- 全量列定义（按显隐过滤后传给 DataTable） ----
+  const allColumns = [
     {
       key: "name",
       title: "名称 / UUID",
       sortable: true,
       render: (row: AdminWorkspaceRow) => (
         <div className="min-w-0">
-          <p className="font-medium truncate">{row.name}</p>
-          <p className="text-xs text-muted-foreground font-mono truncate">{row.uuid}</p>
+          <p className="font-medium truncate max-w-44">{row.name}</p>
+          <p className="text-xs text-muted-foreground font-mono truncate max-w-44">{row.uuid}</p>
+          {row.crashCategory && <Badge variant="destructive" className="text-[10px] mt-0.5">{row.crashCategory}</Badge>}
         </div>
       ),
     },
@@ -187,25 +374,78 @@ export function WorkspacesTable(props: Props) {
     { key: "status", title: "状态", sortable: true, render: (row: AdminWorkspaceRow) => <StatusBadge status={row.status} /> },
     {
       key: "owner",
-      title: "所有者",
+      title: "所有者 / 创建人",
       render: (row: AdminWorkspaceRow) => (
         <div className="text-xs">
-          <p className="font-medium">{row.ownerUsername}</p>
-          <p className="text-muted-foreground">创建人 {row.creatorUsername}</p>
+          <p className="font-medium flex items-center gap-1">
+            {row.ownerUsername}
+            {row.transferred && (
+              <span title="资源已转移（所有者 ≠ 创建人）">
+                <ArrowRightLeft className="h-3 w-3 text-amber-500" />
+              </span>
+            )}
+          </p>
+          <p className="text-muted-foreground">
+            {row.transferred ? `创建 ${row.creatorUsername}（已转移）` : `本人创建`}
+          </p>
         </div>
       ),
     },
-    { key: "groupName", title: "所属组", render: (row: AdminWorkspaceRow) => <span className="text-xs">{row.groupName}</span> },
+    {
+      key: "runtime",
+      title: "累计运行时长",
+      sortable: true,
+      render: (row: AdminWorkspaceRow) => (
+        <div className="text-xs">
+          <p className="font-medium tabular-nums">{row.runtimeText}</p>
+          {(row.status === "RUNNING" || row.status === "IDLE") && (
+            <p className="text-emerald-600 flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />运行中
+            </p>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "lastActiveAt",
+      title: "最近活跃",
+      render: (row: AdminWorkspaceRow) => (
+        <div className="text-xs">
+          <p className="text-muted-foreground">{row.lastActiveAtText}</p>
+          {row.lastActiveAt && Date.now() - new Date(row.lastActiveAt).getTime() < 5 * 60_000 && (
+            <Badge className="text-[10px] bg-emerald-600 hover:bg-emerald-600 px-1 py-0">5分钟内</Badge>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "container",
+      title: "容器健康",
+      render: (row: AdminWorkspaceRow) => renderContainer(row),
+    },
     {
       key: "proxy",
-      title: "代理 / SingBox",
+      title: "代理出口",
       render: (row: AdminWorkspaceRow) => (
         <div className="text-xs">
-          <p>{row.proxyNodeName}</p>
-          {row.singboxName !== "-" && <p className="text-muted-foreground">{row.singboxName}</p>}
+          {row.proxyNodeName !== "-" ? (
+            <>
+              <p className="font-medium flex items-center gap-1">
+                {row.proxyNodeName}
+                {row.proxyType === "internal_singbox" && <Badge variant="secondary" className="text-[10px] px-1 py-0">内置</Badge>}
+              </p>
+              {row.proxyExit && <p className="text-muted-foreground font-mono truncate max-w-40">{row.proxyExit}</p>}
+            </>
+          ) : (
+            <span className="text-muted-foreground">直连</span>
+          )}
         </div>
       ),
     },
+    { key: "createdAt", title: "创建时间", sortable: true, render: (row: AdminWorkspaceRow) => <span className="text-xs text-muted-foreground">{row.createdAt}</span> },
+    { key: "groupName", title: "所属组", render: (row: AdminWorkspaceRow) => <span className="text-xs">{row.groupName}</span> },
+    { key: "startedAt", title: "最近启动", sortable: true, render: (row: AdminWorkspaceRow) => <span className="text-xs text-muted-foreground">{row.startedAtText}</span> },
+    { key: "policy", title: "策略快照", render: (row: AdminWorkspaceRow) => renderPolicy(row) },
     {
       key: "ttl",
       title: "TTL / 闲置",
@@ -216,37 +456,200 @@ export function WorkspacesTable(props: Props) {
       ),
     },
     {
-      key: "cdpCallCount",
-      title: "CDP 调用",
-      sortable: true,
-      render: (row: AdminWorkspaceRow) => <span className="text-xs tabular-nums">{row.cdpCallCount}</span>,
+      key: "stats",
+      title: "调用 / 连接",
+      render: (row: AdminWorkspaceRow) => (
+        <div className="text-xs tabular-nums">
+          <p>CDP {row.cdpCallCount} 次</p>
+          <p className="text-muted-foreground">VNC {row.novncConnCount} 连{row.freezeReason ? " · 冻结" : ""}</p>
+        </div>
+      ),
     },
-    { key: "createdAt", title: "创建时间", sortable: true, render: (row: AdminWorkspaceRow) => <span className="text-xs text-muted-foreground">{row.createdAt}</span> },
+    {
+      key: "deleted",
+      title: "删除记录",
+      render: (row: AdminWorkspaceRow) => (
+        <div className="text-xs">
+          <p className="text-muted-foreground">{row.deletedAtText || "—"}</p>
+          {row.deletedByType && (
+            <p>
+              <Badge variant={row.deletedByType === "ADMIN" ? "destructive" : "secondary"} className="text-[10px] px-1 py-0">
+                {row.deletedByType === "ADMIN" ? "管理员" : row.deletedByType === "SYSTEM" ? "系统" : "用户"}
+              </Badge>
+              {row.deletedByUsername && <span className="ml-1">{row.deletedByUsername}</span>}
+            </p>
+          )}
+          {row.deletedReason && <p className="text-muted-foreground truncate max-w-40" title={row.deletedReason}>{row.deletedReason}</p>}
+        </div>
+      ),
+    },
   ]
+
+  const columns = allColumns.filter((c) => (visibleCols as ReadonlySet<string>).has(c.key))
 
   return (
     <div className="space-y-3">
+      {/* ---- 视图切换 + 筛选面板 ---- */}
       <div className="flex flex-wrap items-center gap-2">
+        <div className="flex rounded-md border overflow-hidden">
+          <button
+            type="button"
+            className={`px-3 py-1.5 text-xs font-medium ${view === "active" ? "bg-primary text-primary-foreground" : "bg-background hover:bg-muted"}`}
+            onClick={() => pushQuery({ page: "1", view: undefined })}
+          >
+            活跃工作区
+          </button>
+          <button
+            type="button"
+            className={`px-3 py-1.5 text-xs font-medium flex items-center gap-1 ${view === "deleted" ? "bg-primary text-primary-foreground" : "bg-background hover:bg-muted"}`}
+            onClick={() => pushQuery({ page: "1", view: "deleted" })}
+          >
+            <History className="h-3 w-3" /> 回收站记录
+          </button>
+        </div>
+
+        <Select
+          value={filters.user || undefined}
+          onValueChange={(v) => pushQuery({ page: "1", user: v === "__all__" ? undefined : v })}
+        >
+          <SelectTrigger className="w-40"><SelectValue placeholder="按用户筛选" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all__">全部用户</SelectItem>
+            {userOptions.map((u) => (
+              <SelectItem key={u.id} value={u.id}>
+                {u.username}{u.role !== "USER" ? `（${u.role === "SUPER_ADMIN" ? "超管" : u.role === "ADMIN" ? "管理员" : "组管理员"}）` : ""}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <Select
+          value={filters.proxy || undefined}
+          onValueChange={(v) => pushQuery({ page: "1", proxy: v === "__all__" ? undefined : v })}
+        >
+          <SelectTrigger className="w-40"><SelectValue placeholder="按代理节点" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all__">全部代理</SelectItem>
+            {proxyOptions.map((p) => (
+              <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        {/* ---- 创建/活跃时间范围 + 运行时长下限 ---- */}
         <form
-          className="flex gap-2"
+          className="flex flex-wrap items-center gap-1.5"
           onSubmit={(e) => {
             e.preventDefault()
-            const input = e.currentTarget.elements.namedItem("owner") as HTMLInputElement
-            pushQuery({ page: "1", owner: input.value.trim() || undefined })
+            pushQuery({
+              page: "1",
+              createdFrom: dateForm.createdFrom || undefined,
+              createdTo: dateForm.createdTo || undefined,
+              activeFrom: dateForm.activeFrom || undefined,
+              activeTo: dateForm.activeTo || undefined,
+              runtimeMin: dateForm.runtimeMin || undefined,
+            })
           }}
         >
-          <Input name="owner" defaultValue={filters.owner || ""} placeholder="按所有者用户名筛选" className="w-44" />
-          <Button type="submit" variant="secondary" size="sm">筛选所有者</Button>
+          <Input
+            type="date"
+            title="创建时间起"
+            value={dateForm.createdFrom}
+            onChange={(e) => setDateForm({ ...dateForm, createdFrom: e.target.value })}
+            className="w-32 h-8 text-xs"
+          />
+          <span className="text-xs text-muted-foreground">→</span>
+          <Input
+            type="date"
+            title="创建时间止"
+            value={dateForm.createdTo}
+            onChange={(e) => setDateForm({ ...dateForm, createdTo: e.target.value })}
+            className="w-32 h-8 text-xs"
+          />
+          <Input
+            type="date"
+            title="最近活跃起"
+            value={dateForm.activeFrom}
+            onChange={(e) => setDateForm({ ...dateForm, activeFrom: e.target.value })}
+            className="w-32 h-8 text-xs"
+          />
+          <span className="text-xs text-muted-foreground">→</span>
+          <Input
+            type="date"
+            title="最近活跃止"
+            value={dateForm.activeTo}
+            onChange={(e) => setDateForm({ ...dateForm, activeTo: e.target.value })}
+            className="w-32 h-8 text-xs"
+          />
+          <Input
+            type="number"
+            min={0}
+            step={0.001}
+            title="累计运行时长下限（分钟，0.001 粒度）"
+            placeholder="运行≥分钟"
+            value={dateForm.runtimeMin}
+            onChange={(e) => setDateForm({ ...dateForm, runtimeMin: e.target.value })}
+            className="w-24 h-8 text-xs"
+          />
+          <Button type="submit" variant="secondary" size="sm" className="h-8">时间筛选</Button>
+          {hasTimeFilters && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8"
+              onClick={() => {
+                setDateForm({ createdFrom: "", createdTo: "", activeFrom: "", activeTo: "", runtimeMin: "" })
+                pushQuery({ page: "1", createdFrom: undefined, createdTo: undefined, activeFrom: undefined, activeTo: undefined, runtimeMin: undefined })
+              }}
+            >
+              <X className="h-3.5 w-3.5 mr-1" /> 清除
+            </Button>
+          )}
         </form>
-        {filters.owner && (
+
+        {filters.user && (
           <Badge variant="outline" className="gap-1">
-            所有者: {filters.owner}
-            <button type="button" onClick={() => pushQuery({ page: "1", owner: undefined })} className="ml-1 hover:text-foreground">
+            用户: {userOptions.find((u) => u.id === filters.user)?.username || filters.user}
+            <button type="button" onClick={() => pushQuery({ page: "1", user: undefined })} className="ml-1 hover:text-foreground">
               <X className="h-3 w-3" />
             </button>
           </Badge>
         )}
+
+        {/* ---- 列显隐配置 ---- */}
+        <div className="ml-auto">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className="h-8 gap-1">
+                <Columns3 className="h-3.5 w-3.5" /> 列配置
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <p className="px-2 py-1.5 text-xs text-muted-foreground">显示列（{columns.length}/{allColumns.length}）</p>
+              {allColumns.map((c) => {
+                const ck = c.key as ColKey
+                const locked = view === "deleted" && ck === "deleted"
+                return (
+                  <DropdownMenuItem
+                    key={c.key}
+                    onSelect={(e) => { e.preventDefault(); if (!locked) toggleCol(ck) }}
+                    className="text-xs"
+                  >
+                    <Checkbox checked={visibleCols.has(ck)} disabled={locked} className="mr-2 h-3.5 w-3.5" />
+                    {typeof c.title === "string" ? c.title : String(ck)}
+                  </DropdownMenuItem>
+                )
+              })}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={(e) => { e.preventDefault(); resetCols() }} className="text-xs">
+                恢复默认列
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
+
       <DataTable
         columns={columns}
         rows={rows}
@@ -263,6 +666,7 @@ export function WorkspacesTable(props: Props) {
             options: ["RUNNING", "IDLE", "CREATING", "STOPPED", "ERROR", "FROZEN", "DESTROYED"].map((s) => ({ label: s, value: s })),
           },
         ]}
+        emptyText={view === "deleted" ? "回收站中没有工作区删除记录" : undefined}
         rowActions={(row) => (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -271,32 +675,43 @@ export function WorkspacesTable(props: Props) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-52">
-              <DropdownMenuItem onClick={() => stop(row)}>
-                <Square className="h-4 w-4 mr-2" /> 强制停止
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => restart(row)}>
-                <RotateCw className="h-4 w-4 mr-2" /> 强制重启
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setTtlTarget(row)}>
-                <Timer className="h-4 w-4 mr-2" /> 强制修改 TTL
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setTransferTarget(row)}>
-                <UserRoundCog className="h-4 w-4 mr-2" /> 资源转移
-              </DropdownMenuItem>
-              {row.hasNovncSession && (
-                <DropdownMenuItem
-                  onClick={() => callAction(`vnc-${row.id}`, () => forceDisconnectVncAction({ id: row.id }))}
-                >
-                  <Unplug className="h-4 w-4 mr-2" /> 断开 VNC 客户端
-                </DropdownMenuItem>
+              {view === "deleted" ? (
+                <>
+                  <DropdownMenuItem className="text-red-600" onClick={() => setPurgeTarget(row)}>
+                    <Flame className="h-4 w-4 mr-2" /> 彻底物理删除
+                  </DropdownMenuItem>
+                  <p className="px-2 py-1 text-[10px] text-muted-foreground">回收站恢复请在「回收站」模块操作</p>
+                </>
+              ) : (
+                <>
+                  <DropdownMenuItem onClick={() => stop(row)}>
+                    <Square className="h-4 w-4 mr-2" /> 强制停止
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => restart(row)}>
+                    <RotateCw className="h-4 w-4 mr-2" /> 强制重启
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setTtlTarget(row)}>
+                    <Timer className="h-4 w-4 mr-2" /> 强制修改 TTL
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setTransferTarget(row)}>
+                    <UserRoundCog className="h-4 w-4 mr-2" /> 资源转移
+                  </DropdownMenuItem>
+                  {row.hasNovncSession && (
+                    <DropdownMenuItem
+                      onClick={() => callAction(`vnc-${row.id}`, () => forceDisconnectVncAction({ id: row.id }))}
+                    >
+                      <Unplug className="h-4 w-4 mr-2" /> 断开 VNC 客户端
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem className="text-amber-600" onClick={() => setRecycleTarget(row)}>
+                    <Trash2 className="h-4 w-4 mr-2" /> 强制移入回收站
+                  </DropdownMenuItem>
+                  <DropdownMenuItem className="text-red-600" onClick={() => setPurgeTarget(row)}>
+                    <Flame className="h-4 w-4 mr-2" /> 彻底物理删除
+                  </DropdownMenuItem>
+                </>
               )}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem className="text-amber-600" onClick={() => setRecycleTarget(row)}>
-                <Trash2 className="h-4 w-4 mr-2" /> 强制移入回收站
-              </DropdownMenuItem>
-              <DropdownMenuItem className="text-red-600" onClick={() => setPurgeTarget(row)}>
-                <Flame className="h-4 w-4 mr-2" /> 彻底物理删除
-              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         )}
@@ -304,27 +719,36 @@ export function WorkspacesTable(props: Props) {
         selectedIds={sel}
         onSelectedChange={setSel}
         batchToolbar={
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-muted-foreground">已选 {sel.length} 项</span>
-            <Button size="sm" variant="outline" disabled={!!busy} onClick={() => runBatch("批量停止", "STOP")}>
-              {busy === "batch-STOP" ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Square className="h-4 w-4 mr-1" />} 批量停止
-            </Button>
-            <Button size="sm" variant="outline" disabled={!!busy} onClick={() => runBatch("批量重启", "RESTART")}>
-              <RotateCw className="h-4 w-4 mr-1" /> 批量重启
-            </Button>
-            <Button size="sm" variant="outline" disabled={!!busy} onClick={() => runBatch("批量回收", "RECYCLE")}>
-              <Trash2 className="h-4 w-4 mr-1" /> 批量回收
-            </Button>
-            <Button size="sm" variant="outline" disabled={!!busy} onClick={() => setBatchTtlOpen(true)}>
-              <Timer className="h-4 w-4 mr-1" /> 批量改 TTL
-            </Button>
-            <Button size="sm" variant="outline" disabled={!!busy} onClick={() => setBatchTransferOpen(true)}>
-              <UserRoundCog className="h-4 w-4 mr-1" /> 批量转移
-            </Button>
-            <Button size="sm" variant="destructive" disabled={!!busy} onClick={() => setBatchPurgeOpen(true)}>
-              <Flame className="h-4 w-4 mr-1" /> 批量物理删除（高危）
-            </Button>
-          </div>
+          view === "active" ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-muted-foreground">已选 {sel.length} 项</span>
+              <Button size="sm" variant="outline" disabled={!!busy} onClick={() => runBatch("批量停止", "STOP")}>
+                {busy === "batch-STOP" ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Square className="h-4 w-4 mr-1" />} 批量停止
+              </Button>
+              <Button size="sm" variant="outline" disabled={!!busy} onClick={() => runBatch("批量重启", "RESTART")}>
+                <RotateCw className="h-4 w-4 mr-1" /> 批量重启
+              </Button>
+              <Button size="sm" variant="outline" disabled={!!busy} onClick={() => runBatch("批量回收", "RECYCLE")}>
+                <Trash2 className="h-4 w-4 mr-1" /> 批量回收
+              </Button>
+              <Button size="sm" variant="outline" disabled={!!busy} onClick={() => setBatchTtlOpen(true)}>
+                <Timer className="h-4 w-4 mr-1" /> 批量改 TTL
+              </Button>
+              <Button size="sm" variant="outline" disabled={!!busy} onClick={() => setBatchTransferOpen(true)}>
+                <UserRoundCog className="h-4 w-4 mr-1" /> 批量转移
+              </Button>
+              <Button size="sm" variant="destructive" disabled={!!busy} onClick={() => setBatchPurgeOpen(true)}>
+                <Flame className="h-4 w-4 mr-1" /> 批量物理删除（高危）
+              </Button>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-muted-foreground">已选 {sel.length} 项（回收站视图仅支持物理清除）</span>
+              <Button size="sm" variant="destructive" disabled={!!busy} onClick={() => setBatchPurgeOpen(true)}>
+                <Flame className="h-4 w-4 mr-1" /> 批量物理删除（高危）
+              </Button>
+            </div>
+          )
         }
       />
 
@@ -333,7 +757,7 @@ export function WorkspacesTable(props: Props) {
         open={!!recycleTarget}
         onOpenChange={(v) => !busy && setRecycleTarget(v ? recycleTarget : null)}
         title="强制移入回收站"
-        description={`工作区「${recycleTarget?.name}」将软删除并进入回收站（删除来源：管理员），底层会话同步销毁。`}
+        description={`工作区「${recycleTarget?.name}」将软删除并进入回收站（删除来源：管理员），底层会话同步销毁，累计运行时长 ${recycleTarget?.runtimeText || "—"} 将被冻结。`}
         destructive
         confirmText="移入回收站"
         loading={busy === "recycle"}

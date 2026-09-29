@@ -171,6 +171,8 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           name: p.name,
           mode: "cdp_light",
           status: "RUNNING",
+          startedAt: new Date(),
+          lastActiveAt: new Date(),
           userId: ctx.userId,
           groupId: (await userGroupIds(ctx.userId))[0] ?? null,
           proxyNodeId: p.proxyNodeId || null,
@@ -230,6 +232,8 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           name: p.name,
           mode: "novnc_full",
           status: "RUNNING",
+          startedAt: new Date(),
+          lastActiveAt: new Date(),
           userId: ctx.userId,
           groupId: (await userGroupIds(ctx.userId))[0] ?? null,
           proxyNodeId: p.proxyNodeId || null,
@@ -276,7 +280,8 @@ export async function stopWorkspaceAction(input: unknown): Promise<ActionResult>
     if (ws.proxyNodeId) await db.proxyNode.update({ where: { id: ws.proxyNodeId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
     if (ws.singboxInstanceId) await db.singboxInstance.update({ where: { id: ws.singboxInstanceId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
 
-    await db.browserWorkspace.update({ where: { id }, data: { status: "STOPPED", steelSessionId: null, cdpUrl: null, novncSessionId: null } })
+    const runtimeDelta = ws.startedAt ? Math.max(0, Math.floor((Date.now() - ws.startedAt.getTime()) / 1000)) : 0
+    await db.browserWorkspace.update({ where: { id }, data: { status: "STOPPED", steelSessionId: null, cdpUrl: null, novncSessionId: null, startedAt: null, runtimeAccumSec: { increment: runtimeDelta } } })
     await trackBehavior(ctx.userId, "DELETE")
     await writeAudit({
       operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_STOP",
@@ -306,7 +311,7 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
         ttlMinutes: ws.ttlMinutes || undefined,
         profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
       })
-      await db.browserWorkspace.update({ where: { id }, data: { status: "RUNNING", steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, steelNodeId: await pickSteelNode() } })
+      await db.browserWorkspace.update({ where: { id }, data: { status: "RUNNING", steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, steelNodeId: await pickSteelNode(), startedAt: new Date() } })
     } else {
       const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
       const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
@@ -327,6 +332,7 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
         where: { id },
         data: {
           status: "RUNNING", novncSessionId: novnc.novncSessionId, novncSecret: encrypt(novnc.secret),
+          startedAt: new Date(),
           containerRef: novnc.containerName || null,
           hardeningJson: JSON.parse(JSON.stringify(novnc.hardening ? { ...novnc.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,
           networkPolicyJson: netPolicyJson(netPolicy),
@@ -394,7 +400,7 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
       })
       await db.browserWorkspace.update({
         where: { id },
-        data: { steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, proxyNodeId: proxyNodeId || null, singboxInstanceId: proxyInfo.singboxInstanceId || null, status: "RUNNING" },
+        data: { steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, proxyNodeId: proxyNodeId || null, singboxInstanceId: proxyInfo.singboxInstanceId || null, status: "RUNNING", startedAt: new Date() },
       })
     } else {
       if (ws.novncSessionId) await destroyNovncSession(ws.novncSessionId).catch(() => {})
@@ -424,6 +430,7 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
           containerRef: novnc.containerName || null,
           hardeningJson: JSON.parse(JSON.stringify(novnc.hardening ? { ...novnc.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,
           networkPolicyJson: netPolicyJson(switchedPolicy, switchedDomain, switchedEndpoint),
+          startedAt: new Date(),
           proxyNodeId: proxyNodeId || null, singboxInstanceId: proxyInfo.singboxInstanceId || null, status: "RUNNING",
         },
       })
@@ -709,6 +716,7 @@ export async function getVncTicketAction(input: unknown): Promise<ActionResult<{
     const ticket = `${payloadB64}.${sig}`
 
     await trackBehavior(ctx.userId, "LOGIN") // 轻量活跃度记录
+    await db.browserWorkspace.update({ where: { id: ws.id }, data: { lastActiveAt: new Date() } }).catch(() => {})
     await writeAudit({
       operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "VNC_TICKET_ISSUE",
       resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,

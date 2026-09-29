@@ -50,6 +50,17 @@ export async function proxy(req: NextRequest) {
       cookieName: "dockyard-session",
     })
     if (!token?.uid) {
+      // 若浏览器带着一枚解不开的旧会话 cookie（密钥轮换/环境重置后），
+      // 直接踢回 /login 会形成「登录成功 → 又被弹回」的循环（重定向你太多次）。
+      // 先经 /api/auth/logout 清除失效 cookie，再回到登录页 —— 单向、必然终止。
+      if (req.cookies.has("dockyard-session")) {
+        const res = NextResponse.redirect(
+          new URL(`/api/auth/logout?redirect=${encodeURIComponent(`/login?from=${encodeURIComponent(pathname)}`)}&reason=stale-jwt`, req.url),
+        )
+        res.headers.set("X-Trace-Id", traceId)
+        res.headers.set("Cache-Control", "no-store")
+        return res
+      }
       const loginUrl = new URL("/login", req.url)
       loginUrl.searchParams.set("from", pathname)
       const res = NextResponse.redirect(loginUrl)

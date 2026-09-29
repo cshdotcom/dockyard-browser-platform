@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ code: 42900, msg: "CDP 指令调用频率超限", traceId })
   }
 
-  await db.browserWorkspace.update({ where: { id: ws.id }, data: { cdpCallCount: { increment: 1 } } })
+  await db.browserWorkspace.update({ where: { id: ws.id }, data: { cdpCallCount: { increment: 1 }, lastActiveAt: new Date() } })
   const { touchSimSession } = await import("@/lib/external/steel")
   if (ws.steelSessionId) touchSimSession(ws.steelSessionId)
 

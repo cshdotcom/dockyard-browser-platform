@@ -12,7 +12,9 @@ import {
 // 主应用布局（RSC）：深度会话校验 + 强制2FA策略拦截 + 权限菜单过滤
 export default async function MainLayout({ children }: { children: React.ReactNode }) {
   const ctx = await getAuthContext()
-  if (!ctx) redirect("/login")
+  // 会话失效（撤销/过期/闲置/DB重置）：经 logout 清掉失效 cookie 再回登录页，
+  // 避免浏览器持有旧 cookie 反复弹跳（登录成功 → 布局判失效 → 踢回 → 再登录……）
+  if (!ctx) redirect("/api/auth/logout?redirect=%2Flogin&reason=session-invalid")
 
   // 强制2FA策略：未完成设置前只能停留在账号安全页
   if (await needs2faSetup()) {

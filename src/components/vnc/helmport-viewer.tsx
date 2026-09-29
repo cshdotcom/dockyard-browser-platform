@@ -100,6 +100,52 @@ function wsScheme(): string {
   return typeof location !== "undefined" && location.protocol === "https:" ? "wss" : "ws"
 }
 
+// ============================================================
+// 通道自动推导：根据访问域名自动拼接 WS 地址，无需任何手工配置 ——
+//   0) bridge.url 显式覆盖（自建部署）
+//   1) 网关查询参数模式探测：/health?XTransformPort=<port>（统一网关原生支持，任意域名可用）
+//   2) 同源路径模式探测：/vnc-ws/health（网关按路径路由时成立）
+//   3) 同主机直连端口（开发机/沙箱 IP 直访场景）
+// 探测结果模块级缓存；WS 建连失败时翻转通道，重连自动换通道（自愈）。
+// ============================================================
+type BridgeChannel = "gateway-query" | "path" | "direct"
+let bridgeChannelCache: { port: number; channel: BridgeChannel } | null = null
+
+async function fetchOkJson(url: string): Promise<Record<string, unknown> | null> {
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(2500) })
+    if (!r.ok) return null
+    return (await r.json().catch(() => null)) as Record<string, unknown> | null
+  } catch {
+    return null
+  }
+}
+
+async function resolveBridgeChannel(port: number): Promise<BridgeChannel> {
+  if (bridgeChannelCache && bridgeChannelCache.port === port) return bridgeChannelCache.channel
+  let channel: BridgeChannel
+  const viaQuery = await fetchOkJson(`/health?XTransformPort=${port}`)
+  if (viaQuery?.ok === true) {
+    channel = "gateway-query"
+  } else if ((await fetchOkJson("/vnc-ws/health"))?.ok === true) {
+    channel = "path"
+  } else {
+    channel = "direct"
+  }
+  bridgeChannelCache = { port, channel }
+  return channel
+}
+
+// 通道失效（WS 建连/握手失败时调用）：翻转到下一通道（探测只覆盖 HTTP，WS upgrade 可能被代理拦），
+// 下次重连直接换通道；重连预算耗尽前最多轮换 gateway-query/path/direct
+function invalidateBridgeChannel() {
+  if (bridgeChannelCache) {
+    const order: BridgeChannel[] = ["gateway-query", "path", "direct"]
+    const next = order[(order.indexOf(bridgeChannelCache.channel) + 1) % order.length]
+    bridgeChannelCache = { port: bridgeChannelCache.port, channel: next }
+  }
+}
+
 export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
   const stageRef = React.useRef<HTMLDivElement | null>(null)
@@ -195,14 +241,21 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
       if (res.code !== 0 || !res.data) throw new Error(res.msg || "取票失败")
       const { wsUrlQuery, bridge, readonly: ticketReadonly } = res.data
 
+      // 地址自动推导（按访问域名自动拼接，无需配置）：
+      //   bridge.url 显式覆盖 > 网关查询参数 > 同源 /vnc-ws 路径 > 同主机直连端口
       let url: string
-      if (bridge.mode === "gateway") {
-        url = `${wsScheme()}://${location.host}/?XTransformPort=${bridge.port}&${wsUrlQuery}`
-      } else if (bridge.mode === "port") {
-        url = `${wsScheme()}://${location.hostname}:${bridge.port}/?${wsUrlQuery}`
-      } else {
+      if (bridge.url) {
         const base = (bridge.url || "").replace(/\/$/, "")
         url = base.startsWith("ws") ? `${base}/?${wsUrlQuery}` : `${wsScheme()}://${base.replace(/^https?:\/\//, "")}/?${wsUrlQuery}`
+      } else {
+        const channel = await resolveBridgeChannel(bridge.port)
+        if (channel === "gateway-query") {
+          url = `${wsScheme()}://${location.host}/?XTransformPort=${bridge.port}&${wsUrlQuery}`
+        } else if (channel === "path") {
+          url = `${wsScheme()}://${location.host}/vnc-ws/?${wsUrlQuery}`
+        } else {
+          url = `${wsScheme()}://${location.hostname}:${bridge.port}/?${wsUrlQuery}`
+        }
       }
 
       // 仪表化 WebSocket（自研客户端用 addEventListener，多监听器共存）
@@ -261,6 +314,8 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
         },
         onDisconnected: (reason) => {
           rfbRef.current = null
+          // 从未进入 live 就断开（通道不通）：清除探测缓存 → 重连时自动切换 path/direct 通道
+          if (phaseRef.current !== "live") invalidateBridgeChannel()
           if (retryRef.current.manual) {
             retryRef.current.manual = false
             setPhase("idle")

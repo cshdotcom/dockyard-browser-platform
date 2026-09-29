@@ -34,6 +34,8 @@ type Workspace = {
   idleTimeoutMinutes: number
   novncConnCount: number
   expireAt: Date | null
+  startedAt: Date | null
+  runtimeAccumSec: number
 }
 
 async function getWorkspace(id: string): Promise<Workspace> {
@@ -80,9 +82,10 @@ export async function forceStopWorkspaceAction(input: unknown): Promise<ActionRe
     const { id } = zodValidate(z.object({ id: zId }), input)
     const ws = await getWorkspace(id)
     const destroyed = await destroyUnderlying(ws)
+    const runtimeDelta = ws.startedAt ? Math.max(0, Math.floor((Date.now() - ws.startedAt.getTime()) / 1000)) : 0
     const updated = await db.browserWorkspace.update({
       where: { id },
-      data: { status: "STOPPED", freezeReason: null, steelSessionId: null, cdpUrl: null, novncSessionId: null, novncConnCount: 0 },
+      data: { status: "STOPPED", freezeReason: null, steelSessionId: null, cdpUrl: null, novncSessionId: null, novncConnCount: 0, startedAt: null, runtimeAccumSec: { increment: runtimeDelta } },
     })
     await writeAudit({
       operatorUserId: ctx.userId,
@@ -121,7 +124,7 @@ async function coreRestart(ctx: AuthContext, ws: Workspace): Promise<void> {
     const session = await createSession({ proxyUrl, ttlMinutes: ttl })
     await db.browserWorkspace.update({
       where: { id: ws.id },
-      data: { status: "RUNNING", steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, freezeReason: null, crashCategory: null },
+      data: { status: "RUNNING", steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, freezeReason: null, crashCategory: null, startedAt: new Date() },
     })
     await writeAudit({
       operatorUserId: ctx.userId,
@@ -142,6 +145,7 @@ async function coreRestart(ctx: AuthContext, ws: Workspace): Promise<void> {
       where: { id: ws.id },
       data: {
         status: "RUNNING",
+        startedAt: new Date(),
         novncSessionId: session.novncSessionId,
         novncSecret: encrypt(session.secret),
         novncConnCount: 0,
@@ -200,7 +204,8 @@ export async function forceRecycleWorkspaceAction(input: unknown): Promise<Actio
     const ctx = await requireAdmin()
     const { id } = zodValidate(z.object({ id: zId }), input)
     const ws = await getWorkspace(id)
-    await db.browserWorkspace.update({ where: { id }, data: { deletedAt: new Date(), status: "STOPPED", steelSessionId: null, cdpUrl: null, novncSessionId: null } })
+    const runtimeDelta = ws.startedAt ? Math.max(0, Math.floor((Date.now() - ws.startedAt.getTime()) / 1000)) : 0
+    await db.browserWorkspace.update({ where: { id }, data: { deletedAt: new Date(), status: "STOPPED", steelSessionId: null, cdpUrl: null, novncSessionId: null, startedAt: null, runtimeAccumSec: { increment: runtimeDelta } } })
     await moveToRecycle({
       resourceType: "WORKSPACE",
       resourceId: ws.id,

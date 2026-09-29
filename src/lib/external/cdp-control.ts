@@ -1316,8 +1316,8 @@ export async function executeBrowserAction(input: {
   const data = await def.execute(ws, input.ctx, input.params || {})
   const durationMs = Date.now() - start
 
-  // 更新工作区活跃计数（防闲置回收误伤 API 驱动的会话；cdp 调用计数 + 触发 updatedAt）
-  await db.browserWorkspace.update({ where: { id: ws.id }, data: { cdpCallCount: { increment: 1 } } }).catch(() => {})
+  // 更新工作区活跃计数（防闲置回收误伤 API 驱动的会话；cdp 调用计数 + 最近活跃时间）
+  await db.browserWorkspace.update({ where: { id: ws.id }, data: { cdpCallCount: { increment: 1 }, lastActiveAt: new Date() } }).catch(() => {})
 
   // 全量审计 + 行为追踪
   await writeAudit({

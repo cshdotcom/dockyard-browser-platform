@@ -557,7 +557,10 @@ model BrowserWorkspace {
   expireAt           DateTime?
   containerRef       String?  // 自托管硬隔离浏览器容器（name/id，防退出看门狗自愈目标）
   hardeningJson      Json?    // 隔离防护快照（只读根FS/CapDrop/noexec下载/独立Profile卷/防退出循环）
-  networkPolicyJson  Json?    // 生效网络策略快照 { allowInternalNetwork, allowSecureLocationAccess, source, enforcedAt }
+  networkPolicyJson  Json?    // 生效网络策略快照 { allowInternalNetwork, allowSecureLocationAccess, source, enforcedAt, domainMode, domainBlack, domainWhite, endpointBlack, endpointWhite }
+  startedAt          DateTime? // 最近一次启动时间（运行时长计算基准；停止时冻结增量入 runtimeAccumSec）
+  runtimeAccumSec    Int       @default(0) // 累计运行秒数（不含当前运行段）
+  lastActiveAt       DateTime? // 最近活跃（VNC取票/CDP指令/脚本执行触发）
   createdByUserId    String?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt

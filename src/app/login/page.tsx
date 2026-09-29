@@ -1,6 +1,8 @@
 import { Suspense } from "react"
+import { redirect } from "next/navigation"
 import { getConfig } from "@/lib/config"
 import { getBootstrapState } from "@/lib/bootstrap"
+import { getAuthContext } from "@/lib/permissions"
 import { LoginForm } from "./login-form"
 
 export const dynamic = "force-dynamic"
@@ -13,6 +15,9 @@ export default async function LoginPage({
   searchParams: Promise<{ from?: string; error?: string; notice?: string }>
 }) {
   const sp = await searchParams
+  // 已持有效会话（DB 级校验通过）→ 直接进入目标页，无需重复登录
+  const ctx = await getAuthContext()
+  if (ctx) redirect(sp.from && sp.from.startsWith("/") && !sp.from.startsWith("//") ? sp.from : "/dashboard")
   const siteName = await getConfig<string>("ui.siteName", "Dockyard 浏览器工作平台")
   const announcement = await getConfig<string>("ui.loginAnnouncement", "")
   const allowRegister = await getConfig<boolean>("security.allowRegister", true)

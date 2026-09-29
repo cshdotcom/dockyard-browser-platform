@@ -11,6 +11,24 @@
 import { createHmac, timingSafeEqual } from "node:crypto"
 import { deflateSync, inflateSync, constants as zconst } from "node:zlib"
 import net from "node:net"
+import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
+
+// ---- .env 加载器：与主应用共享密钥（boot 脚本重置 .env 后两侧仍能对齐） ----
+function loadDotEnv() {
+  const candidates = [resolve(process.cwd(), ".env"), resolve(import.meta.dir, "../../.env")]
+  for (const p of candidates) {
+    try {
+      const text = readFileSync(p, "utf8")
+      for (const line of text.split("\n")) {
+        const m = line.match(/^([A-Z0-9_]+)=(.*)$/)
+        if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^"(.*)"$/, "$1")
+      }
+      return
+    } catch { /* 尝试下一个路径 */ }
+  }
+}
+loadDotEnv()
 
 const PORT = Number(process.env.VNC_BRIDGE_PORT || 3005)
 const SECRET = process.env.VNC_BRIDGE_SECRET || "dockyard-dev-vnc-secret"

@@ -1,5 +1,23 @@
 import { createServer } from "http"
+import { readFileSync } from "fs"
+import { resolve } from "path"
 import { Server } from "socket.io"
+
+// ---- .env 加载器：与主应用共享密钥（boot 脚本重置 .env 后两侧仍能对齐） ----
+function loadDotEnv() {
+  const candidates = [resolve(process.cwd(), ".env"), resolve(import.meta.dir, "../../.env")]
+  for (const p of candidates) {
+    try {
+      const text = readFileSync(p, "utf8")
+      for (const line of text.split("\n")) {
+        const m = line.match(/^([A-Z0-9_]+)=(.*)$/)
+        if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^"(.*)"$/, "$1")
+      }
+      return
+    } catch { /* 尝试下一个路径 */ }
+  }
+}
+loadDotEnv()
 
 // ============================================================
 // Dockyard WebSocket 枢纽（mini-service）
@@ -61,7 +79,8 @@ io.on("connection", (socket) => {
 })
 
 // ---- 内部事件注入服务（端口 3004，仅内网/本机访问） ----
-const HUB_SECRET = process.env.CRON_SECRET || "dockyard-cron-secret-dev"
+// 回退值与主应用 ENV.cronSecret 保持同一字面量，缺失时两侧天然一致
+const HUB_SECRET = process.env.CRON_SECRET || "dockyard-cron-secret"
 const emitServer = createServer((req, res) => {
   if (req.method !== "POST" || !req.url?.startsWith("/emit")) {
     res.writeHead(404, { "Content-Type": "application/json" })
