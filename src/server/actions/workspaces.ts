@@ -323,6 +323,7 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
         profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
         userId: ws.userId,
         profileKey,
+        workspaceId: ws.id, // CRX 五级策略按沙箱解析注入
         labels: { "dockyard.owner": ws.userId, "dockyard.profile-key": profileKey },
         networkPolicy: netPolicy,
         domainPolicy: domPolicy,
@@ -417,6 +418,7 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
         profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
         userId: ws.userId,
         profileKey,
+        workspaceId: ws.id, // CRX 五级策略按沙箱解析注入
         labels: { "dockyard.owner": ws.userId, "dockyard.profile-key": profileKey },
         // 代理切换重建：策略重新解析，新代理地址同步锁入托管策略
         networkPolicy: switchedPolicy,
@@ -685,6 +687,8 @@ export async function getVncTicketAction(input: unknown): Promise<ActionResult<{
   bridge: { mode: string; port: number; url: string }
   readonly: boolean
   expiresInSec: number
+  sessionMaxSec: number
+  limitSource: string
 }>> {
   return actionHandler(async () => {
     const ctx = await requireAuth()
@@ -709,8 +713,34 @@ export async function getVncTicketAction(input: unknown): Promise<ActionResult<{
     const tgt = await novncDialTarget(ws.novncSessionId, ws.containerRef)
     if (!tgt) throw new Error("远程桌面通道暂不可用，请稍后重试或联系管理员")
 
+    // ---- VNC 会话时长上限（三级策略：沙箱 > 用户 > 用户组 > 全局默认；null=继承，0/缺省=不限）----
+    // 语义说明：票据 60s 时效 = 取票→建连窗口（单次防重放）；本字段 = 连接总时长上限（默认不限）
+    const owner = await db.user.findUnique({ where: { id: ws.userId }, select: { vncSessionMaxMinutes: true } })
+    let ownerGroupId: string | null = ws.groupId
+    if (!ownerGroupId) {
+      const gu = await db.groupUser.findFirst({ where: { userId: ws.userId }, orderBy: { createdAt: "desc" }, select: { groupId: true } })
+      ownerGroupId = gu?.groupId ?? null
+    }
+    const ownerGroup = ownerGroupId ? await db.group.findUnique({ where: { id: ownerGroupId }, select: { vncSessionMaxMinutes: true } }) : null
+    const globalMaxMinutes = await getConfigNumber("vnc.sessionMaxMinutes", 0)
+    let sessionMaxSec = 0
+    let limitSource = "无限制（默认）"
+    if (ws.vncSessionMaxMinutes != null) {
+      sessionMaxSec = ws.vncSessionMaxMinutes > 0 ? ws.vncSessionMaxMinutes * 60 : 0
+      limitSource = ws.vncSessionMaxMinutes > 0 ? "沙箱策略" : "沙箱策略（显式不限）"
+    } else if (owner?.vncSessionMaxMinutes != null) {
+      sessionMaxSec = owner.vncSessionMaxMinutes > 0 ? owner.vncSessionMaxMinutes * 60 : 0
+      limitSource = owner.vncSessionMaxMinutes > 0 ? "用户策略" : "用户策略（显式不限）"
+    } else if (ownerGroup?.vncSessionMaxMinutes != null) {
+      sessionMaxSec = ownerGroup.vncSessionMaxMinutes > 0 ? ownerGroup.vncSessionMaxMinutes * 60 : 0
+      limitSource = ownerGroup.vncSessionMaxMinutes > 0 ? "用户组策略" : "用户组策略（显式不限）"
+    } else if (globalMaxMinutes > 0) {
+      sessionMaxSec = globalMaxMinutes * 60
+      limitSource = "全局默认"
+    }
+
     const expSec = 60
-    const payload = { v: ws.id, ro: readonly ? 1 : 0, exp: Math.floor(Date.now() / 1000) + expSec, n: crypto.randomBytes(16).toString("hex"), tgt }
+    const payload = { v: ws.id, ro: readonly ? 1 : 0, dur: sessionMaxSec, exp: Math.floor(Date.now() / 1000) + expSec, n: crypto.randomBytes(16).toString("hex"), tgt }
     const payloadB64 = b64url(Buffer.from(JSON.stringify(payload), "utf8"))
     const sig = b64url(crypto.createHmac("sha256", ENV.vncBridgeSecret).update(payloadB64).digest())
     const ticket = `${payloadB64}.${sig}`
@@ -720,7 +750,7 @@ export async function getVncTicketAction(input: unknown): Promise<ActionResult<{
     await writeAudit({
       operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "VNC_TICKET_ISSUE",
       resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
-      after: { access, readonly, target: tgt.k },
+      after: { access, readonly, target: tgt.k, sessionMaxSec, limitSource },
     })
     return {
       ticket,
@@ -728,6 +758,8 @@ export async function getVncTicketAction(input: unknown): Promise<ActionResult<{
       bridge: { mode: ENV.vncBridgePublic, port: ENV.vncBridgePort, url: ENV.vncBridgeUrl },
       readonly,
       expiresInSec: expSec,
+      sessionMaxSec,
+      limitSource,
     }
   })
 }

@@ -259,7 +259,7 @@ export function HostNodesTable(props: Props) {
 
       <div className="rounded-lg border bg-card">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm" aria-label="宿主机列表">
+          <table className="w-full min-w-max text-sm" aria-label="宿主机列表">
             <thead>
               <tr className="border-b bg-muted/50">
                 {columns.map((c) => (

@@ -312,7 +312,7 @@ export function McpTasksTable(props: Props) {
                   <p className="text-xs text-muted-foreground">（暂无子项）</p>
                 ) : (
                   <ScrollArea className="max-h-56">
-                    <table className="w-full text-xs">
+                    <table className="w-full min-w-max text-xs">
                       <thead>
                         <tr className="border-b text-muted-foreground">
                           <th className="text-left py-1.5 pr-2">目标类型</th>

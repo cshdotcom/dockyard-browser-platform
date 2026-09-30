@@ -152,6 +152,7 @@ export default async function AdminWorkspacesPage({
       singboxName: proxy?.sbiName || "-",
       steelNodeName: r.steelNodeId ? steelNameById.get(r.steelNodeId) || "-" : "-",
       ttlMinutes: r.ttlMinutes,
+      vncSessionMaxMinutes: r.vncSessionMaxMinutes ?? null,
       idleTimeoutMinutes: r.idleTimeoutMinutes,
       cdpCallCount: r.cdpCallCount,
       novncConnCount: r.novncConnCount,

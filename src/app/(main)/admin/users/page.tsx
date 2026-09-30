@@ -130,6 +130,7 @@ export default async function AdminUsersPage({
     createdAt: fmtDate(u.createdAt),
     groups: groupsByUser.get(u.id) || [],
     allowInternalNetwork: u.allowInternalNetwork,
+    vncSessionMaxMinutes: u.vncSessionMaxMinutes ?? null,
     allowSecureLocationAccess: u.allowSecureLocationAccess,
     netPolicy: netPolicies.get(u.id) || null,
   }))

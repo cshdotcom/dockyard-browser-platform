@@ -10,7 +10,7 @@ import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 import {
-  Loader2, MoreHorizontal, Square, RotateCw, Trash2, Flame, Unplug, Timer, UserRoundCog,
+  Loader2, MoreHorizontal, Square, RotateCw, Trash2, Flame, Unplug, Timer, UserRoundCog, Anchor,
   AlertTriangle, X, Columns3, ShieldCheck, ShieldX, Container, History, ArrowRightLeft,
 } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
@@ -25,7 +25,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import {
   forceStopWorkspaceAction, forceRestartWorkspaceAction, forceRecycleWorkspaceAction, forcePurgeWorkspaceAction,
-  forceDisconnectVncAction, forceUpdateTtlAction, transferWorkspaceAction, batchWorkspaceAction,
+  forceDisconnectVncAction, forceUpdateTtlAction, transferWorkspaceAction, batchWorkspaceAction, setWorkspaceVncLimitAction,
 } from "@/server/actions/admin-workspaces"
 
 export interface AdminWorkspaceRow {
@@ -43,6 +43,7 @@ export interface AdminWorkspaceRow {
   proxyExit: string
   singboxName: string
   steelNodeName: string
+  vncSessionMaxMinutes: number | null // 沙箱级 VNC 连接总时长上限（null=继承，0=不限）
   ttlMinutes: number
   idleTimeoutMinutes: number
   cdpCallCount: number
@@ -208,6 +209,13 @@ export function WorkspacesTable(props: Props) {
   React.useEffect(() => {
     if (ttlTarget) setTtlForm({ ttl: ttlTarget.ttlMinutes, idle: ttlTarget.idleTimeoutMinutes })
   }, [ttlTarget])
+
+  // ---- VNC 会话时长上限弹窗（三级策略：沙箱级覆盖用户/组）----
+  const [vncLimitTarget, setVncLimitTarget] = React.useState<AdminWorkspaceRow | null>(null)
+  const [vncLimitMinutes, setVncLimitMinutes] = React.useState(0)
+  React.useEffect(() => {
+    if (vncLimitTarget) setVncLimitMinutes(vncLimitTarget.vncSessionMaxMinutes ?? -1) // -1=继承
+  }, [vncLimitTarget])
 
   // ---- 转移弹窗 ----
   const [transferUsername, setTransferUsername] = React.useState("")
@@ -693,6 +701,11 @@ export function WorkspacesTable(props: Props) {
                   <DropdownMenuItem onClick={() => setTtlTarget(row)}>
                     <Timer className="h-4 w-4 mr-2" /> 强制修改 TTL
                   </DropdownMenuItem>
+                  {row.hasNovncSession && (
+                    <DropdownMenuItem onClick={() => setVncLimitTarget(row)}>
+                      <Anchor className="h-4 w-4 mr-2" /> VNC 会话时长上限
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuItem onClick={() => setTransferTarget(row)}>
                     <UserRoundCog className="h-4 w-4 mr-2" /> 资源转移
                   </DropdownMenuItem>
@@ -812,6 +825,56 @@ export function WorkspacesTable(props: Props) {
               }}
             >
               {busy === "ttl" && <Loader2 className="h-4 w-4 mr-1 animate-spin" />} 保存覆写
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- 单行：VNC 会话时长上限弹窗（三级策略沙箱级）---- */}
+      <Dialog open={!!vncLimitTarget} onOpenChange={(v) => !busy && setVncLimitTarget(v ? vncLimitTarget : null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>VNC 会话时长上限（沙箱级策略）</DialogTitle>
+            <DialogDescription>
+              工作区「{vncLimitTarget?.name}」的 HelmPort 连接总时长上限。票据 60 秒时效仅为取票→建连窗口；此处限制到期服务端强制断开（客户端同步倒计时）。优先级：沙箱 &gt; 用户 &gt; 用户组 &gt; 全局默认。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="flex items-center gap-2">
+              <Label className="w-28 shrink-0">策略</Label>
+              <Select value={vncLimitMinutes < 0 ? "inherit" : vncLimitMinutes === 0 ? "unlimited" : "limit"} onValueChange={(v) => {
+                if (v === "inherit") setVncLimitMinutes(-1)
+                else if (v === "unlimited") setVncLimitMinutes(0)
+                else if (vncLimitMinutes <= 0) setVncLimitMinutes(120)
+              }}>
+                <SelectTrigger className="flex-1"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">继承（用户/用户组/全局默认）</SelectItem>
+                  <SelectItem value="unlimited">不限时长（显式，0）</SelectItem>
+                  <SelectItem value="limit">限制时长（分钟）</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {vncLimitMinutes > 0 && (
+              <div className="flex items-center gap-2">
+                <Label className="w-28 shrink-0">上限</Label>
+                <PrecisionInput value={vncLimitMinutes} onChange={(v) => setVncLimitMinutes(Math.max(1, Math.round(v)))} min={1} max={43200} suffix="分" />
+                <span className="text-xs text-muted-foreground">= {Math.floor(vncLimitMinutes / 60)} 小时 {vncLimitMinutes % 60} 分</span>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setVncLimitTarget(null)} disabled={busy === "vcnlimit"}>取消</Button>
+            <Button
+              className="bg-teal-600 hover:bg-teal-700"
+              disabled={busy === "vcnlimit"}
+              onClick={async () => {
+                if (!vncLimitTarget) return
+                await callAction("vcnlimit", () => setWorkspaceVncLimitAction({ id: vncLimitTarget.id, vncSessionMaxMinutes: vncLimitMinutes < 0 ? null : vncLimitMinutes }))
+                setVncLimitTarget(null)
+              }}
+            >
+              {busy === "vcnlimit" && <Loader2 className="h-4 w-4 mr-1 animate-spin" />} 保存策略
             </Button>
           </DialogFooter>
         </DialogContent>

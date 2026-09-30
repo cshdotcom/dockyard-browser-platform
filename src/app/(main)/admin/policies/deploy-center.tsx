@@ -777,7 +777,7 @@ export function PolicyDeployCenter(props: Props) {
                     </div>
                     {d.results && d.results.length > 0 && (
                       <div className="rounded-lg border max-h-56 overflow-y-auto">
-                        <table className="w-full text-xs">
+                        <table className="w-full min-w-max text-xs">
                           <thead className="bg-muted/50 sticky top-0">
                             <tr>
                               <th className="text-left p-2 font-medium">类型</th>

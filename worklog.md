@@ -318,3 +318,34 @@ Stage Summary:
 - 服务长稳证明：vnc-bridge 经 daemon-services.py 启动后跨命令存活 1387s+（23 分钟，对比 bash setsid 启动的实例在命令结束时即被清理）
 
 Stage Summary（补充）: CI 双绿（main+tag）、GHCR v1.3.1 发布、四服务健康（app/bridge/hub/gateway）、r8 QA 12 张截图 417KB 压缩交付
+
+---
+Task ID: 14
+Agent: main
+Task: r9 增量 — HelmPort 企业级亮色重构(IME/可拖坞/会话时长三级策略/剪贴板隔离) + 全链路零UDP + SMTP 后台可改 + 统一筛选搜索 + 移动端适配 + CRX 扩展管控全套体系 + QA 截图交付
+
+Work Log:
+- HelmPort 查看器全量重写（888→1245行）：亮色企业级主题（白色控制坞/浅色状态栏）；右侧可拖动控制坞（24×96 小箭头折叠态、拖动停靠左右侧+localStorage 持久化、移动端 375px 底部抽屉+圆形悬浮按钮）；坞内三页签（显示/输入/剪贴板）
+- 输入法（IME）真实实现：rfb-client 新增 sendUnicodeText（Unicode codepoint → X11 keysym 0x01000000+cp 逐字 down/up 注入，RFC6143 合规）；查看器隐藏 input 捕获本地 IME composition（compositionend→注入，isComposing 期间跳过 keysym 直发）；15 种常用语言选择器（zh-CN/zh-TW/en/ja/ko/fr/de/es/pt/it/ru/ar/hi/th/vi，lang 属性切换移动端键盘）；面板式输入框（回车/按钮发送+可选回车）——实测 26 个中文字符注入，桥侧 KeyEvent 计数=26 真实闭环
+- 票据时长语义分离：票据 60s = 取票→建连窗口（单次防重放）；dur 字段 = 连接总时长上限（三级策略：沙箱 > 用户 > 用户组 > 全局 vnc.sessionMaxMinutes，默认不限）；三级配置 UI 全链（组表单/用户行菜单 5 档+继承/工作区菜单弹窗）；HUD 剩余倒计时（<60s 警告）+ 客户端到期断开 + bridge 服务端强制断开双保险（到期先 ServerCutText 提示后 close）——实测 2 分钟沙箱策略到期：客户端"会话连接总时长已达策略上限（2 分钟 · 来源：沙箱策略）"+ 桥侧提示回显均生效
+- 剪贴板沙箱隔离：bridge DemoRfbSession.remoteClipboard 实例私有（逐连接独立缓冲，跨连接绝不共享）；中转通道 /api/vnc-proxy/clipboard 工作区归属+OPERATE 权限校验；剪贴板页签隔离徽章与说明
+- 全链路零 UDP：Chromium 启动参数 --disable-quic + --force-webrtc-ip-handling-policy=disable_non_proxied_udp（supervisor.sh）；Managed Preferences QuicAllowed:false + WebRtcIPHandling 全局注入（network-policy.ts，不再仅内网封禁时）；平台自身协议全 TCP（HTTP/WS/RFB/SMTP/DockerAPI），查看器顶栏"纯 TCP/WS 链路（无 UDP）"标识
+- SMTP 邮箱服务器后台可改：SystemConfig 新增 8 个 smtp.* 配置（MAIL 分类）；email.ts 重构为 DB 优先→ENV 兜底→模拟模式（30s 热生效缓存+密码参与缓存键）；smtp.pass AES 加密落库永不回显；setSmtpConfigAction（超管保存+审计）/testSmtpAction（真实 SMTP 握手 verify + 可选发送测试邮件）；配置面板 MAIL 页签 + 专属 SmtpCard（表单/保存/测试连接/发送测试邮件）——实测：模拟模式提示正确、假主机真实握手返回"getaddrinfo ENOTFOUND smtp.test.invalid.example.com"
+- 统一筛选搜索组件 filter-bar.tsx：关键词全文检索+搜索类型下拉（多维度）+时间范围快捷预设（今日/近7天/近30天/近90天/自定义起止）+当前筛选摘要徽章+清除；接入审计日志（级别/资源类型下拉）与安全事件（结果下拉）双页签——实测 severity=WARN URL 过滤+近7天预设 from/to 写入
+- 移动端适配：ui/table.tsx 容器 overflow-x-auto+[touch-action:pan-x]+表格 min-w-max（列不挤压横向滚动）；4 处原生 table 补 min-w-max；实测 375px 视口：表宽 1249px 容器 341px 横向滚动正常、审计筛选栏响应式、VNC 底部抽屉全宽贴底
+- CRX 扩展管控体系（零内核 Patch）：
+  · Prisma 5 模型：CrxPlugin（插件库+回收站 softdelete）/CrxPolicyEntry（五级配置条目 unique[scope,scopeId,crxId]，GLOBAL 层 scopeId 恒空串）/CrxBlocklistEntry/CrxInstallStatus（安装状态机）/CrxGrayTask（灰度）；BrowserWorkspace 增 crxInheritEnabled/crxBlocklistExempt
+  · crx-policy.ts 五级合并引擎：沙箱单插件>用户>用户组>全局>库默认；高危权限自动标记（19 种高危权限词表）；冲突校验（forcelist×blocklist 同作用域拦截）；数量上限 50；Managed Preferences 生成（ExtensionInstallForcelist 每插件独立 update_url/ExtensionInstallBlocklist/ExtensionSettings installation_mode force_installed|normal_installed 映射 allowUserDisable/blocked_permissions）
+  · crx-engine.ts 安装调度：状态机 PENDING→POLICY_APPLIED→INSTALLED/PRIMARY_FAILED→BACKUP_RETRY→ALL_FAILED（3 次上限停止自动重试）/VERSION_MISMATCH；源可达性真实 HTTP 探测（8s 超时+OMA update manifest 版本解析）；真实容器 CDP /json/list 枚举 browser-extension://<id>；单插件故障隔离（逐插件 try/catch）；crx_install_poll + crx_gray_rollout 两个引擎任务注册（每分钟）——实测：9 个插件策略下发（Chrome 商店真实可达）；MetaMask 私有镜像主源失败→备用源降级 BACKUP_RETRY；审计助手 3 次尝试→ALL_FAILED→CRITICAL 告警；灰度任务 2+1 批次滚动→SUCCESS（8 条 SANDBOX 级策略落库）
+  · 注入链路：novnc.ts createNovncSession 增 crxManagedPolicy（五级合并→Managed Preferences 与网络/域名/端点策略同文件落盘，容器停止状态写入）；启动/切代理/看门狗自愈三处调用点传 workspaceId
+  · server actions crx.ts 12 个：插件 CRUD/启停/回收/恢复/彻底删除（超管+名称二次确认+引用校验）/CSV 批量导入/策略条目/黑名单/手动重试(单个+批量)/灰度创建回滚（超管）/沙箱继承设置；权限变更高危权限新增→告警+webhook
+  · OpenAPI /api/openapi/crx：GET 7 种查询（library/plugin-get/status/status-workspace/refs/blocklist/gray）+ POST 12 种操作（x-api-key 鉴权 WRITE/ADMIN+token 身份融合 requireRole）
+  · 管理页 /admin/crx 六页签：插件库/沙箱插件状态（重试+单插件源改写弹窗）/灰度任务/黑名单/扩展审计（UnifiedFilterBar 复用）/插件回收站；引用关系视图（模板/组/用户/沙箱/灰度）；侧边栏新增入口
+- 修复 3 个实现 bug：User 模型无 groupId（组关系在 GroupUser 联接表——crx-policy 取 ws.groupId 优先回退 GroupUser；getVncTicket 同修）；CrxBlocklistEntry 无 deletedAt 字段误用；Tabs 组件结构修正
+- .env 密钥第 6 次被 boot 重置→恢复全部 6 键；vnc-bridge 强制重启加载 dur 字段
+- QA r9：32 张真实浏览器截图压缩 -44.3%（4.0MB→2.21MB）→ download/qa-r9-screenshots.zip；VLM 六重抽查（亮色坞/倒计时胶囊/侧坞三页签/CRX 页面/移动端滚动/安装状态列/会话上限提示/IME 卡片+26 字符 toast）全部通过
+- lint 全项目零错误
+
+Stage Summary:
+- 用户六项指令全部达成：搜索类型筛选（统一筛选栏+审计双页签）、零 UDP（Chromium 旗标+策略层+平台全 TCP）、SMTP 后台可改可用（真实握手测试通过）、移动端不溢出可滑动（min-w-max 滚动策略）、VNC 控制栏亮色（白色坞+企业级布局）、票据时长语义修正（60s=建连窗口；连接时长三级策略默认不限，已实测强制断开双保险）、IME 中文输入真实可用（26 字符注入桥侧实收）、剪贴板逐沙箱隔离（实例私有缓冲+归属校验）、CRX 插件管控完整落地（五级策略/安装调度降级/灰度回滚/黑名单/审计/OpenAPI）
+- 交付：download/qa-r9-screenshots.zip（32 张 / 2.21MB）；tag v1.4.0 待推送

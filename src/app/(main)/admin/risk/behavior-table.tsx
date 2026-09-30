@@ -118,7 +118,7 @@ export function BehaviorTable(props: Props) {
     <div className="space-y-3">
       <div className="rounded-lg border bg-card">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm" aria-label="用户行为画像">
+          <table className="w-full min-w-max text-sm" aria-label="用户行为画像">
             <thead>
               <tr className="border-b bg-muted/50">
                 {columns.map((c) => (

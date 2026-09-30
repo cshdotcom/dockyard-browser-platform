@@ -7,6 +7,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 import { FileDown, Eye } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
+import { UnifiedFilterBar } from "@/components/shared/filter-bar"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -231,7 +232,26 @@ export function AuditTable({ tab, auditRows = [], securityRows = [], total, page
         )}
       </div>
 
-      {/* 筛选区 */}
+      {/* 统一筛选搜索栏：关键词 + 搜索类型筛选 + 时间范围快捷预设 */}
+      <UnifiedFilterBar
+        keyword={keyword}
+        filters={filters}
+        keywordPlaceholder={isAudit ? "搜索操作人/资源/操作类型/TraceID…（回车提交）" : "搜索用户/事件类型/详情/IP…（回车提交）"}
+        selectDefs={isAudit ? [
+          { key: "severity", label: "级别", options: [
+            { label: "INFO", value: "INFO" }, { label: "WARN", value: "WARN" },
+            { label: "CRITICAL", value: "CRITICAL" }, { label: "DANGER", value: "DANGER" },
+          ] },
+          { key: "resourceType", label: "资源类型", options: [
+            { label: "用户", value: "USER" }, { label: "用户组", value: "GROUP" }, { label: "工作区", value: "WORKSPACE" },
+            { label: "配置", value: "CONFIG" }, { label: "审计记录", value: "AUDIT" }, { label: "文件", value: "FILE" }, { label: "网络策略", value: "NETWORK" },
+          ] },
+        ] : [
+          { key: "success", label: "结果", options: [{ label: "成功", value: "true" }, { label: "失败", value: "false" }] },
+        ]}
+      />
+
+      {/* 专项筛选区（字段级精确过滤，配合统一筛选栏） */}
       <div className="rounded-lg border bg-card p-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {isAudit ? (
           <>
@@ -326,14 +346,6 @@ export function AuditTable({ tab, auditRows = [], securityRows = [], total, page
             </div>
           </>
         )}
-        <div className="space-y-1">
-          <Label className="text-xs">起始日期</Label>
-          <Input type="date" className="h-8" value={filters.from || ""} onChange={(e) => pushQuery({ from: e.target.value, page: "1" })} />
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs">截止日期</Label>
-          <Input type="date" className="h-8" value={filters.to || ""} onChange={(e) => pushQuery({ to: e.target.value, page: "1" })} />
-        </div>
         {(Object.keys(filters).some((k) => !["tab"].includes(k)) || keyword) && (
           <div className="sm:col-span-2 lg:col-span-4">
             <Button size="sm" variant="ghost" onClick={() => router.push(`${pathname}?tab=${tab}`)}>

@@ -41,6 +41,7 @@ interface GroupFormDialogProps {
     force2fa: boolean
     allowInternalNetwork: boolean
     allowSecureLocationAccess: boolean
+    vncSessionMaxMinutes: number | null
     tags: string[]
   } | null
   defaultParentId?: string | null
@@ -95,6 +96,8 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
   const [inheritParentQuota, setInheritParentQuota] = React.useState(true)
   const [force2fa, setForce2fa] = React.useState(false)
   const [allowInternalNetwork, setAllowInternalNetwork] = React.useState(false)
+  const [vncLimitEnabled, setVncLimitEnabled] = React.useState(false)
+  const [vncLimitMinutes, setVncLimitMinutes] = React.useState(120)
   const [allowSecureLocationAccess, setAllowSecureLocationAccess] = React.useState(false)
   const [tagsText, setTagsText] = React.useState("")
 
@@ -116,6 +119,8 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       setInheritParentQuota(group.inheritParentQuota)
       setForce2fa(group.force2fa)
       setAllowInternalNetwork(group.allowInternalNetwork)
+      setVncLimitEnabled(group.vncSessionMaxMinutes != null && group.vncSessionMaxMinutes > 0)
+      setVncLimitMinutes(group.vncSessionMaxMinutes && group.vncSessionMaxMinutes > 0 ? group.vncSessionMaxMinutes : 120)
       setAllowSecureLocationAccess(group.allowSecureLocationAccess)
       setTagsText(group.tags.join(", "))
       const q = group.quota
@@ -176,6 +181,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       force2fa,
       allowInternalNetwork,
       allowSecureLocationAccess,
+      vncSessionMaxMinutes: vncLimitEnabled ? vncLimitMinutes : 0,
       tags,
       quota: quotaEnabled ? { sessions: qSessions, novncSessions: qNovnc, diskMb: qDisk } : undefined,
       reservedQuota: reservedEnabled ? { sessions: rSessions, novncSessions: rNovnc } : undefined,
@@ -275,6 +281,25 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
                 <p className="text-[10px] text-muted-foreground">CDP/VNC端口、file://、平台内部端点（默认拒绝）</p>
               </div>
               <Switch checked={allowSecureLocationAccess} onCheckedChange={setAllowSecureLocationAccess} />
+            </div>
+            <div className="flex items-center justify-between rounded-md border px-3 py-2">
+              <div className="min-w-0 pr-2">
+                <span className="text-sm">VNC 连接总时长上限</span>
+                <p className="text-[10px] text-muted-foreground">组级策略：成员 HelmPort 会话到期自动断开（沙箱级/用户级覆盖优先；关闭=不限）</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  min={1}
+                  max={43200}
+                  value={vncLimitMinutes}
+                  disabled={!vncLimitEnabled}
+                  onChange={(e) => setVncLimitMinutes(Math.max(1, Math.min(43200, Number(e.target.value) || 120)))}
+                  className="h-8 w-20"
+                />
+                <span className="text-xs text-muted-foreground">分钟</span>
+                <Switch checked={vncLimitEnabled} onCheckedChange={(b) => { setVncLimitEnabled(b); if (b && vncLimitMinutes <= 0) setVncLimitMinutes(120) }} />
+              </div>
             </div>
           </div>
         </div>

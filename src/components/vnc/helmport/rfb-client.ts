@@ -87,6 +87,7 @@ export interface HelmPortRfbOptions {
   onBell?: () => void
   onTelemetry?: (t: RfbTelemetry) => void
   onDesktopSize?: (size: RfbDesktopSize) => void // 多监视器分辨率切换回调（服务端确认后的新布局）
+  onTextInput?: (ch: string) => void // Unicode 文本注入逐字回调（输入法 HUD 显示）
 }
 
 enum State {
@@ -526,6 +527,34 @@ export class HelmPortRfb {
     msg[1] = down ? 1 : 0
     set32(msg, 4, keysym)
     this.sendRaw(msg)
+  }
+
+  // ================= Unicode 文本注入（输入法通道） =================
+  // 将任意 Unicode 字符串逐字注入远程桌面：每个字符按键序 (keydown→keyup)。
+  // keysym 规则（RFC 6143 + X11）：
+  //   · U+0020–U+007E → 直接 ASCII keysym
+  //   · U+00A0–U+00FF → Latin-1 keysym 0x00A0–0x00FF
+  //   · U+0100 以上   → 0x01000000 + codepoint（X11 Unicode keysym 区）
+  // 输入法（中文/日文/韩文/任意本地 IME）组合完成的文本经此通道真实注入，
+  // 远程端等效于逐字符键入 —— 与本地键盘输入同一条协议路径。
+  sendUnicodeText(text: string): number {
+    if (this.state !== State.Running || this.opts.viewOnly) return 0
+    const chars = Array.from(text).slice(0, 2000) // Array.from 按码点切分，正确处理代理对
+    let sent = 0
+    for (const ch of chars) {
+      const cp = ch.codePointAt(0)
+      if (cp === undefined || cp === 0 || cp === 10 || cp === 13) continue // 换行由调用方显式发送 Enter
+      let keysym: number
+      if (cp >= 0x20 && cp <= 0x7e) keysym = cp
+      else if (cp >= 0xa0 && cp <= 0xff) keysym = cp
+      else keysym = 0x01000000 + cp
+      this.sendKey(keysym, true)
+      this.sendKey(keysym, false)
+      sent++
+      // 回调通知（HUD 键序列显示用）
+      this.opts.onTextInput?.(ch)
+    }
+    return sent
   }
 
   // ================= 多监视器分辨率切换（SetDesktopSize 客户端消息 type=8） =================

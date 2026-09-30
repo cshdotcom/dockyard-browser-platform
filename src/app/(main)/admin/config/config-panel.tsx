@@ -6,7 +6,7 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Save, RotateCcw, History, Wrench, Lock, ShieldAlert } from "lucide-react"
+import { Loader2, Save, RotateCcw, History, Wrench, Lock, ShieldAlert, Mail } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -16,7 +16,8 @@ import { Textarea } from "@/components/ui/textarea"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
-import { setConfigAction, rollbackConfigAction } from "@/server/actions/config"
+import { setConfigAction, rollbackConfigAction, setSmtpConfigAction, testSmtpAction } from "@/server/actions/config"
+import { cn } from "@/lib/utils"
 
 export interface ConfigItem {
   key: string
@@ -38,13 +39,14 @@ export interface ConfigVersionRow {
   currentVersion: number
 }
 
-const CATEGORY_ORDER = ["SECURITY", "SESSION", "STORAGE", "ALERT", "NETWORK", "UI", "GENERAL", "MCP"] as const
+const CATEGORY_ORDER = ["SECURITY", "SESSION", "STORAGE", "ALERT", "MAIL", "NETWORK", "UI", "GENERAL", "MCP"] as const
 
 const CATEGORY_LABEL: Record<string, string> = {
   SECURITY: "安全",
   SESSION: "会话",
   STORAGE: "存储",
   ALERT: "告警",
+  MAIL: "邮件",
   NETWORK: "网络",
   UI: "界面",
   GENERAL: "通用",
@@ -161,6 +163,14 @@ export function ConfigPanel({
   const renderControl = (item: ConfigItem) => {
     const disabled = !canEdit
     const v = values[item.key]
+    // SMTP 密码永不回显（仅由专属卡片加密管理）
+    if (item.key === "smtp.pass") {
+      return (
+        <Badge variant="secondary" className="text-[11px]">
+          {String(v ?? "") ? "已配置（AES 加密）" : "未配置"}
+        </Badge>
+      )
+    }
     if (item.type === "boolean") {
       return (
         <Switch
@@ -341,7 +351,9 @@ export function ConfigPanel({
         </TabsList>
 
         {CATEGORY_ORDER.filter((c) => byCategory.has(c)).map((c) => {
-          const list = byCategory.get(c) || []
+          const allList = byCategory.get(c) || []
+          // MAIL 分类：smtp.* 由专属卡片管理，通用行仅渲染其余项
+          const list = c === "MAIL" ? allList.filter((i) => !i.key.startsWith("smtp.")) : allList
           const dirtyInCategory = list.filter((i) => dirty.has(i.key))
           return (
             <TabsContent key={c} value={c} className="space-y-3 mt-4">
@@ -363,6 +375,7 @@ export function ConfigPanel({
                 )}
               </div>
               <div className="grid gap-3 lg:grid-cols-2">
+                {c === "MAIL" && <SmtpCard canEdit={canEdit} />}
                 {list.map(renderItemRow)}
               </div>
             </TabsContent>
@@ -456,6 +469,131 @@ export function ConfigPanel({
           管理员仅可查看配置与版本历史；修改配置需要超级管理员权限。
         </div>
       )}
+    </div>
+  )
+}
+
+
+// ============================================================
+// SMTP 邮箱服务器专属卡片：后台可改 + 密码加密落库 + 真实连接测试 + 测试邮件发送
+// 保存后 30 秒内热生效（邮件传输器缓存按配置指纹失效重建）
+// ============================================================
+function SmtpCard({ canEdit }: { canEdit: boolean }) {
+  const router = useRouter()
+  const [enabled, setEnabled] = React.useState(false)
+  const [host, setHost] = React.useState("")
+  const [port, setPort] = React.useState(465)
+  const [secure, setSecure] = React.useState(true)
+  const [user, setUser] = React.useState("")
+  const [pass, setPass] = React.useState("")
+  const [from, setFrom] = React.useState("")
+  const [senderName, setSenderName] = React.useState("Dockyard 平台")
+  const [testTo, setTestTo] = React.useState("")
+  const [saving, setSaving] = React.useState(false)
+  const [testing, setTesting] = React.useState(false)
+  const [testResult, setTestResult] = React.useState<{ ok: boolean; message: string } | null>(null)
+
+  const doSave = async () => {
+    setSaving(true)
+    try {
+      const res = await setSmtpConfigAction({ enabled, host, port, secure, user, pass, from, senderName })
+      if (res.code === 0) {
+        toast.success("SMTP 配置已保存（30 秒内生效，密码 AES 加密存储）")
+        setPass("") // 清空明文输入
+        router.refresh()
+      } else toast.error(res.msg)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "保存失败")
+    } finally { setSaving(false) }
+  }
+
+  const doTest = async (sendMail: boolean) => {
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const res = await testSmtpAction({ to: sendMail ? testTo : "" })
+      if (res.code === 0 && res.data) {
+        setTestResult({ ok: res.data.ok, message: res.data.message })
+        if (res.data.ok) toast.success(res.data.message)
+        else toast.error(res.data.message)
+      } else toast.error(res.msg)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "测试失败")
+    } finally { setTesting(false) }
+  }
+
+  return (
+    <div className="lg:col-span-2 rounded-lg border border-teal-100 bg-teal-50/30 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Mail className="h-4 w-4 text-teal-600" />
+          <span className="font-medium">邮箱验证服务器（SMTP）</span>
+          {enabled ? (
+            <Badge className="bg-emerald-500 hover:bg-emerald-500">已启用</Badge>
+          ) : (
+            <Badge variant="secondary">模拟模式（控制台输出）</Badge>
+          )}
+        </div>
+        <Switch checked={enabled} onCheckedChange={setEnabled} disabled={!canEdit} aria-label="SMTP 启用" />
+      </div>
+      <p className="text-xs text-muted-foreground">
+        验证码 / 激活 / 告警邮件的发送服务器。修改后立即生效（30 秒内），连接测试执行真实 SMTP 握手；密码 AES 加密落库、界面永不回显。
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">SMTP 服务器</Label>
+          <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="smtp.example.com" disabled={!canEdit} />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">端口</Label>
+          <PrecisionInput value={port} onChange={(n) => setPort(Math.round(n))} min={1} max={65535} step={1} className="w-full" disabled={!canEdit} />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">加密方式</Label>
+          <div className="flex h-9 items-center gap-2">
+            <Switch checked={secure} onCheckedChange={setSecure} disabled={!canEdit} aria-label="SSL" />
+            <span className="text-xs text-muted-foreground">{secure ? "SSL 直连（465）" : "STARTTLS（587）"}</span>
+          </div>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">认证用户名</Label>
+          <Input value={user} onChange={(e) => setUser(e.target.value)} placeholder="noreply@example.com" disabled={!canEdit} />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">认证密码（留空 = 不修改）</Label>
+          <Input type="password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder="••••••••" disabled={!canEdit} autoComplete="new-password" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">发件人地址（空 = 认证用户名）</Label>
+          <Input value={from} onChange={(e) => setFrom(e.target.value)} placeholder="noreply@example.com" disabled={!canEdit} />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">发件人显示名</Label>
+          <Input value={senderName} onChange={(e) => setSenderName(e.target.value)} disabled={!canEdit} />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">测试收件邮箱（可选）</Label>
+          <Input value={testTo} onChange={(e) => setTestTo(e.target.value)} placeholder="admin@example.com" type="email" />
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {canEdit && (
+          <Button size="sm" onClick={doSave} disabled={saving}>
+            {saving && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+            <Save className="mr-1 h-3.5 w-3.5" /> 保存 SMTP 配置
+          </Button>
+        )}
+        <Button size="sm" variant="outline" onClick={() => doTest(false)} disabled={testing}>
+          {testing && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+          测试连接（真实握手）
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => doTest(true)} disabled={testing || !testTo}>
+          发送测试邮件
+        </Button>
+        {testResult && (
+          <span className={cn("text-xs", testResult.ok ? "text-emerald-600" : "text-red-600")}>{testResult.message}</span>
+        )}
+      </div>
     </div>
   )
 }

@@ -12,6 +12,7 @@ import { writeAudit } from "@/lib/audit"
 import { zodValidate } from "@/lib/validators"
 import { setConfig, rollbackConfig, CONFIG_DEFAULTS } from "@/lib/config"
 import { bizError, ErrorCode } from "@/lib/errors"
+import { verifySmtpConnection, invalidateSmtpCache, encryptSmtpPassword } from "@/lib/email"
 
 // ---- 1. 保存配置（单项或批量整体保存） ----
 
@@ -100,5 +101,70 @@ export async function rollbackConfigAction(
       severity: "WARN",
     })
     return { key: r.key, before: r.before, after: r.after, version: r.version, rollbackTo: p.version }
+  })
+}
+
+// ---- 3. SMTP 邮箱服务器配置（后台可改，保存后 30 秒内热生效） ----
+// 密码 AES 加密落库；保存后立即清空邮件传输器缓存；全部写审计
+const smtpSchema = z.object({
+  enabled: z.boolean(),
+  host: z.string().max(200).regex(/^[a-zA-Z0-9._:-]*$/, "服务器地址格式非法"),
+  port: z.number().int().min(1).max(65535),
+  secure: z.boolean(),
+  user: z.string().max(200),
+  pass: z.string().max(500), // 空字符串=不修改现有密码
+  from: z.string().max(200),
+  senderName: z.string().max(100),
+})
+
+export async function setSmtpConfigAction(input: unknown): Promise<ActionResult<{ updatedKeys: string[]; masked: { host: string; user: string } }>> {
+  return actionHandler(async () => {
+    const ctx = await requireRole(["SUPER_ADMIN"])
+    const p = zodValidate(smtpSchema, input)
+    if (p.enabled && !p.host) throw bizError(ErrorCode.PARAM_ERROR, "启用邮件服务必须填写 SMTP 服务器地址")
+
+    const items: { key: string; value: string | number | boolean }[] = [
+      { key: "smtp.enabled", value: p.enabled },
+      { key: "smtp.host", value: p.host },
+      { key: "smtp.port", value: p.port },
+      { key: "smtp.secure", value: p.secure },
+      { key: "smtp.user", value: p.user },
+      { key: "smtp.from", value: p.from },
+      { key: "smtp.senderName", value: p.senderName },
+    ]
+    // 密码：空=保留现状；非空=加密后落库（界面永不明文回显）
+    if (p.pass) items.push({ key: "smtp.pass", value: encryptSmtpPassword(p.pass) })
+
+    for (const item of items) {
+      const r = await setConfig(item.key, item.value, ctx.userId)
+      await writeAudit({
+        operatorUserId: ctx.userId, operatorName: ctx.username,
+        operationType: "SMTP_CONFIG_UPDATE", resourceType: "CONFIG",
+        resourceId: item.key, resourceName: item.key,
+        before: { value: item.key === "smtp.pass" ? "（密码不回显）" : r.before },
+        after: { value: item.key === "smtp.pass" ? "（AES 加密落库）" : r.after, version: r.version },
+        severity: "WARN",
+      })
+    }
+    invalidateSmtpCache()
+    const masked = { host: p.host, user: p.user ? `${p.user.slice(0, 2)}***${p.user.slice(-2)}` : "" }
+    return { updatedKeys: items.map((i) => i.key), masked }
+  })
+}
+
+// ---- 4. SMTP 测试（真实连接握手 + 可选发送测试邮件；普通管理员可用） ----
+export async function testSmtpAction(input: unknown): Promise<ActionResult<{ ok: boolean; verified: boolean; sent: boolean; message: string; source: string }>> {
+  return actionHandler(async () => {
+    const ctx = await requireRole(["SUPER_ADMIN", "ADMIN"])
+    const { to } = zodValidate(z.object({ to: z.string().email().optional().or(z.literal("")) }), input)
+    invalidateSmtpCache() // 测试前强制重建传输器（最新配置）
+    const result = await verifySmtpConnection(to || undefined)
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "SMTP_TEST", resourceType: "CONFIG", resourceId: "smtp",
+      after: { ok: result.ok, verified: result.verified, sent: result.sent, target: to || null, source: result.source },
+      severity: result.ok ? "INFO" : "WARN",
+    })
+    return result
   })
 }

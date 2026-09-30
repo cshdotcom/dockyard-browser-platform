@@ -8,11 +8,13 @@ function Table({ className, ...props }: React.ComponentProps<"table">) {
   return (
     <div
       data-slot="table-container"
-      className="relative w-full overflow-x-auto"
+      // 移动端适配：列过多时表格保持内容自然宽度（min-w-max），
+      // 容器横向滚动（overflow-x-auto + 触摸平滑动量），列不压缩不溢出破版
+      className="relative w-full overflow-x-auto [touch-action:pan-x] [scrollbar-width:thin]"
     >
       <table
         data-slot="table"
-        className={cn("w-full caption-bottom text-sm", className)}
+        className={cn("w-full min-w-max caption-bottom text-sm", className)}
         {...props}
       />
     </div>

@@ -907,6 +907,7 @@ export async function setUserNetworkPolicyAction(
         id: zId,
         allowInternalNetwork: z.boolean().nullable(), // null=继承所属组
         allowSecureLocationAccess: z.boolean().nullable(), // null=继承所属组
+        vncSessionMaxMinutes: z.number().int().min(0).max(43200).nullable().optional(), // null=继承组，0=不限
       }),
       input,
     )
@@ -930,6 +931,7 @@ export async function setUserNetworkPolicyAction(
       data: {
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
+        ...(p.vncSessionMaxMinutes !== undefined ? { vncSessionMaxMinutes: p.vncSessionMaxMinutes } : {}),
       },
     })
 

@@ -16,6 +16,7 @@ import {
   type BrowserHardeningSpec,
 } from "./docker"
 import { writeNetworkPolicyFile, sessionNetworkGateway, type NetworkPolicy } from "../network-policy"
+import { resolveWorkspaceCrxPolicy, buildCrxManagedPolicy } from "../crx-policy"
 import type { DomainPolicy } from "../domain-policy"
 import type { EndpointPolicy } from "../endpoint-policy"
 
@@ -126,9 +127,14 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       resolvedAt: new Date().toISOString(),
     }
     const gatewayIp = params.networkPolicy ? await sessionNetworkGateway() : null
+    // CRX 扩展管控策略：五级合并 → Managed Preferences（ExtensionInstallForcelist/Blocklist/Settings）
+    // 与网络/域名/端点策略同文件落盘（仅浏览器进程停止时写入 —— 创建流程天然满足：容器尚未启动）
+    const crxManaged = params.workspaceId
+      ? buildCrxManagedPolicy(await resolveWorkspaceCrxPolicy(params.workspaceId).catch(() => ({ entries: [], blocklist: [], inheritEnabled: true, blocklistExempt: false, conflicts: [] })))
+      : null
     const policyFile =
       params.userId && params.profileKey
-        ? await writeNetworkPolicyFile(`ws-${params.profileKey}`, { policy, gatewayIp, proxyUrl: params.proxyUrl || null, domainPolicy: params.domainPolicy || null, endpointPolicy: params.endpointPolicy || null }).catch(() => null)
+        ? await writeNetworkPolicyFile(`ws-${params.profileKey}`, { policy, gatewayIp, proxyUrl: params.proxyUrl || null, domainPolicy: params.domainPolicy || null, endpointPolicy: params.endpointPolicy || null, crxManagedPolicy: crxManaged }).catch(() => null)
         : null
     const spec: BrowserHardeningSpec = {
       image: ENV.browserImage,

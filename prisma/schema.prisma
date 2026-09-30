@@ -41,6 +41,8 @@ model User {
   // —— 网络访问管控（管理员按用户覆盖；null=继承所属组，组缺失时用全局默认）——
   allowInternalNetwork      Boolean? // 允许浏览器会话访问内网（RFC1918/链路本地/云元数据）
   allowSecureLocationAccess Boolean? // 允许访问容器内安全位置（CDP/VNC本机端口、file://、平台内部端点）
+  // —— VNC 会话时长上限（分钟，null=继承用户组，0=不限；三级优先级：沙箱>用户>用户组）——
+  vncSessionMaxMinutes      Int?
   loginSessionCount   Int       @default(0)
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -185,6 +187,7 @@ model Group {
   force2fa         Boolean  @default(false) // 组级强制2FA
   allowInternalNetwork       Boolean  @default(false) // 组级：允许访问内网（成员默认继承）
   allowSecureLocationAccess  Boolean  @default(false) // 组级：允许访问容器内安全位置
+  vncSessionMaxMinutes       Int? // 组级 VNC 会话时长上限（分钟，null=继承全局默认，0=不限）
   policy           Json? // 组级权限锁 / 生命周期默认策略
   createdByUserId  String?
   createdAt        DateTime @default(now())
@@ -549,6 +552,10 @@ model BrowserWorkspace {
   novncActiveMin     Float     @default(0)
   ttlMinutes         Float     @default(0) // 0=不限
   idleTimeoutMinutes Float     @default(60)
+  vncSessionMaxMinutes Int? // 沙箱级 VNC 会话时长上限（分钟；null=继承用户/用户组，0=不限）
+  crxInheritEnabled Boolean   @default(true) // CRX 扩展上层继承开关（false=完全使用本沙箱插件列表，黑名单仍继承）
+  crxBlocklistExempt Boolean  @default(false) // 超管单独豁免黑名单插件（仅沙箱级）
+  sessionSecAccum   Int       @default(0) // VNC 会话累计连接秒数（策略执行统计）
   cdpCallCount       Int       @default(0)
   cdpBlockedCount    Int       @default(0)
   crashCategory      String?
@@ -1085,4 +1092,127 @@ model SystemSelfCheck {
   createdAt   DateTime @default(now())
 
   @@index([checkCode, createdAt])
+}
+
+// ============================================================
+// CRX 扩展管控体系（企业浏览器后台 · 零内核 Patch · Managed Preferences 原生策略）
+// 约束：后台不存 CRX 二进制，只维护扩展 ID + update_url 元数据；
+//      全部依赖 Chromium ExtensionInstallForcelist / Blocklist / ExtensionSettings 原生策略
+// ============================================================
+
+// CRX 插件资源库（元数据库；所有下发沙箱的插件必须先录入）
+model CrxPlugin {
+  id                 String    @id @default(cuid())
+  crxId              String    @unique // Chrome/Edge 商店真实 32 位扩展 ID
+  name               String
+  description        String?
+  zhNote             String? // 中文备注
+  tags               Json? // 业务标签 ["office","dev","ops","highrisk"]
+  permissions        Json? // manifest 权限清单（自动导入 / 手动录入）
+  updateUrl          String // 主安装源 update_url
+  backupUpdateUrl    String? // 备用安装源（降级）
+  lockedVersion      String? // 强制锁定版本（禁止自动升级）
+  allowIncognito     Boolean   @default(false) // 允许无痕运行（全局默认，下发可覆盖）
+  allowUserDisable   Boolean   @default(true) // false=用户沙箱内不能禁用（force_installed）
+  highRisk           Boolean   @default(false) // 高危标记（按 manifest 权限自动判定）
+  highRiskReason     Json? // ["all_urls","clipboardRead",...]
+  enabled            Boolean   @default(true) // 库内禁用：禁用后所有继承沙箱不再安装
+  docUrl             String? // 内部文档链接
+  createdByUserId    String?
+  createdByName      String?
+  updatedByUserId    String?
+  updatedByName      String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime? // 软删（插件库回收站）
+  deletedByUserId    String?
+  deletedByName      String?
+
+  @@index([deletedAt])
+  @@index([enabled])
+  @@index([highRisk])
+  @@index([createdAt])
+}
+
+// 五级 CRX 策略条目（强制安装列表项：GLOBAL / GROUP / USER / SANDBOX 层）
+model CrxPolicyEntry {
+  id               String    @id @default(cuid())
+  scopeType        String // GLOBAL | GROUP | USER | SANDBOX
+  scopeId          String? // 对应 groupId/userId/workspaceId（GLOBAL 为空）
+  crxId            String
+  updateUrl        String? // 覆盖主源
+  backupUpdateUrl  String? // 覆盖备用源
+  lockedVersion    String? // 覆盖锁定版本
+  allowIncognito   Boolean? // 覆盖无痕运行
+  allowUserDisable Boolean? // 覆盖可禁用
+  note             String?
+  createdByUserId  String?
+  createdByName    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+
+  @@unique([scopeType, scopeId, crxId])
+  @@index([scopeType, scopeId])
+  @@index([crxId])
+}
+
+// CRX 黑名单（强制禁止安装；GLOBAL 层为主，黑名单不随继承开关失效）
+model CrxBlocklistEntry {
+  id              String   @id @default(cuid())
+  scopeType       String // GLOBAL | GROUP | USER | SANDBOX
+  scopeId         String?
+  crxId           String
+  note            String?
+  createdByUserId String?
+  createdByName   String?
+  createdAt       DateTime @default(now())
+
+  @@unique([scopeType, scopeId, crxId])
+  @@index([crxId])
+}
+
+// 沙箱逐插件安装状态（安装调度状态机）
+model CrxInstallStatus {
+  id              String    @id @default(cuid())
+  workspaceId     String
+  crxId           String
+  state           String    @default("PENDING") // PENDING | POLICY_APPLIED | INSTALLED | PRIMARY_FAILED | BACKUP_RETRY | ALL_FAILED | VERSION_MISMATCH
+  sourceUsed      String? // 当前使用的源（主/备）
+  currentVersion  String? // 实际安装版本（CDP 检测）
+  attempts        Int       @default(0)
+  lastErrorCode   String?
+  lastErrorAt     DateTime?
+  lastCheckedAt   DateTime?
+  resolvedBy      String? // SANDBOX | USER | GROUP | GLOBAL | LIBRARY
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([workspaceId, crxId])
+  @@index([workspaceId])
+  @@index([state])
+  @@index([crxId])
+}
+
+// CRX 灰度下发任务（分批推送 + 一键回滚；回滚仅超级管理员）
+model CrxGrayTask {
+  id              String    @id @default(cuid())
+  name            String
+  entriesJson     String // [{ crxId, updateUrl?, lockedVersion?, allowIncognito?, allowUserDisable? }]
+  targetIds       Json // [workspaceId,...] 灰度目标沙箱
+  status          String    @default("PENDING") // PENDING | ROLLING | SUCCESS | PARTIAL | ROLLED_BACK | CANCELLED
+  batchSize       Int       @default(3)
+  total           Int       @default(0)
+  progressed      Int       @default(0)
+  successCount    Int       @default(0)
+  failCount       Int       @default(0)
+  rollbackReason  String?
+  createdByUserId String?
+  createdByName   String?
+  createdAt       DateTime  @default(now())
+  activatedAt     DateTime?
+  finishedAt      DateTime?
+
+  @@index([status])
+  @@index([createdAt])
 }

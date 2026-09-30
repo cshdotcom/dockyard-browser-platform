@@ -429,3 +429,35 @@ export async function batchWorkspaceAction(input: unknown): Promise<ActionResult
     return { successCount, failCount: failures.length, failures }
   })
 }
+
+// ---- 沙箱级 VNC 会话时长策略（三级：沙箱 > 用户 > 用户组 > 全局默认；0=不限）----
+// 语义：票据 60 秒时效 = 取票→建连窗口；本字段 = 连接总时长上限（到期服务端强制断开 + 客户端倒计时提示）
+export async function setWorkspaceVncLimitAction(input: unknown): Promise<ActionResult<{ id: string; vncSessionMaxMinutes: number | null }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireRole(["SUPER_ADMIN", "ADMIN", "GROUP_ADMIN"])
+    const p = zodValidate(z.object({
+      id: zId,
+      vncSessionMaxMinutes: z.number().int().min(0).max(43200).nullable(), // null=继承用户/组，0=不限
+    }), input)
+
+    const ws = await db.browserWorkspace.findFirst({ where: { id: p.id, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    // 组管理员范围校验
+    if (ctx.role === "GROUP_ADMIN") {
+      const { isGroupAdminOf } = await import("@/lib/permissions")
+      if (!(await isGroupAdminOf(ctx.userId, ws.userId))) throw new Error("仅可管理本组成员的工作区")
+    }
+
+    const before = { vncSessionMaxMinutes: ws.vncSessionMaxMinutes }
+    await db.browserWorkspace.update({ where: { id: ws.id }, data: { vncSessionMaxMinutes: p.vncSessionMaxMinutes } })
+
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "WORKSPACE_VNC_LIMIT",
+      resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name, ownerUserId: ws.userId,
+      before, after: { vncSessionMaxMinutes: p.vncSessionMaxMinutes }, severity: "WARN",
+    })
+    return { id: ws.id, vncSessionMaxMinutes: p.vncSessionMaxMinutes }
+  })
+}

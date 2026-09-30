@@ -5,7 +5,7 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2 } from "lucide-react"
+import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { Button } from "@/components/ui/button"
@@ -51,6 +51,7 @@ export interface AdminUserRow {
   createdAt: string
   groups: string[]
   allowInternalNetwork: boolean | null // 用户级覆盖（null=继承组）
+  vncSessionMaxMinutes: number | null // 用户级 VNC 连接总时长上限（null=继承组，0=不限）
   allowSecureLocationAccess: boolean | null
   netPolicy: { allowInternalNetwork: boolean; allowSecureLocationAccess: boolean; source: string } | null // 生效快照
 }
@@ -374,6 +375,28 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: row.allowInternalNetwork, allowSecureLocationAccess: null }))}>
               安全位置：恢复继承组/全局
+            </DropdownMenuItem>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger className="gap-1.5">
+            <Timer className="mr-1.5 h-4 w-4" /> VNC 会话时长
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent className="w-60">
+            <p className="px-2 py-1 text-[11px] text-muted-foreground">
+              连接总时长上限（当前：{row.vncSessionMaxMinutes == null ? "继承" : row.vncSessionMaxMinutes > 0 ? `${row.vncSessionMaxMinutes} 分钟` : "不限"}）
+            </p>
+            {[30, 60, 120, 240, 480].map((m) => (
+              <DropdownMenuItem key={m} onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: row.allowInternalNetwork, allowSecureLocationAccess: row.allowSecureLocationAccess, vncSessionMaxMinutes: m }))}>
+                限制 {m >= 60 ? `${m / 60} 小时` : `${m} 分钟`}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: row.allowInternalNetwork, allowSecureLocationAccess: row.allowSecureLocationAccess, vncSessionMaxMinutes: 0 }))}>
+              不限制（显式）
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: row.allowInternalNetwork, allowSecureLocationAccess: row.allowSecureLocationAccess, vncSessionMaxMinutes: null }))}>
+              恢复继承用户组/全局
             </DropdownMenuItem>
           </DropdownMenuSubContent>
         </DropdownMenuSub>

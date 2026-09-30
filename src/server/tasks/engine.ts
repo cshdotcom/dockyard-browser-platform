@@ -15,6 +15,7 @@ import { resolveNetworkPolicy } from "@/lib/network-policy"
 import { resolveDomainPolicyForUser } from "@/lib/domain-policy"
 import { resolveEndpointPolicyForUser } from "@/lib/endpoint-policy"
 import { activateDueScheduledDeployments } from "@/lib/policy-engine"
+import { crxInstallPoll, crxGrayRollout } from "./crx-engine"
 
 const g = globalThis as unknown as {
   __dyTaskLocks?: Map<string, { lockedAt: number; heartbeat: number }>
@@ -474,6 +475,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
               profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
               userId: ws.userId,
               profileKey,
+              workspaceId: ws.id, // CRX 五级策略按沙箱解析注入（自愈重建同步刷新扩展策略）
               labels: { "dockyard.owner": ws.userId, "dockyard.recovered": "true" },
               networkPolicy: netPolicy,
               domainPolicy: domPolicy,
@@ -523,6 +525,16 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
   async policy_deployment_activation(log) {
     const r = await activateDueScheduledDeployments(log)
     return { itemsProcessed: r.activated + r.failed, summary: `激活${r.activated}个定时策略批次${r.failed > 0 ? `，失败${r.failed}个` : ""}` }
+  },
+
+  // 19. CRX 插件安装状态轮询（源可达性真实探测 + CDP 扩展检测 + 失败降级/告警）
+  async crx_install_poll(log) {
+    return crxInstallPoll(log)
+  },
+
+  // 20. CRX 灰度策略滚动下发（ROLLING → 分批应用 → SUCCESS/PARTIAL）
+  async crx_gray_rollout(log) {
+    return crxGrayRollout(log)
   },
 }
 

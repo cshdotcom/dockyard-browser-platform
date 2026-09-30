@@ -47,10 +47,11 @@ function layoutEqual(a: ScreenLayout[], b: ScreenLayout[]): boolean {
 
 // ---------------- 票据 ----------------
 // ticket = b64url(payloadJson) + "." + b64url(hmac(payloadB64))
-// payload: { v: workspaceId, ro: 0|1, exp: epochSec, n: nonce, tgt: {k:"demo"} | {k:"tcp",h,p} }
+// payload: { v: workspaceId, ro: 0|1, exp: epochSec, dur: 秒(连接最大存活时长, 0=不限), n: nonce, tgt: {k:"demo"} | {k:"tcp",h,p} }
+// 语义：exp = 取票→建连窗口（60s，单次防重放）；dur = 会话连接总时长上限（三级策略下发，0=默认不限）
 
 type DialTarget = { k: "demo" } | { k: "tcp"; h: string; p: number }
-interface TicketPayload { v: string; ro: 0 | 1; exp: number; n: string; tgt: DialTarget }
+interface TicketPayload { v: string; ro: 0 | 1; exp: number; dur: number; n: string; tgt: DialTarget }
 
 function b64url(buf: Buffer): string {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
@@ -93,6 +94,16 @@ function verifyTicket(ticket: string): TicketPayload | null {
   usedNonces.set(p.n, p.exp)
   return p
 }
+
+// ---------------- 会话时长上限（服务端强制执行，纵深防御） ----------------
+// dur=0 → 不限；dur>0 → 连接存活超过该秒数即断开（先提示后断）
+function sessionDeadline(dur: number): number {
+  return dur > 0 ? Date.now() + dur * 1000 : 0
+}
+const SESSION_LIMIT_NOTICE_MS = 1500 // 断开前提示驻留时间
+function sessionLimitNoticeText(dur: number): string {
+  return `[HelmPort] 会话时长已达策略上限（${Math.round(dur / 60)} 分钟），连接即将断开`
+}
 const usedNonces = new Map<string, number>()
 setInterval(() => {
   const now = Date.now() / 1000
@@ -118,6 +129,9 @@ function statOf(v: string, mode: "demo" | "tcp"): SessStats {
 
 // ============================================================
 // 演示 RFB 引擎：RFB 3.8 / raw 编码 / 键鼠回显 / 剪贴板回环
+// 剪贴板沙箱隔离：remoteClipboard 为本实例私有字段 —— 每条连接一个独立实例，
+// 天然逐会话隔离；不同沙箱 / 同一沙箱不同连接之间互不可见（跨连接不共享）。
+// 平台层另有中转审计通道归属校验（vnc-proxy/clipboard 按工作区 + 会话身份校验）。
 // ============================================================
 
 // 3x5 点阵字体（数字与基础符号 —— 仅演示帧缓冲使用）
@@ -189,13 +203,19 @@ class DemoRfbSession {
   private keysTotal = 0
   private pointersTotal = 0
   private resizes = 0
-  private remoteClipboard: string | null = null
+  private remoteClipboard: string | null = null // 本连接私有（沙箱内逐会话隔离，绝不跨连接共享）
+  private deadline: number // 会话时长上限截止（0=不限）
+  private durSec: number // 原始时长（提示文案用）
+  private limitNotified = false
   private timer: ReturnType<typeof setInterval>
   constructor(
     private ws: { send(data: Uint8Array): void; close(): void },
     private readonly: boolean,
     private stats: SessStats,
+    sessionDurSec = 0, // 会话最大存活时长（秒，0=不限；票据三级策略下发）
   ) {
+    this.durSec = sessionDurSec > 0 ? sessionDurSec : 0
+    this.deadline = sessionDeadline(sessionDurSec)
     this.timer = setInterval(() => this.tick(), FRAME_MS)
     this.timer.unref?.()
     // 1. 版本协商：服务端宣告 RFB 003.008
@@ -465,6 +485,19 @@ class DemoRfbSession {
 
   private tick() {
     if (this.closed || this.hsStage !== 3) return
+    // 会话时长上限强制（服务端纵深防御：到期先提示后断开，与客户端倒计时双保险）
+    if (this.deadline > 0 && Date.now() >= this.deadline) {
+      if (!this.limitNotified) {
+        this.limitNotified = true
+        const notice = Buffer.from(sessionLimitNoticeText(this.durSec), "utf8")
+        const head = Buffer.alloc(8)
+        head.writeUInt8(3, 0) // ServerCutText：提示断开原因（可在画面上感知）
+        head.writeUInt32BE(notice.length, 4)
+        this.ws.send(Buffer.concat([head, notice]))
+        setTimeout(() => this.close(), SESSION_LIMIT_NOTICE_MS)
+      }
+      return
+    }
     if (this.pending || (this.lastSendAt > 0 && Date.now() - this.lastSendAt > 2500)) this.sendFrame()
   }
   private sendFrame() {
@@ -644,11 +677,22 @@ function hslToRgb(h: number, s: number, l: number): [number, number, number] {
 class TcpSession {
   private socket: net.Socket | null = null
   private closed = false
+  private deadline: number
+  private limitTimer: ReturnType<typeof setTimeout> | null = null
   constructor(
     private ws: { send(data: Uint8Array): void; close(): void },
     target: { h: string; p: number },
     private stats: SessStats,
+    sessionDurSec = 0, // 会话最大存活时长（秒，0=不限）
   ) {
+    this.deadline = sessionDeadline(sessionDurSec)
+    if (this.deadline > 0) {
+      this.limitTimer = setTimeout(() => {
+        // 到期：直接断开（TCP 透传无法注入提示帧，客户端倒计时负责友好提示）
+        this.close()
+      }, this.deadline - Date.now())
+      this.limitTimer.unref?.()
+    }
     this.socket = net.createConnection({ host: target.h, port: target.p })
     this.socket.setTimeout(8000, () => {
       this.close()
@@ -673,13 +717,14 @@ class TcpSession {
   close() {
     if (this.closed) return
     this.closed = true
+    if (this.limitTimer) clearTimeout(this.limitTimer)
     try { this.socket?.destroy() } catch { /* noop */ }
     try { this.ws.close() } catch { /* noop */ }
   }
 }
 
 // ---------------- HTTP / WS 服务 ----------------
-interface WsData { v: string; ro: boolean; tgt: DialTarget; sess: DemoRfbSession | TcpSession | null; stats: SessStats }
+interface WsData { v: string; ro: boolean; dur: number; tgt: DialTarget; sess: DemoRfbSession | TcpSession | null; stats: SessStats }
 
 // Bun 运行时全局服务接口（bun --hot 执行；类型宽松声明避免额外依赖）
 declare const Bun: { serve<T = unknown>(cfg: Record<string, unknown>): { stop(force?: boolean): void } }
@@ -712,7 +757,7 @@ const server = Bun.serve<WsData>({
       if (!vnc) return new Response("缺少 vnc 参数", { status: 400 })
       const payload = verifyTicket(ticket)
       if (!payload || payload.v !== vnc) return new Response("票据无效或已过期", { status: 401 })
-      if (srv.upgrade(req, { data: { v: vnc, ro: payload.ro === 1, tgt: payload.tgt, sess: null, stats: statOf(vnc, payload.tgt.k === "demo" ? "demo" : "tcp") } })) {
+      if (srv.upgrade(req, { data: { v: vnc, ro: payload.ro === 1, dur: typeof payload.dur === "number" ? payload.dur : 0, tgt: payload.tgt, sess: null, stats: statOf(vnc, payload.tgt.k === "demo" ? "demo" : "tcp") } })) {
         return
       }
       return new Response("升级失败", { status: 500 })
@@ -727,12 +772,14 @@ const server = Bun.serve<WsData>({
           { send: (b) => ws.send(b), close: () => ws.close() },
           d.ro,
           d.stats,
+          d.dur, // 会话时长上限（服务端强制）
         )
       } else {
         d.sess = new TcpSession(
           { send: (b) => ws.send(b), close: () => ws.close() },
           { h: d.tgt.h, p: d.tgt.p },
           d.stats,
+          d.dur,
         )
       }
     },

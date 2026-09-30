@@ -174,6 +174,7 @@ export interface ChromiumPolicyOptions {
   proxyUrl?: string | null // 锁定代理（ProxyMode=fixed_servers，用户不可改）
   domainPolicy?: DomainPolicy | null // 域名黑白名单（作用域合并后）
   endpointPolicy?: EndpointPolicy | null // 端点级精确限制（host:port 作用域合并后）
+  crxManagedPolicy?: Record<string, unknown> | null // CRX 扩展管控策略（五级合并后的 Managed Preferences）
 }
 
 export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<string, unknown> {
@@ -241,12 +242,17 @@ export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<
     URLBlocklist: blocklist,
     // 沙箱内禁选文件（配合 file:// 封禁）
     AllowFileSelectionDialogs: false,
+    // —— 全链路零 UDP：禁用 QUIC/HTTP3（UDP 传输）与 WebRTC 非代理 UDP ——
+    // 平台自身全部协议均基于 TCP（HTTP/WebSocket/RFB/SMTP/Docker API），
+    // 浏览器侧同样禁止任何 UDP 承载的协议出口
+    QuicAllowed: false,
+    WebRtcIPHandling: "disable_non_proxied_udp",
+    AllowWebRtcUdpPorts: [] as number[],
   }
   if (whitelistMode) managed.URLAllowlist = allowlist
-  // 内网封禁时：WebRTC 仅走代理 UDP，防本机/局域网 IP 泄漏与 P2P 直连
-  if (!policy.allowInternalNetwork) {
-    managed.WebRtcIPHandling = "disable_non_proxied_udp"
-    managed.AllowWebRtcUdpPorts = [] as number[]
+  // CRX 扩展管控策略合入（ExtensionInstallForcelist / Blocklist / ExtensionSettings）
+  if (opts.crxManagedPolicy) {
+    for (const [k, v] of Object.entries(opts.crxManagedPolicy)) managed[k] = v
   }
   // 安全位置封禁时：锁定代理设置（chrome://settings 已封禁，策略层再锁一道）
   if (!policy.allowSecureLocationAccess && opts.proxyUrl) {

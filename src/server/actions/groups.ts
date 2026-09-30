@@ -69,6 +69,7 @@ function groupBrief(g: {
   policy?: unknown
   allowInternalNetwork?: boolean | null
   allowSecureLocationAccess?: boolean | null
+  vncSessionMaxMinutes?: number | null
 }) {
   return {
     id: g.id,
@@ -84,6 +85,7 @@ function groupBrief(g: {
     policy: g.policy ?? null,
     allowInternalNetwork: g.allowInternalNetwork ?? null,
     allowSecureLocationAccess: g.allowSecureLocationAccess ?? null,
+    vncSessionMaxMinutes: g.vncSessionMaxMinutes ?? null,
   }
 }
 
@@ -101,6 +103,7 @@ const createGroupSchema = z.object({
   tags: z.array(z.string().max(32)).max(20).default([]),
   allowInternalNetwork: z.boolean().default(false), // 组级网络策略：允许访问内网
   allowSecureLocationAccess: z.boolean().default(false), // 组级网络策略：允许访问容器内安全位置
+  vncSessionMaxMinutes: z.number().int().min(0).max(43200).nullable().optional(), // 组级 VNC 连接总时长上限（分钟，null=继承全局，0=不限）
 })
 
 export async function createGroupAction(input: unknown): Promise<ActionResult<{ id: string }>> {
@@ -129,6 +132,7 @@ export async function createGroupAction(input: unknown): Promise<ActionResult<{ 
         tags: p.tags.length > 0 ? p.tags : undefined,
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
+        vncSessionMaxMinutes: p.vncSessionMaxMinutes ?? null,
         createdByUserId: ctx.userId,
       },
     })
@@ -187,6 +191,7 @@ export async function updateGroupAction(input: unknown): Promise<ActionResult<{ 
         tags: p.tags.length > 0 ? p.tags : Prisma.DbNull,
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
+        vncSessionMaxMinutes: p.vncSessionMaxMinutes ?? null,
       },
     })
 
@@ -691,6 +696,7 @@ export async function setGroupNetworkPolicyAction(
       data: {
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
+        vncSessionMaxMinutes: p.vncSessionMaxMinutes ?? null,
       },
     })
 
@@ -716,6 +722,7 @@ export async function setGroupNetworkPolicyAction(
       after: {
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
+        vncSessionMaxMinutes: p.vncSessionMaxMinutes ?? null,
       },
       severity: "WARN",
       extra: { affectedMembers },
