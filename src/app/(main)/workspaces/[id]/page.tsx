@@ -42,6 +42,34 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
 
   const shareMap = new Map(shareTargets.map((u) => [u.id, u]))
 
+  // 四层生效策略（单沙箱 > 用户 > 用户组 > 全局）：详情页展示与沙箱级覆盖面板数据源
+  const { resolveAccessPolicies } = await import("@/lib/domain-policy")
+  const effBundleRaw = ws.mode === "novnc_full"
+    ? await resolveAccessPolicies(ws.userId, ws.id).catch(() => null)
+    : null
+  const effBundle = effBundleRaw
+    ? {
+        network: {
+          allowInternalNetwork: effBundleRaw.network.allowInternalNetwork,
+          allowSecureLocationAccess: effBundleRaw.network.allowSecureLocationAccess,
+          source: effBundleRaw.network.source,
+        },
+        domain: {
+          mode: effBundleRaw.domain.mode,
+          black: effBundleRaw.domain.blackPatterns.length,
+          white: effBundleRaw.domain.whitePatterns.length,
+          rules: effBundleRaw.domain.rules.length,
+        },
+        endpoint: { black: effBundleRaw.endpoint.blackPatterns.length, white: effBundleRaw.endpoint.whitePatterns.length },
+        file: {
+          allowDownload: effBundleRaw.file.allowDownload,
+          allowUpload: effBundleRaw.file.allowUpload,
+          allowFileScheme: effBundleRaw.file.allowFileScheme,
+          source: effBundleRaw.file.source,
+        },
+      }
+    : null
+
   return (
     <WorkspaceDetail
       workspace={{
@@ -64,6 +92,9 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
         mySharePermission: share?.permission ?? null,
         isAdmin,
         crashCategory: ws.crashCategory,
+        policyAllowInternalNetwork: ws.policyAllowInternalNetwork,
+        policyAllowSecureLocationAccess: ws.policyAllowSecureLocationAccess,
+        effectivePolicy: effBundle,
       }}
       shares={shares.map((s) => ({
         id: s.id, targetName: shareMap.get(s.targetUserId)?.displayName || shareMap.get(s.targetUserId)?.username || "-",

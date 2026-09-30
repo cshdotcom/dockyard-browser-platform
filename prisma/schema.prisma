@@ -553,6 +553,9 @@ model BrowserWorkspace {
   ttlMinutes         Float     @default(0) // 0=不限
   idleTimeoutMinutes Float     @default(60)
   vncSessionMaxMinutes Int? // 沙箱级 VNC 会话时长上限（分钟；null=继承用户/用户组，0=不限）
+  // —— 沙箱级网络访问策略覆盖（四层解析最高优先；null=继承用户/用户组/全局）——
+  policyAllowInternalNetwork     Boolean? // 沙箱级：允许访问内网（非 null 即覆盖上层）
+  policyAllowSecureLocationAccess Boolean? // 沙箱级：允许访问容器内安全位置（非 null 即覆盖上层）
   crxInheritEnabled Boolean   @default(true) // CRX 扩展上层继承开关（false=完全使用本沙箱插件列表，黑名单仍继承）
   crxBlocklistExempt Boolean  @default(false) // 超管单独豁免黑名单插件（仅沙箱级）
   sessionSecAccum   Int       @default(0) // VNC 会话累计连接秒数（策略执行统计）
@@ -665,10 +668,11 @@ model DomainRule {
   type           String   @default("BLACK") // BLACK | WHITE
   enabled        Boolean  @default(true)
   note           String?
-  // —— 作用域（0=全局 1=用户组 2=用户）：策略下发中心按目标批量落规则 ——
-  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER
+  // —— 作用域（四层定向：全局 1=用户组 2=用户 3=单沙箱）：策略下发中心按目标批量落规则 ——
+  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER | SANDBOX
   groupId        String?  // scopeType=GROUP 时生效
   userId         String?  // scopeType=USER 时生效
+  workspaceId    String?  // scopeType=SANDBOX 时生效（单沙箱定向限制）
   deploymentId   String?  // 来源策略下发批次（回滚时整批清理）
   priority       Int      @default(0) // 数字越大越先应用
   createdByUserId String?
@@ -676,6 +680,7 @@ model DomainRule {
 
   @@index([scopeType, groupId])
   @@index([scopeType, userId])
+  @@index([scopeType, workspaceId])
   @@index([type, enabled])
 }
 
@@ -945,10 +950,11 @@ model RiskListRule {
   note           String?
   mode           String   @default("PERMANENT") // TEMP | PERMANENT
   expiresAt      DateTime?
-  // —— 作用域：登录/入口级风控仍取 GLOBAL；用户/组级 IP 黑白名单供策略下发中心批量落规则 ——
-  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER
+  // —— 作用域：登录/入口级风控仍取 GLOBAL；用户/组/单沙箱级 IP 黑白名单供策略下发中心批量落规则 ——
+  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER | SANDBOX
   groupId        String?
   userId         String?
+  workspaceId    String? // scopeType=SANDBOX 时生效（单沙箱定向 IP 限制）
   deploymentId   String?  // 来源策略下发批次（回滚时整批清理）
   createdByUserId String?
   createdAt      DateTime @default(now())
@@ -956,6 +962,7 @@ model RiskListRule {
   @@index([type, value])
   @@index([scopeType, groupId])
   @@index([scopeType, userId])
+  @@index([scopeType, workspaceId])
 }
 
 // ============================================================
@@ -969,6 +976,7 @@ model PolicyDeployment {
   bundleJson      String   // 下发的策略包内容（规范化后）
   targetUsers     Json? // 目标用户ID列表
   targetGroups    Json? // 目标用户组ID列表
+  targetWorkspaces Json? // 目标沙箱ID列表（单沙箱定向限制下发）
   status          String   @default("PENDING") // PENDING(定时待生效) | RUNNING | SUCCESS | PARTIAL | FAILED | ROLLED_BACK | CANCELLED
   // —— 定时生效：IMMEDIATE 立即执行；SCHEDULED 到 effectiveAt 由定时任务自动激活 ——
   effectiveMode   String   @default("IMMEDIATE") // IMMEDIATE | SCHEDULED
@@ -995,17 +1003,44 @@ model PolicyDeployment {
   @@index([createdByUserId])
 }
 
+// ============================================================
+// 文件访问限制策略（File Access Policy）—— 四层配置条目
+// 作用域：GLOBAL / GROUP / USER / SANDBOX（单沙箱），unique[scopeType, scopeId]
+// 可控维度（执行层：Chromium 托管策略 + 只读策略文件注入）：
+//   · allowDownload   —— 是否允许浏览器下载文件（false → DownloadRestrictions=2 全禁）
+//   · allowUpload     —— 是否允许选择本机文件上传（false → AllowFileSelectionDialogs=false 拾取器封禁）
+//   · allowFileScheme —— 是否允许 file:// 本地文件访问（false → URLBlocklist file://*）
+// 解析：SANDBOX > USER > GROUP（沿继承链）> GLOBAL > 系统默认（下载/上传允许、file:// 禁止）
+// ============================================================
+model FilePolicyConfig {
+  id              String   @id @default(cuid())
+  scopeType       String // GLOBAL | GROUP | USER | SANDBOX
+  scopeId         String // 对应 groupId/userId/workspaceId（GLOBAL 层恒为空串）
+  allowDownload   Boolean  @default(true)
+  allowUpload     Boolean  @default(true)
+  allowFileScheme Boolean  @default(false)
+  note            String?
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([scopeType, scopeId])
+  @@index([scopeType, scopeId])
+  @@index([scopeId])
+}
+
 // 端点级精确限制规则（host:port / host:* / CIDR:port / 方案级）
-// 与域名规则同一作用域模型（GLOBAL/GROUP/USER 三层合并），供策略下发中心批量落规则
+// 与域名规则同一作用域模型（GLOBAL/GROUP/USER/SANDBOX 四层合并），供策略下发中心批量落规则
 model NetworkEndpointRule {
   id             String   @id @default(cuid())
   pattern        String // 形如 10.0.0.5:8080 / 192.168.1.*:443 / *.corp.com:22 / 127.0.0.1:* / [::1]:9222
   type           String   @default("BLACK") // BLACK | WHITE（WHITE=显式放行例外）
   enabled        Boolean  @default(true)
   note           String?
-  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER
+  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER | SANDBOX
   groupId        String? // scopeType=GROUP 时生效
   userId         String? // scopeType=USER 时生效
+  workspaceId    String? // scopeType=SANDBOX 时生效（单沙箱定向限制）
   deploymentId   String?  // 来源策略下发批次（回滚时整批清理）
   priority       Int      @default(0)
   createdByUserId String?
@@ -1013,6 +1048,7 @@ model NetworkEndpointRule {
 
   @@index([scopeType, groupId])
   @@index([scopeType, userId])
+  @@index([scopeType, workspaceId])
   @@index([type, enabled])
 }
 

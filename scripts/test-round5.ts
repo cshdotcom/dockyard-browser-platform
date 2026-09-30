@@ -60,7 +60,7 @@ async function main() {
   ok("组级规则对组成员生效", pAdmin.blackPatterns.includes("group-block.example"))
 
   // 1.4 批量解析
-  const batch = await resolveDomainPoliciesBatch([demo.id, admin.id])
+  const batch = await resolveDomainPoliciesBatch([{ userId: demo.id }, { userId: admin.id }])
   ok("批量解析两组结果", batch.size === 2 && batch.get(demo.id)!.mode === "WHITELIST" && batch.get(admin.id)!.blackPatterns.includes("group-block.example"))
 
   // 1.5 Chromium 托管策略生成（白名单模式语义）

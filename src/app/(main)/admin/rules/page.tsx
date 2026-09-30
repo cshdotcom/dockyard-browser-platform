@@ -7,7 +7,8 @@ import { UaTable, type UaRow } from "./ua-table"
 import { DomainRulesTable, type DomainRuleRow } from "./domain-rules-table"
 import { EndpointRulesTable, type EndpointRuleRow } from "./endpoint-rules-table"
 import { ModifyRulesTable, type ModifyRuleRow } from "./modify-rules-table"
-import { MonitorSmartphone, Globe, Shuffle, CheckCircle2, CircleSlash, Info, Plug, ServerCog } from "lucide-react"
+import { FilePolicyTable, type FilePolicyRow } from "./file-policy-table"
+import { MonitorSmartphone, Globe, Shuffle, CheckCircle2, CircleSlash, Info, Plug, ServerCog, FileSearch } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 // 规则管理（管理员）：UA池 / 域名规则 / 端点级精确限制 / 请求篡改
@@ -22,7 +23,7 @@ export default async function AdminRulesPage({
   const sp = await searchParams
   const q = parseListQuery(sp)
   const f = q.filters
-  const tab = f.tab === "domain" ? "domain" : f.tab === "endpoint" ? "endpoint" : f.tab === "modify" ? "modify" : "ua"
+  const tab = f.tab === "domain" ? "domain" : f.tab === "endpoint" ? "endpoint" : f.tab === "file" ? "file" : f.tab === "modify" ? "modify" : "ua"
 
   return (
     <div className="space-y-6">
@@ -38,6 +39,7 @@ export default async function AdminRulesPage({
           { key: "ua", label: "UA池" },
           { key: "domain", label: "域名规则" },
           { key: "endpoint", label: "端点级限制" },
+          { key: "file", label: "文件限制" },
           { key: "modify", label: "请求篡改" },
         ].map((t) => (
           <Link
@@ -56,6 +58,7 @@ export default async function AdminRulesPage({
       {tab === "ua" && <UaTab q={q} f={f} />}
       {tab === "domain" && <DomainTab q={q} f={f} />}
       {tab === "endpoint" && <EndpointTab q={q} f={f} />}
+      {tab === "file" && <FilePolicyTab />}
       {tab === "modify" && <ModifyTab q={q} f={f} />}
     </div>
   )
@@ -123,7 +126,7 @@ async function DomainTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Re
   if (f.enabled) where.enabled = f.enabled === "true"
   if (f.scopeType) where.scopeType = f.scopeType
 
-  const [rows, total, statTotal, statBlack, statWhite, statEnabled, groupOpts, userOpts] = await Promise.all([
+  const [rows, total, statTotal, statBlack, statWhite, statEnabled, groupOpts, userOpts, groupOptsWs] = await Promise.all([
     db.domainRule.findMany({
       where,
       ...pageSkipTake(q),
@@ -136,11 +139,13 @@ async function DomainTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Re
     db.domainRule.count({ where: { enabled: true } }),
     db.group.findMany({ where: { deletedAt: null }, select: { id: true, name: true }, take: 200 }),
     db.user.findMany({ where: { deletedAt: null }, select: { id: true, username: true }, take: 500 }),
+    db.browserWorkspace.findMany({ where: { deletedAt: null, mode: "novnc_full" }, select: { id: true, name: true }, orderBy: { createdAt: "desc" }, take: 300 }),
   ])
 
   const creators = await db.user.findMany({ select: { id: true, username: true }, take: 300 })
   const usernameById = new Map(creators.map((u) => [u.id, u.username]))
   const groupNameById = new Map(groupOpts.map((g) => [g.id, g.name]))
+  const wsNameById = new Map(groupOptsWs.map((w) => [w.id, w.name]))
 
   const list: DomainRuleRow[] = rows.map((r) => ({
     id: r.id,
@@ -154,8 +159,10 @@ async function DomainTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Re
         ? `组：${groupNameById.get(r.groupId) || r.groupId.slice(0, 8)}`
         : (r.scopeType || "GLOBAL") === "USER" && r.userId
           ? `用户：${usernameById.get(r.userId) || r.userId.slice(0, 8)}`
-          : "全局",
-    scopeTargetId: (r.scopeType === "GROUP" ? r.groupId : r.scopeType === "USER" ? r.userId : null) || null,
+          : (r.scopeType || "GLOBAL") === "SANDBOX" && r.workspaceId
+            ? `沙箱：${wsNameById.get(r.workspaceId) || r.workspaceId.slice(0, 8)}`
+            : "全局",
+    scopeTargetId: (r.scopeType === "GROUP" ? r.groupId : r.scopeType === "USER" ? r.userId : r.scopeType === "SANDBOX" ? r.workspaceId : null) || null,
     createdByUsername: r.createdByUserId ? usernameById.get(r.createdByUserId) || "-" : "-",
     createdAt: fmtDate(r.createdAt),
   }))
@@ -186,6 +193,7 @@ async function DomainTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Re
         filters={f}
         groupOptions={groupOpts.map((g) => ({ id: g.id, name: g.name }))}
         userOptions={userOpts.map((u) => ({ id: u.id, name: u.username }))}
+        workspaceOptions={groupOptsWs.map((w) => ({ id: w.id, name: w.name }))}
       />
     </div>
   )
@@ -200,7 +208,7 @@ async function EndpointTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: 
   if (f.enabled) where.enabled = f.enabled === "true"
   if (f.scopeType) where.scopeType = f.scopeType
 
-  const [rows, total, statTotal, statBlack, statWhite, statEnabled, statScoped, groupOpts, userOpts] = await Promise.all([
+  const [rows, total, statTotal, statBlack, statWhite, statEnabled, statScoped, groupOpts, userOpts, groupOptsWs] = await Promise.all([
     db.networkEndpointRule.findMany({
       where,
       ...pageSkipTake(q),
@@ -214,11 +222,13 @@ async function EndpointTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: 
     db.networkEndpointRule.count({ where: { scopeType: { in: ["GROUP", "USER"] } } }),
     db.group.findMany({ where: { deletedAt: null }, select: { id: true, name: true }, take: 200 }),
     db.user.findMany({ where: { deletedAt: null }, select: { id: true, username: true }, take: 500 }),
+    db.browserWorkspace.findMany({ where: { deletedAt: null, mode: "novnc_full" }, select: { id: true, name: true }, orderBy: { createdAt: "desc" }, take: 300 }),
   ])
 
   const creators = await db.user.findMany({ select: { id: true, username: true }, take: 300 })
   const usernameById = new Map(creators.map((u) => [u.id, u.username]))
   const groupNameById = new Map(groupOpts.map((g) => [g.id, g.name]))
+  const wsNameById = new Map(groupOptsWs.map((w) => [w.id, w.name]))
 
   const list: EndpointRuleRow[] = rows.map((r) => ({
     id: r.id,
@@ -232,8 +242,10 @@ async function EndpointTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: 
         ? `组：${groupNameById.get(r.groupId) || r.groupId.slice(0, 8)}`
         : (r.scopeType || "GLOBAL") === "USER" && r.userId
           ? `用户：${usernameById.get(r.userId) || r.userId.slice(0, 8)}`
-          : "全局",
-    scopeTargetId: (r.scopeType === "GROUP" ? r.groupId : r.scopeType === "USER" ? r.userId : null) || null,
+          : (r.scopeType || "GLOBAL") === "SANDBOX" && r.workspaceId
+            ? `沙箱：${wsNameById.get(r.workspaceId) || r.workspaceId.slice(0, 8)}`
+            : "全局",
+    scopeTargetId: (r.scopeType === "GROUP" ? r.groupId : r.scopeType === "USER" ? r.userId : r.scopeType === "SANDBOX" ? r.workspaceId : null) || null,
     createdByUsername: r.createdByUserId ? usernameById.get(r.createdByUserId) || "-" : "-",
     createdAt: fmtDate(r.createdAt),
   }))
@@ -274,6 +286,7 @@ async function EndpointTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: 
         filters={f}
         groupOptions={groupOpts.map((g) => ({ id: g.id, name: g.name }))}
         userOptions={userOpts.map((u) => ({ id: u.id, name: u.username }))}
+        workspaceOptions={groupOptsWs.map((w) => ({ id: w.id, name: w.name }))}
       />
     </div>
   )
@@ -330,6 +343,74 @@ async function ModifyTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Re
         sortOrder={q.sortOrder}
         filters={f}
         templateOptions={templates.map((t) => ({ id: t.id, name: t.name }))}
+      />
+    </div>
+  )
+}
+
+// ---- 文件限制策略页签（四层定向：全局/组/用户/单沙箱）----
+async function FilePolicyTab() {
+  const { resolveFilePolicy } = await import("@/lib/file-policy")
+  const [rows, groupOpts, userOpts, wsOpts] = await Promise.all([
+    db.filePolicyConfig.findMany({ orderBy: [{ scopeType: "asc" }, { updatedAt: "desc" }] }),
+    db.group.findMany({ where: { deletedAt: null }, select: { id: true, name: true }, take: 200 }),
+    db.user.findMany({ where: { deletedAt: null }, select: { id: true, username: true }, take: 500 }),
+    db.browserWorkspace.findMany({ where: { deletedAt: null, mode: "novnc_full" }, select: { id: true, name: true, userId: true }, orderBy: { createdAt: "desc" }, take: 300 }),
+  ])
+  const gMap = new Map(groupOpts.map((g) => [g.id, g.name]))
+  const uMap = new Map(userOpts.map((u) => [u.id, u.username]))
+  const wMap = new Map(wsOpts.map((w) => [w.id, w]))
+
+  // 全局生效预览（无任何条目时的系统默认）
+  const defaultPreview = await resolveFilePolicy("__nonexistent__").catch(() => null)
+
+  const list: FilePolicyRow[] = rows.map((r) => ({
+    id: r.id,
+    scopeType: r.scopeType,
+    scopeId: r.scopeId,
+    scopeLabel:
+      r.scopeType === "GLOBAL" ? "全局默认"
+      : r.scopeType === "GROUP" ? `组：${gMap.get(r.scopeId) || "(已删除)"}`
+      : r.scopeType === "USER" ? `用户：${uMap.get(r.scopeId) || "(已删除)"}`
+      : `沙箱：${wMap.get(r.scopeId)?.name || "(已删除)"}`,
+    allowDownload: r.allowDownload,
+    allowUpload: r.allowUpload,
+    allowFileScheme: r.allowFileScheme,
+    note: r.note,
+    updatedAt: fmtDate(r.updatedAt),
+  }))
+
+  const sandboxCount = rows.filter((r) => r.scopeType === "SANDBOX").length
+
+  return (
+    <div className="space-y-6">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard title="配置条目" value={rows.length} sub="四层定向总数" icon={<FileSearch className="h-4 w-4" />} />
+        <StatCard title="沙箱级条目" value={sandboxCount} sub="单沙箱定向限制" icon={<ServerCog className="h-4 w-4" />} tone="warning" />
+        <StatCard title="用户/组级条目" value={rows.filter((r) => r.scopeType === "USER" || r.scopeType === "GROUP").length} sub="USER + GROUP" icon={<Globe className="h-4 w-4" />} />
+        <StatCard
+          title="系统默认"
+          value={defaultPreview ? `${defaultPreview.allowDownload ? "下载✓" : "下载✗"} / ${defaultPreview.allowUpload ? "上传✓" : "上传✗"}` : "-"}
+          sub="无条目作用域的兜底"
+          icon={<CheckCircle2 className="h-4 w-4" />}
+          tone="success"
+        />
+      </div>
+      <div className="rounded-lg border border-teal-200 dark:border-teal-900 bg-teal-50/50 dark:bg-teal-950/20 p-4 flex gap-3">
+        <Info className="h-4 w-4 text-teal-600 shrink-0 mt-0.5" />
+        <div className="text-sm text-muted-foreground space-y-1">
+          <p>文件访问限制支持四层定向：<b>单沙箱 &gt; 用户 &gt; 用户组（沿继承链）&gt; 全局条目 &gt; 系统默认</b>，逐级覆盖。</p>
+          <p className="text-xs">
+            执行层为 Chromium 托管策略（容器内只读策略文件注入，不可篡改）：下载禁 → DownloadRestrictions=2；
+            上传禁 → 文件拾取器封禁；file:// 禁 → URLBlocklist。下载落盘仍受容器只读根 FS / noexec 下载目录约束（纵深防御）。
+          </p>
+        </div>
+      </div>
+      <FilePolicyTable
+        rows={list}
+        groupOptions={groupOpts.map((g) => ({ id: g.id, name: g.name }))}
+        userOptions={userOpts.map((u) => ({ id: u.id, name: u.username }))}
+        workspaceOptions={wsOpts.map((w) => ({ id: w.id, name: w.name }))}
       />
     </div>
   )

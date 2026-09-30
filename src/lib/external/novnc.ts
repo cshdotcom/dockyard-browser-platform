@@ -70,6 +70,7 @@ export interface NovncProvisionParams {
   networkPolicy?: NetworkPolicy // 生效网络访问管控（内网/容器安全位置），自托管模式强制下发
   domainPolicy?: DomainPolicy | null // 生效域名黑白名单（作用域合并后），同层下发
   endpointPolicy?: EndpointPolicy | null // 生效端点级精确限制（host:port），同层下发
+  filePolicy?: import("../file-policy").FilePolicy | null // 生效文件访问限制（四层合并：单沙箱>用户>组>全局）
 }
 
 export async function createNovncSession(params: NovncProvisionParams): Promise<NovncSession> {
@@ -135,7 +136,7 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       : null
     const policyFile =
       params.userId && params.profileKey
-        ? await writeNetworkPolicyFile(`ws-${params.profileKey}`, { policy, gatewayIp, proxyUrl: params.proxyUrl || null, domainPolicy: params.domainPolicy || null, endpointPolicy: params.endpointPolicy || null, crxManagedPolicy: crxManaged }).catch(() => null)
+        ? await writeNetworkPolicyFile(`ws-${params.profileKey}`, { policy, gatewayIp, proxyUrl: params.proxyUrl || null, domainPolicy: params.domainPolicy || null, endpointPolicy: params.endpointPolicy || null, crxManagedPolicy: crxManaged, filePolicy: params.filePolicy || null }).catch(() => null)
         : null
     const spec: BrowserHardeningSpec = {
       image: ENV.browserImage,

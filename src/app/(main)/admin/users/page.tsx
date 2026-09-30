@@ -107,8 +107,8 @@ export default async function AdminUsersPage({
     groupsByUser.set(m.userId, arr)
   }
 
-  // 当前页用户生效网络策略（批量解析：用户覆盖 > 组继承 > 全局默认）
-  const netPolicies = await resolveNetworkPoliciesBatch(userIds)
+  // 当前页用户生效网络策略（批量解析：沙箱覆盖 > 用户覆盖 > 组继承 > 全局默认；用户列表按用户维度）
+  const netPolicies = await resolveNetworkPoliciesBatch(userIds.map((uid) => ({ userId: uid })))
 
   const list: AdminUserRow[] = rows.map((u) => ({
     id: u.id,

@@ -1,7 +1,7 @@
 import { db } from "@/lib/db"
 import { requireAdmin } from "@/lib/permissions"
 import { fmtDate } from "@/lib/utils-server"
-import { PolicyDeployCenter, type DeploymentRow, type TargetOptionUser, type TargetOptionGroup, type TemplateRow } from "./deploy-center"
+import { PolicyDeployCenter, type DeploymentRow, type TargetOptionUser, type TargetOptionGroup, type TargetOptionWorkspace, type TemplateRow } from "./deploy-center"
 import { ShieldCheck, Users, Layers, Undo2, Clock, Timer } from "lucide-react"
 
 // 策略下发中心（管理员）：按用户/用户组批量下发访问控制策略包 + 批次历史 + 回滚
@@ -41,6 +41,16 @@ export default async function AdminPoliciesPage() {
         }
         return names.join(" / ")
       }
+      const [workspaces, wsOwners] = await Promise.all([
+        db.browserWorkspace.findMany({
+          where: { deletedAt: null, mode: "novnc_full" },
+          select: { id: true, name: true, status: true, mode: true, userId: true },
+          orderBy: { createdAt: "desc" },
+          take: 300,
+        }),
+        db.user.findMany({ where: { deletedAt: null }, select: { id: true, username: true } }),
+      ])
+      const ownerName = new Map(wsOwners.map((u) => [u.id, u.username]))
       return {
         groups: groups.map((g) => ({ id: g.id, name: g.name, memberCount: memberCount.get(g.id) || 0, path: groupPath(g.id) })),
         users: users.map((u) => ({
@@ -49,6 +59,13 @@ export default async function AdminPoliciesPage() {
           displayName: u.displayName,
           role: u.role,
           groupNames: (groupsByUser.get(u.id) || []).map((gid) => groupById.get(gid)?.name).filter(Boolean) as string[],
+        })),
+        workspaces: workspaces.map((w) => ({
+          id: w.id,
+          name: w.name,
+          ownerUsername: ownerName.get(w.userId) || "-",
+          status: w.status,
+          mode: w.mode,
         })),
       }
     })(),
@@ -112,6 +129,7 @@ export default async function AdminPoliciesPage() {
       templates={templateRows}
       targetGroups={targetOptions.groups as TargetOptionGroup[]}
       targetUsers={targetOptions.users as TargetOptionUser[]}
+      targetWorkspaces={targetOptions.workspaces as TargetOptionWorkspace[]}
       stats={stats}
     />
   )

@@ -91,7 +91,7 @@ async function main() {
   check("无组无覆盖 → 全局默认拒绝", p4.allowInternalNetwork === false && p4.allowSecureLocationAccess === false && p4.source === "GLOBAL_DEFAULT")
 
   // 4.5 批量解析与单点一致
-  const batch = await resolveNetworkPoliciesBatch([user.id])
+  const batch = await resolveNetworkPoliciesBatch([{ userId: user.id }])
   check("批量解析返回结果", batch.has(user.id))
   const bp = batch.get(user.id)!
   check("批量与单点一致", bp.allowInternalNetwork === p4.allowInternalNetwork && bp.allowSecureLocationAccess === p4.allowSecureLocationAccess)

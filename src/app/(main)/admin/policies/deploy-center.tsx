@@ -11,7 +11,7 @@ import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import {
   Layers, Users, ShieldCheck, Undo2, Send, Search, Loader2, Save, Trash2, ChevronDown, ChevronRight,
-  Network, Lock, Globe, CircleSlash, CheckCircle2, Ban, Info, Clock, Timer, CalendarClock, XCircle, Plug,
+  Network, Lock, Globe, CircleSlash, CheckCircle2, Ban, Info, Clock, Timer, CalendarClock, XCircle, Plug, MonitorSmartphone,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -58,12 +58,14 @@ export interface TemplateRow {
 
 export interface TargetOptionGroup { id: string; name: string; memberCount: number; path: string }
 export interface TargetOptionUser { id: string; username: string; displayName: string | null; role: string; groupNames: string[] }
+export interface TargetOptionWorkspace { id: string; name: string; ownerUsername: string; status: string; mode: string }
 
 interface Props {
   deployments: DeploymentRow[]
   templates: TemplateRow[]
   targetGroups: TargetOptionGroup[]
   targetUsers: TargetOptionUser[]
+  targetWorkspaces: TargetOptionWorkspace[]
   stats: { title: string; value: number; sub: string; icon: React.ReactNode; tone?: "default" | "warning" | "success" | "danger" }[]
 }
 
@@ -81,6 +83,10 @@ interface BundleForm {
   endpointEnabled: boolean
   endpointMode: "BLACKLIST" | "WHITELIST"
   endpointText: string
+  fileEnabled: boolean
+  fileDownload: TriState
+  fileUpload: TriState
+  fileScheme: TriState
 }
 
 const DEFAULT_FORM: BundleForm = {
@@ -95,6 +101,10 @@ const DEFAULT_FORM: BundleForm = {
   endpointEnabled: false,
   endpointMode: "BLACKLIST",
   endpointText: "",
+  fileEnabled: false,
+  fileDownload: "keep",
+  fileUpload: "keep",
+  fileScheme: "keep",
 }
 
 function triValue(t: TriState): boolean | null {
@@ -146,7 +156,16 @@ function bundleSummary(b: Record<string, unknown>): string[] {
   const i = b.ipRules as { mode?: string; values?: string[] } | null
   if (i) parts.push(i.mode === "WHITELIST" ? `IP 白名单 ${i.values?.length || 0} 项` : `IP 黑名单 ${i.values?.length || 0} 项`)
   const e = b.endpointRules as { mode?: string; patterns?: string[] } | null
+  const f = b.fileRules as { allowDownload?: boolean; allowUpload?: boolean; allowFileScheme?: boolean } | null
   if (e) parts.push(e.mode === "WHITELIST" ? `端点放行例外 ${e.patterns?.length || 0} 项` : `端点封禁 ${e.patterns?.length || 0} 项`)
+  if (f) {
+    const fp: string[] = []
+    if (f.allowDownload === false) fp.push("禁下载")
+    if (f.allowUpload === false) fp.push("禁上传")
+    if (f.allowFileScheme === true) fp.push("开 file://")
+    else if (f.allowDownload !== false && f.allowUpload !== false) fp.push("禁 file://")
+    if (fp.length > 0) parts.push(`文件限制：${fp.join("/")}`)
+  }
   return parts
 }
 
@@ -168,6 +187,7 @@ export function PolicyDeployCenter(props: Props) {
   const [form, setForm] = React.useState<BundleForm>(DEFAULT_FORM)
   const [selectedGroups, setSelectedGroups] = React.useState<Set<string>>(new Set())
   const [selectedUsers, setSelectedUsers] = React.useState<Set<string>>(new Set())
+  const [selectedWorkspaces, setSelectedWorkspaces] = React.useState<Set<string>>(new Set())
   const [targetSearch, setTargetSearch] = React.useState("")
   const [deployName, setDeployName] = React.useState("")
   const [deployNote, setDeployNote] = React.useState("")
@@ -199,7 +219,7 @@ export function PolicyDeployCenter(props: Props) {
     setEffectiveAt(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`)
   }
 
-  const totalTargets = selectedGroups.size + selectedUsers.size
+  const totalTargets = selectedGroups.size + selectedUsers.size + selectedWorkspaces.size
   const affectedEstimate = React.useMemo(() => {
     const groupMemberSum = props.targetGroups
       .filter((g) => selectedGroups.has(g.id))
@@ -212,6 +232,9 @@ export function PolicyDeployCenter(props: Props) {
   )
   const filteredUsers = props.targetUsers.filter((u) =>
     !targetSearch || u.username.includes(targetSearch) || (u.displayName || "").includes(targetSearch) || u.groupNames.some((n) => n.includes(targetSearch)),
+  )
+  const filteredWorkspaces = props.targetWorkspaces.filter((w) =>
+    !targetSearch || w.name.includes(targetSearch) || w.ownerUsername.includes(targetSearch),
   )
 
   const buildBundle = () => ({
@@ -226,10 +249,18 @@ export function PolicyDeployCenter(props: Props) {
     endpointRules: form.endpointEnabled
       ? { mode: form.endpointMode, patterns: form.endpointText.split(/[\n,，\s]+/).map((s) => s.trim()).filter(Boolean) }
       : null,
+    fileRules: form.fileEnabled && (triValue(form.fileDownload) !== null || triValue(form.fileUpload) !== null || triValue(form.fileScheme) !== null)
+      ? {
+          allowDownload: triValue(form.fileDownload) !== null ? triValue(form.fileDownload)! : true,
+          allowUpload: triValue(form.fileUpload) !== null ? triValue(form.fileUpload)! : true,
+          allowFileScheme: triValue(form.fileScheme) !== null ? triValue(form.fileScheme)! : false,
+        }
+      : null,
   })
 
   const hasContent = () =>
     triValue(form.internal) !== null || triValue(form.secure) !== null || form.domainEnabled || form.ipEnabled || form.endpointEnabled
+    || (form.fileEnabled && (triValue(form.fileDownload) !== null || triValue(form.fileUpload) !== null || triValue(form.fileScheme) !== null))
 
   const loadTemplate = (tpl: TemplateRow) => {
     const b = (tpl.bundle || {}) as Record<string, unknown>
@@ -245,6 +276,10 @@ export function PolicyDeployCenter(props: Props) {
       endpointEnabled: !!b.endpointRules,
       endpointMode: ((b.endpointRules as { mode?: string } | null)?.mode === "WHITELIST" ? "WHITELIST" : "BLACKLIST"),
       endpointText: ((b.endpointRules as { patterns?: string[] } | null)?.patterns || []).join("\n"),
+      fileEnabled: !!b.fileRules,
+      fileDownload: (b.fileRules as { allowDownload?: boolean } | null)?.allowDownload === true ? "allow" : (b.fileRules as { allowDownload?: boolean } | null)?.allowDownload === false ? "deny" : "keep",
+      fileUpload: (b.fileRules as { allowUpload?: boolean } | null)?.allowUpload === true ? "allow" : (b.fileRules as { allowUpload?: boolean } | null)?.allowUpload === false ? "deny" : "keep",
+      fileScheme: (b.fileRules as { allowFileScheme?: boolean } | null)?.allowFileScheme === true ? "allow" : (b.fileRules as { allowFileScheme?: boolean } | null)?.allowFileScheme === false ? "deny" : "keep",
     })
     toast.success(`已加载模板「${tpl.name}」`)
   }
@@ -262,6 +297,7 @@ export function PolicyDeployCenter(props: Props) {
         bundle: buildBundle(),
         targetGroupIds: [...selectedGroups],
         targetUserIds: [...selectedUsers],
+        targetWorkspaceIds: [...selectedWorkspaces],
         effectiveAt: effectiveAtLocalIso,
       })
       if (res.code === 0 && res.data) {
@@ -362,7 +398,7 @@ export function PolicyDeployCenter(props: Props) {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">策略下发中心</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          按用户 / 用户组批量下发访问控制策略包（内网访问 · 容器安全位置 · 域名黑白名单 · IP 黑白名单 · 端点级精确限制），支持定时生效；全量前置快照、一键回滚、逐目标失败隔离
+          按【用户 / 用户组 / 单沙箱】三级定向批量下发访问控制策略包（内网访问 · 容器安全位置 · 域名黑白名单 · IP 黑白名单 · 端点级精确限制 · 文件限制），支持定时生效；全量前置快照、一键回滚、逐目标失败隔离；沙箱目标即时重刷策略文件并重启浏览器进程生效
         </p>
       </div>
 
@@ -506,6 +542,44 @@ export function PolicyDeployCenter(props: Props) {
             )}
           </div>
 
+          {/* 文件限制（下载/上传/file://） */}
+          <div className="rounded-xl border p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold flex items-center gap-1.5">
+                <MonitorSmartphone className="h-4 w-4 text-teal-600" />
+                文件访问限制（下载 / 上传 / file://）
+              </h2>
+              <Switch checked={form.fileEnabled} onCheckedChange={(v) => setForm({ ...form, fileEnabled: v })} />
+            </div>
+            {form.fileEnabled ? (
+              <div className="space-y-2">
+                <TriToggle
+                  label="允许文件下载"
+                  desc="禁止 → Chromium DownloadRestrictions=2 全禁下载"
+                  value={form.fileDownload}
+                  onChange={(v) => setForm({ ...form, fileDownload: v })}
+                />
+                <TriToggle
+                  label="允许文件上传"
+                  desc="禁止 → 文件拾取器封禁（AllowFileSelectionDialogs=false）"
+                  value={form.fileUpload}
+                  onChange={(v) => setForm({ ...form, fileUpload: v })}
+                />
+                <TriToggle
+                  label="允许 file:// 本地访问"
+                  desc="系统默认禁止；开启需明确放行（沙箱内本地文件浏览）"
+                  value={form.fileScheme}
+                  onChange={(v) => setForm({ ...form, fileScheme: v })}
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  三项均为「不修改=保持目标现有配置」；对运行中沙箱目标即时重刷策略文件并重启浏览器进程生效
+                </p>
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">关闭时不修改目标现有文件限制配置</p>
+            )}
+          </div>
+
           {/* 模板 */}
           <div className="rounded-xl border p-4 space-y-3">
             <div className="flex items-center justify-between">
@@ -624,6 +698,43 @@ export function PolicyDeployCenter(props: Props) {
                     )
                   })}
                   {filteredUsers.length === 0 && <p className="text-xs text-muted-foreground p-2">无匹配用户</p>}
+                </div>
+              </ScrollArea>
+
+              <p className="text-[11px] font-medium text-muted-foreground flex items-center justify-between pt-1">
+                <span className="flex items-center gap-1"><MonitorSmartphone className="h-3 w-3" /> 单沙箱（{filteredWorkspaces.length}）—— 最高优先定向</span>
+                <button
+                  className="text-teal-600 hover:underline"
+                  onClick={() => {
+                    if (selectedWorkspaces.size === filteredWorkspaces.length) setSelectedWorkspaces(new Set())
+                    else setSelectedWorkspaces(new Set(filteredWorkspaces.map((w) => w.id)))
+                  }}
+                >全选/清空</button>
+              </p>
+              <ScrollArea className="h-40 rounded-lg border">
+                <div className="p-2 space-y-0.5">
+                  {filteredWorkspaces.map((w) => {
+                    const checked = selectedWorkspaces.has(w.id)
+                    return (
+                      <label key={w.id} className={cn("flex items-center gap-2 rounded-md px-2 py-1.5 cursor-pointer text-xs hover:bg-muted/50", checked && "bg-teal-600/10")}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            const next = new Set(selectedWorkspaces)
+                            if (checked) next.delete(w.id)
+                            else next.add(w.id)
+                            setSelectedWorkspaces(next)
+                          }}
+                          className="accent-teal-600 h-3.5 w-3.5"
+                        />
+                        <span className="font-medium truncate">{w.name}</span>
+                        <span className="text-muted-foreground">@{w.ownerUsername}</span>
+                        <span className={cn("ml-auto text-[10px] shrink-0", w.status === "RUNNING" ? "text-emerald-600" : "text-muted-foreground")}>{w.status}</span>
+                      </label>
+                    )
+                  })}
+                  {filteredWorkspaces.length === 0 && <p className="text-xs text-muted-foreground p-2">无匹配沙箱（仅 NoVNC 重度沙箱支持定向下发）</p>}
                 </div>
               </ScrollArea>
             </div>
@@ -789,7 +900,7 @@ export function PolicyDeployCenter(props: Props) {
                           <tbody>
                             {d.results.map((r, i) => (
                               <tr key={i} className="border-t">
-                                <td className="p-2">{r.targetType === "GROUP" ? "用户组" : "用户"}</td>
+                                <td className="p-2">{r.targetType === "GROUP" ? "用户组" : r.targetType === "SANDBOX" ? "单沙箱" : "用户"}</td>
                                 <td className="p-2">{r.targetName}</td>
                                 <td className="p-2">{r.ok ? <span className="text-emerald-600">成功</span> : <span className="text-red-600">失败</span>}</td>
                                 <td className="p-2 text-muted-foreground">{r.reason || "-"}</td>
@@ -815,7 +926,7 @@ export function PolicyDeployCenter(props: Props) {
           </DialogHeader>
           <div className="space-y-3 text-sm">
             <p>
-              批次「{deployName || "（未命名）"}」将{effectiveMode === "SCHEDULED" ? "定时排期给" : "下发给"} <b>{selectedGroups.size}</b> 个用户组与 <b>{selectedUsers.size}</b> 个用户
+              批次「{deployName || "（未命名）"}」将{effectiveMode === "SCHEDULED" ? "定时排期给" : "下发给"} <b>{selectedGroups.size}</b> 个用户组、<b>{selectedUsers.size}</b> 个用户与 <b>{selectedWorkspaces.size}</b> 个单沙箱
               （影响约 {affectedEstimate} 名用户）{effectiveMode === "SCHEDULED" && effectiveAt ? `，生效时刻 ${effectiveAt.replace("T", " ")}` : ""}。
             </p>
             <ul className="list-disc pl-5 text-xs text-muted-foreground space-y-1">

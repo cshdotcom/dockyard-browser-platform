@@ -25,7 +25,7 @@ export interface EndpointRuleRow {
   type: string
   enabled: boolean
   note: string | null
-  scopeType: string // GLOBAL | GROUP | USER
+  scopeType: string // GLOBAL | GROUP | USER | SANDBOX
   scopeLabel: string
   scopeTargetId: string | null
   createdByUsername: string
@@ -43,6 +43,7 @@ interface Props {
   filters: Record<string, string>
   groupOptions: { id: string; name: string }[]
   userOptions: { id: string; name: string }[]
+  workspaceOptions: { id: string; name: string }[]
 }
 
 export function EndpointRulesTable(props: Props) {
@@ -83,19 +84,19 @@ export function EndpointRulesTable(props: Props) {
 
   const [formOpen, setFormOpen] = React.useState(false)
   const [editing, setEditing] = React.useState<EndpointRuleRow | null>(null)
-  const [form, setForm] = React.useState({ pattern: "", type: "BLACK", enabled: true, note: "", scopeType: "GLOBAL", groupId: "", userId: "", priority: 0 })
+  const [form, setForm] = React.useState({ pattern: "", type: "BLACK", enabled: true, note: "", scopeType: "GLOBAL", groupId: "", userId: "", workspaceId: "", priority: 0 })
   const [formBusy, setFormBusy] = React.useState(false)
 
   const openCreate = () => {
     setEditing(null)
-    setForm({ pattern: "", type: "BLACK", enabled: true, note: "", scopeType: "GLOBAL", groupId: "", userId: "", priority: 0 })
+    setForm({ pattern: "", type: "BLACK", enabled: true, note: "", scopeType: "GLOBAL", groupId: "", userId: "", workspaceId: "", priority: 0 })
     setFormOpen(true)
   }
   const openEdit = (row: EndpointRuleRow) => {
     setEditing(row)
     setForm({
       pattern: row.pattern, type: row.type, enabled: row.enabled, note: row.note || "",
-      scopeType: row.scopeType, groupId: row.scopeType === "GROUP" ? row.scopeTargetId || "" : "", userId: row.scopeType === "USER" ? row.scopeTargetId || "" : "", priority: 0,
+      scopeType: row.scopeType, groupId: row.scopeType === "GROUP" ? row.scopeTargetId || "" : "", userId: row.scopeType === "USER" ? row.scopeTargetId || "" : "", workspaceId: row.scopeType === "SANDBOX" ? row.scopeTargetId || "" : "", priority: 0,
     })
     setFormOpen(true)
   }
@@ -104,6 +105,7 @@ export function EndpointRulesTable(props: Props) {
     if (!form.pattern.trim()) return toast.error("请填写端点模式")
     if (form.scopeType === "GROUP" && !form.groupId) return toast.error("组级规则请选择用户组")
     if (form.scopeType === "USER" && !form.userId) return toast.error("用户级规则请选择用户")
+    if (form.scopeType === "SANDBOX" && !form.workspaceId) return toast.error("沙箱级规则请选择目标沙箱")
     setFormBusy(true)
     try {
       const res = await saveEndpointRuleAction({
@@ -115,6 +117,7 @@ export function EndpointRulesTable(props: Props) {
         scopeType: form.scopeType,
         groupId: form.scopeType === "GROUP" ? form.groupId : null,
         userId: form.scopeType === "USER" ? form.userId : null,
+        workspaceId: form.scopeType === "SANDBOX" ? form.workspaceId : null,
         priority: Number(form.priority) || 0,
       })
       if (res.code === 0) {
@@ -161,7 +164,9 @@ export function EndpointRulesTable(props: Props) {
               ? "border-violet-400/50 text-violet-500"
               : row.scopeType === "GROUP"
                 ? "border-amber-400/50 text-amber-500"
-                : "border-slate-400/50 text-slate-400"
+                : row.scopeType === "SANDBOX"
+                  ? "border-teal-400/50 text-teal-500"
+                  : "border-slate-400/50 text-slate-400"
           }
         >
           {row.scopeLabel}
@@ -203,7 +208,7 @@ export function EndpointRulesTable(props: Props) {
         sortOrder={sortOrder}
         filters={[
           { key: "type", placeholder: "类型", options: [{ label: "封禁", value: "BLACK" }, { label: "放行例外", value: "WHITE" }] },
-          { key: "scopeType", placeholder: "作用域", options: [{ label: "全局", value: "GLOBAL" }, { label: "用户组", value: "GROUP" }, { label: "用户", value: "USER" }] },
+          { key: "scopeType", placeholder: "作用域", options: [{ label: "全局", value: "GLOBAL" }, { label: "用户组", value: "GROUP" }, { label: "用户", value: "USER" }, { label: "单沙箱", value: "SANDBOX" }] },
           { key: "enabled", placeholder: "状态", options: [{ label: "生效", value: "true" }, { label: "停用", value: "false" }] },
         ]}
         rowActions={(row) => (
@@ -264,7 +269,7 @@ export function EndpointRulesTable(props: Props) {
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
                 <Label>作用域</Label>
-                <Select value={form.scopeType} onValueChange={(v) => setForm({ ...form, scopeType: v, groupId: "", userId: "" })}>
+                <Select value={form.scopeType} onValueChange={(v) => setForm({ ...form, scopeType: v, groupId: "", userId: "", workspaceId: "" })}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="GLOBAL">全局（全部会话生效）</SelectItem>
@@ -296,6 +301,19 @@ export function EndpointRulesTable(props: Props) {
                       ))}
                     </SelectContent>
                   </Select>
+                </div>
+              ) : form.scopeType === "SANDBOX" ? (
+                <div className="space-y-1.5">
+                  <Label>目标沙箱</Label>
+                  <Select value={form.workspaceId} onValueChange={(v) => setForm({ ...form, workspaceId: v })}>
+                    <SelectTrigger><SelectValue placeholder="选择 NoVNC 沙箱" /></SelectTrigger>
+                    <SelectContent className="max-h-64">
+                      {props.workspaceOptions.map((w) => (
+                        <SelectItem key={w.id} value={w.id}>{w.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[10px] text-muted-foreground">仅作用于该沙箱（四层最高优先）</p>
                 </div>
               ) : (
                 <div className="space-y-1.5">

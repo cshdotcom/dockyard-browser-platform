@@ -113,7 +113,7 @@ async function main() {
   ok("用户级放行例外解析", ep2.whitePatterns.includes("internal.corp.example:8443"))
   ok("来源标记 USER/GROUP", ep2.rules.some((r) => r.source === "USER") && ep2.rules.some((r) => r.source === "GROUP"))
 
-  const epBatch = await resolveEndpointPoliciesBatch([demo.id, admin.id])
+  const epBatch = await resolveEndpointPoliciesBatch([{ userId: demo.id }, { userId: admin.id }])
   ok("批量端点解析", epBatch.size === 2 && epBatch.get(demo.id)!.blackPatterns.includes("10.9.9.9:7777"))
 
   // 2.3 合并注入 Chromium 托管策略

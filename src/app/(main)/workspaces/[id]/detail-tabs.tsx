@@ -24,6 +24,7 @@ import {
   revokeShareAction, exportWorkspaceConfigAction, exportHarAction, runScriptAction,
   refreshVncKeyAction, updateWorkspaceAction, switchProxyAction, restartBrowserProcessAction,
 } from "@/server/actions/workspaces"
+import { setWorkspacePolicyOverrideAction, refreshWorkspacePolicyAction } from "@/server/actions/rules"
 import { HelmPortViewer } from "@/components/vnc/helmport-viewer"
 import { cn } from "@/lib/utils"
 
@@ -41,6 +42,14 @@ export interface WorkspaceDetailData {
   ownerName: string; ownerEmail: string | null; creatorName: string | null
   isOwner: boolean; mySharePermission: string | null; isAdmin: boolean
   crashCategory: string | null
+  policyAllowInternalNetwork: boolean | null
+  policyAllowSecureLocationAccess: boolean | null
+  effectivePolicy: {
+    network: { allowInternalNetwork: boolean; allowSecureLocationAccess: boolean; source: string }
+    domain: { mode: string; black: number; white: number; rules: number }
+    endpoint: { black: number; white: number }
+    file: { allowDownload: boolean; allowUpload: boolean; allowFileScheme: boolean; source: string }
+  } | null
 }
 
 interface ShareRow { id: string; targetName: string; permission: string; expireAt: string | null; createdAt: string }
@@ -121,7 +130,7 @@ export function WorkspaceDetail({
           </h1>
           <p className="text-xs text-muted-foreground font-mono">UUID {workspace.uuid}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 max-w-full">
           {(workspace.status === "RUNNING" || workspace.status === "IDLE") && canOperate && (
             <Button variant="outline" size="sm" onClick={stop} disabled={!!busy}>
               {busy === "stop" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <StopCircle className="mr-1 h-3.5 w-3.5" />} 停止
@@ -205,7 +214,8 @@ export function WorkspaceDetail({
             <CdpPanel workspace={workspace} canOperate={canOperate} />
           </TabsContent>
         )}
-        <TabsContent value="network" className="mt-4">
+        <TabsContent value="network" className="mt-4 space-y-4">
+          {workspace.isAdmin && <SandboxPolicyPanel workspace={workspace} />}
           <NetworkPanel workspace={workspace} canOperate={canOperate} />
         </TabsContent>
         <TabsContent value="script" className="mt-4">
@@ -516,6 +526,148 @@ function CdpPanel({ workspace, canOperate }: { workspace: WorkspaceDetailData; c
 }
 
 // ================= 网络与代理面板 =================
+// ================= 沙箱级策略覆盖面板（四层定向最高优先 · 管理员）=================
+function SandboxPolicyPanel({ workspace }: { workspace: WorkspaceDetailData }) {
+  const router = useRouter()
+  const [busy, setBusy] = React.useState(false)
+  const [internal, setInternal] = React.useState<"inherit" | "allow" | "deny">(
+    workspace.policyAllowInternalNetwork === true ? "allow" : workspace.policyAllowInternalNetwork === false ? "deny" : "inherit",
+  )
+  const [secure, setSecure] = React.useState<"inherit" | "allow" | "deny">(
+    workspace.policyAllowSecureLocationAccess === true ? "allow" : workspace.policyAllowSecureLocationAccess === false ? "deny" : "inherit",
+  )
+
+  const tri = (v: "inherit" | "allow" | "deny"): boolean | null => (v === "inherit" ? null : v === "allow")
+
+  const save = async () => {
+    setBusy(true)
+    try {
+      const res = await setWorkspacePolicyOverrideAction({
+        workspaceId: workspace.id,
+        allowInternalNetwork: tri(internal),
+        allowSecureLocationAccess: tri(secure),
+        restartNow: true,
+      })
+      if (res.code === 0 && res.data) {
+        const eff = res.data.effective
+        toast.success("沙箱级覆盖已保存", {
+          description: `生效：内网${eff.allowInternalNetwork ? "允许" : "禁止"} · 安全位置${eff.allowSecureLocationAccess ? "允许" : "禁止"}（来源 ${eff.source}）${res.data.restarted ? " · 已重启浏览器进程即时生效" : ""}`,
+        })
+        router.refresh()
+      } else toast.error(res.msg)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "保存失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const refresh = async () => {
+    setBusy(true)
+    try {
+      const res = await refreshWorkspacePolicyAction({ id: workspace.id })
+      if (res.code === 0 && res.data) {
+        const eff = res.data.effective as Record<string, Record<string, unknown>>
+        toast.success("策略已即时刷新", {
+          description: `四层重解析完成${res.data.restarted ? " · 浏览器进程已重启生效" : ""}（网络来源 ${(eff.network as { source?: string })?.source ?? "-"} / 文件来源 ${(eff.file as { source?: string })?.source ?? "-"}）`,
+        })
+        router.refresh()
+      } else toast.error(res.msg)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "刷新失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const eff = workspace.effectivePolicy
+  const sourceLabel = (src: string) =>
+    src === "SANDBOX" ? "沙箱级覆盖" : src === "USER" ? "用户级" : src === "GROUP" ? "组级继承" : src === "GLOBAL" ? "全局" : src === "GLOBAL_DEFAULT" ? "全局默认" : src === "DEFAULT" ? "系统默认" : src
+
+  const TriSeg = ({ value, onChange }: { value: "inherit" | "allow" | "deny"; onChange: (v: "inherit" | "allow" | "deny") => void }) => (
+    <div className="flex items-center rounded-lg border p-0.5 shrink-0">
+      {(["inherit", "deny", "allow"] as const).map((v) => (
+        <button
+          key={v}
+          type="button"
+          onClick={() => onChange(v)}
+          className={cn(
+            "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+            value === v ? (v === "allow" ? "bg-emerald-600 text-white" : v === "deny" ? "bg-red-600 text-white" : "bg-slate-600 text-white") : "text-muted-foreground hover:text-foreground",
+          )}
+        >{v === "inherit" ? "继承上层" : v === "deny" ? "禁止" : "允许"}</button>
+      ))}
+    </div>
+  )
+
+  if (workspace.mode !== "novnc_full") return null
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-1.5"><ShieldCheck className="h-4 w-4 text-teal-600" /> 沙箱级策略定向（单沙箱最高优先）</CardTitle>
+        <CardDescription>
+          本沙箱覆盖值优先于用户/用户组/全局；保存后立即重刷策略文件并重启浏览器进程（约 1 秒）。
+          域名/端点/IP 黑白名单与文件限制的单沙箱定向请在「规则管理」与「策略下发中心」配置。
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="flex items-center justify-between rounded-lg border p-3 gap-3">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">访问内网（RFC1918 / 链路本地 / 云元数据）</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                当前生效：{eff ? `${eff.network.allowInternalNetwork ? "允许" : "禁止"}（${sourceLabel(eff.network.source)}）` : "-"}
+              </p>
+            </div>
+            <TriSeg value={internal} onChange={setInternal} />
+          </div>
+          <div className="flex items-center justify-between rounded-lg border p-3 gap-3">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">访问容器内安全位置（CDP/VNC 端口 / chrome://）</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                当前生效：{eff ? `${eff.network.allowSecureLocationAccess ? "允许" : "禁止"}（${sourceLabel(eff.network.source)}）` : "-"}
+              </p>
+            </div>
+            <TriSeg value={secure} onChange={setSecure} />
+          </div>
+        </div>
+
+        {eff && (
+          <div className="rounded-lg border bg-muted/40 p-3 grid gap-2 text-xs sm:grid-cols-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">域名黑白名单</span>
+              <span>{eff.domain.mode === "WHITELIST" ? `白名单严格 · 放行 ${eff.domain.white} 项` : `黑名单 · 拦截 ${eff.domain.black} 项`}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">端点级限制</span>
+              <span>拦截 {eff.endpoint.black} 项 · 例外 {eff.endpoint.white} 项</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">文件下载</span>
+              <span className={eff.file.allowDownload ? "text-emerald-600" : "text-red-600"}>{eff.file.allowDownload ? "允许" : "禁止"}（{sourceLabel(eff.file.source)}）</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">文件上传 / file://</span>
+              <span>{eff.file.allowUpload ? "上传允许" : "上传禁止"} · {eff.file.allowFileScheme ? "file://允许" : "file://禁止"}</span>
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" className="bg-teal-600 hover:bg-teal-700" onClick={save} disabled={busy}>
+            {busy && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />} 保存覆盖（即时生效）
+          </Button>
+          <Button size="sm" variant="outline" onClick={refresh} disabled={busy}>
+            <RefreshCw className="mr-1 h-3.5 w-3.5" /> 策略即时刷新（重解析四层）
+          </Button>
+          <p className="text-[11px] text-muted-foreground">仅管理员可见；运行中沙箱刷新后浏览器进程自动重启（同 Profile）</p>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 function NetworkPanel({ workspace, canOperate }: { workspace: WorkspaceDetailData; canOperate: boolean }) {
   const router = useRouter()
   const [proxy, setProxy] = React.useState(workspace.proxyName ?? "direct")

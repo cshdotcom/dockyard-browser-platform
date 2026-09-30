@@ -472,20 +472,22 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
             const { encrypt } = await import("@/lib/crypto")
             const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
             const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${ws.id.slice(-16)}`
-            // 崩溃自愈重建：重新解析当前生效策略（管理员收紧立即作用于新容器）
-            const netPolicy = await resolveNetworkPolicy(ws.userId)
-            const domPolicy = await resolveDomainPolicyForUser(ws.userId)
-            const epPolicy = await resolveEndpointPolicyForUser(ws.userId)
+            // 崩溃自愈重建：重新解析当前生效策略（管理员收紧立即作用于新容器；四层解析含单沙箱级）
+            const netPolicy = await resolveNetworkPolicy(ws.userId, ws.id)
+            const domPolicy = await resolveDomainPolicyForUser(ws.userId, ws.id)
+            const epPolicy = await resolveEndpointPolicyForUser(ws.userId, ws.id)
+            const filePolicy = await import("@/lib/file-policy").then((m) => m.resolveFilePolicy(ws.userId, ws.id))
             const rebuilt = await createNovncSession({
               ttlMinutes: ws.ttlMinutes || undefined,
               profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
               userId: ws.userId,
               profileKey,
-              workspaceId: ws.id, // CRX 五级策略按沙箱解析注入（自愈重建同步刷新扩展策略）
+              workspaceId: ws.id, // CRX/网络/域名/端点/文件策略按沙箱级解析注入（自愈重建同步刷新）
               labels: { "dockyard.owner": ws.userId, "dockyard.recovered": "true" },
               networkPolicy: netPolicy,
               domainPolicy: domPolicy,
               endpointPolicy: epPolicy,
+              filePolicy,
             })
             await db.browserWorkspace.update({
               where: { id: ws.id },
@@ -495,7 +497,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
                 novncSessionId: rebuilt.novncSessionId, novncSecret: encrypt(rebuilt.secret),
                 containerRef: rebuilt.containerName || null,
                 hardeningJson: JSON.parse(JSON.stringify(rebuilt.hardening ? { ...rebuilt.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,
-                networkPolicyJson: JSON.parse(JSON.stringify({ ...netPolicy, domainMode: domPolicy.mode, domainBlack: domPolicy.blackPatterns, domainWhite: domPolicy.whitePatterns, endpointBlack: epPolicy.blackPatterns, endpointWhite: epPolicy.whitePatterns })) as Prisma.InputJsonValue,
+                networkPolicyJson: JSON.parse(JSON.stringify({ ...netPolicy, domainMode: domPolicy.mode, domainBlack: domPolicy.blackPatterns, domainWhite: domPolicy.whitePatterns, endpointBlack: epPolicy.blackPatterns, endpointWhite: epPolicy.whitePatterns, fileAllowDownload: filePolicy.allowDownload, fileAllowUpload: filePolicy.allowUpload, fileAllowFileScheme: filePolicy.allowFileScheme, fileSource: filePolicy.source })) as Prisma.InputJsonValue,
               },
             })
             recovered++

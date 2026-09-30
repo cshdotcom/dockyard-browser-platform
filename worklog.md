@@ -392,3 +392,30 @@ Work Log:
 
 Stage Summary:
 - 用户三项反馈全部闭环：容器停止根因双修（镜像路径 + 看门狗误判）+ 守护式入口防静默停止；GitHub 编译镜像并以等效生产运行时完成实测（CI 全绿 + 16 项功能走查）；UDP 语义按澄清修正（浏览器原汁原味，后台链路纯 TCP）
+
+---
+Task ID: 16
+Agent: main
+Task: r11 — 全策略面三级定向（用户/用户组/单沙箱）+ 文件限制策略面 + deny-wins 安全合并 + 即时生效链路
+
+Work Log:
+- 用户核心指令：确保完全安全 —— 后台所有策略配置下发都支持【用户 / 用户组 / 单个沙箱】定向限制，覆盖文件限制/内网限制/黑名单白名单
+- Prisma Schema 六处升级：DomainRule/NetworkEndpointRule/RiskListRule 加 SANDBOX 作用域（workspaceId 字段+索引）；BrowserWorkspace 加 policyAllowInternalNetwork/policyAllowSecureLocationAccess 沙箱覆盖字段；新模型 FilePolicyConfig（四层配置条目 unique[scopeType,scopeId]）；PolicyDeployment 加 targetWorkspaces
+- 解析层四模块升级：
+  · file-policy.ts 新模块：下载/上传/file:// 三维度四层解析（SANDBOX>USER>GROUP沿继承链>GLOBAL>系统默认）+ Managed Preferences 生成（DownloadRestrictions=2 / AllowFileSelectionDialogs=false / file://* 封禁）+ 批量解析（组链缓存防 N+1）
+  · network-policy.ts：resolveNetworkPolicy(userId, workspaceId?) 沙箱级最高优先（归属强校验防越权串扰）；批量版 pairs 化；buildChromiumManagedPolicy 接入 filePolicy（file:// 显式放行覆盖安全位置粗粒度封禁中的 file:// 条目）
+  · domain-policy.ts / endpoint-policy.ts：SANDBOX 规则层并入 + deny-wins 冲突抑制（同 pattern 同封同放 → 封禁胜出，上层封禁不可被下层豁免）；resolveAccessPolicies 返回四策略面 bundle
+- 执行层全链路：novnc.ts 传 filePolicy；workspaces.ts 创建/启动/切代理三处 + engine.ts 自愈重建全部传 workspaceId（四层解析）；networkPolicyJson 快照增 file 四字段
+- 新 actions（rules.ts 追加 6 个）：saveFilePolicy/deleteFilePolicy/listFilePolicy（四层条目 CRUD+生效链即时回显）；setWorkspacePolicyOverrideAction（沙箱网络开关覆盖+保存即重刷+USR1 重启）；refreshWorkspacePolicyAction（四层重解析→策略文件重写→浏览器进程重启）
+- network-policy-apply.ts 新模块：refreshWorkspacePolicyFile（重解析四层全策略面+CRX 五级合并+代理锁定地址保留+writeNetworkPolicyFile 落盘）
+- 部署中心引擎升级（policy-engine.ts）：bundle 加 fileRules；deploySchema 加 targetWorkspaceIds；SANDBOX 目标（快照/开关覆盖字段/规则 SANDBOX 作用域/文件条目 upsert/下发后即时重刷+进程重启）；回滚含沙箱目标与文件条目恢复；GROUP_ADMIN 越权拦截（沙箱所有者必须本组成员）
+- UI 五处：域名/端点规则表单加"单沙箱"作用域+沙箱选择器+teal 徽章；规则页新增"文件限制"页签（FilePolicyTable 四层条目+三开关卡片+生效链提示）；部署中心加沙箱目标选择区（checkbox+状态徽章）+文件限制三态策略包；工作区详情网络页签新增 SandboxPolicyPanel（管理员：三态覆盖+生效摘要四策略面+即时刷新按钮，桌面/移动双端适配）
+- 移动端修复：工作区详情头部按钮组 flex-wrap（488px→375px 无溢出）
+- 断言测试 29/29 通过（scripts/test-policy-scopes.ts）：四层逐级覆盖/组继承链/沙箱归属越权防护（文件+网络+域名+端点四面）/deny-wins/Chromium 策略注入三维度/schema 解析
+- 真实浏览器 QA（agent-browser 全 UI 流）：域名规则表单沙箱作用域→沙箱选择器→创建→列表徽章；文件限制条目创建（沙箱级禁下载禁上传）；工作区沙箱覆盖保存（SANDBOX source 落库）+ 策略即时刷新（策略文件磁盘验证：DownloadRestrictions=2 + AllowFileSelectionDialogs=false + file://* + 内网段按沙箱放行不注入）；部署中心沙箱定向下发 SUCCESS（SANDBOX 目标规则落库+策略文件即时注入 6 条方案展开）+ 回滚闭环（规则清空+文件重刷恢复+文件禁令保持）
+- 交付：download/qa-r11-screenshots.zip（12 张 / 436KB，压缩 -56.7%）
+- lint 零错误；next build 成功；测试数据全清理（工作区/规则/条目/批次/残留用户组）
+
+Stage Summary:
+- 用户"确保完全安全+全策略三级定向"指令完整落地：内网限制/安全位置/域名黑白/端点黑白/IP 黑白/文件限制（下载/上传/file://）/CRX/VNC 时长全部支持【单沙箱>用户>用户组】定向；deny-wins 保证上层封禁不可被下层豁免；沙箱归属强校验防越权串扰
+- 即时生效链路：任何作用域策略变更 → refreshWorkspacePolicyFile 四层重解析 → 策略文件重写 → USR1 浏览器进程 1 秒重启（真实容器形态；本环境模拟模式验证文件生成链路）

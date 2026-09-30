@@ -1,11 +1,14 @@
 // ============================================================
-// 策略下发中心（管理员按用户/用户组批量下发访问控制策略）
+// 策略下发中心（管理员按【用户 / 用户组 / 单沙箱】三级定向批量下发访问控制策略）
 // 策略包内容：
 //   · allowInternalNetwork        允许访问内网（null=不修改）
 //   · allowSecureLocationAccess   允许访问容器内安全位置（null=不修改）
 //   · domainRules                 域名黑白名单（null=不修改；替换目标作用域全部规则）
 //   · ipRules                     IP 黑白名单（null=不修改；替换目标作用域全部规则）
 //   · endpointRules               端点级精确限制 host:port（null=不修改；替换目标作用域全部规则）
+//   · fileRules                   文件限制：下载/上传/file://（null=不修改；upsert 目标作用域条目）
+// 沙箱目标：内网/安全位置开关 → BrowserWorkspace 覆盖字段；规则 → SANDBOX 作用域；
+//   下发后对运行中沙箱即时重刷策略文件并重启浏览器进程（USR1，1 秒内生效）
 // 定时生效（SCHEDULED）：
 //   · effectiveAt 指定未来时刻 → 批次 PENDING 落库，不立即变更
 //   · 定时任务 policy_deployment_activation（每分钟）到点自动激活执行
@@ -32,6 +35,7 @@ export interface PolicyBundle {
   domainRules: { mode: "BLACKLIST" | "WHITELIST"; patterns: string[] } | null
   ipRules: { mode: "BLACKLIST" | "WHITELIST"; values: string[] } | null
   endpointRules: { mode: "BLACKLIST" | "WHITELIST"; patterns: string[] } | null
+  fileRules: { allowDownload: boolean; allowUpload: boolean; allowFileScheme: boolean } | null
 }
 
 export const bundleSchema = z.object({
@@ -58,6 +62,14 @@ export const bundleSchema = z.object({
     })
     .nullable()
     .default(null),
+  fileRules: z
+    .object({
+      allowDownload: z.boolean().default(true),
+      allowUpload: z.boolean().default(true),
+      allowFileScheme: z.boolean().default(false),
+    })
+    .nullable()
+    .default(null),
 })
 
 export const deploySchema = z.object({
@@ -66,6 +78,7 @@ export const deploySchema = z.object({
   bundle: bundleSchema,
   targetUserIds: z.array(zId).max(200).default([]),
   targetGroupIds: z.array(zId).max(100).default([]),
+  targetWorkspaceIds: z.array(zId).max(200).default([]), // 单沙箱定向限制下发
   // 定时生效：ISO / datetime-local 字符串；留空 = 立即生效
   effectiveAt: z.string().min(4).max(40).optional().nullable(),
 })
@@ -93,13 +106,14 @@ function validIpValue(v: string): boolean {
 
 // ---- 目标快照（回滚依据；保留规则原始 deploymentId —— 回滚恢复时不污染）----
 interface TargetSnapshot {
-  targetType: "USER" | "GROUP"
+  targetType: "USER" | "GROUP" | "SANDBOX"
   targetId: string
   targetName: string
-  fields: { allowInternalNetwork?: boolean | null; allowSecureLocationAccess?: boolean | null }
+  fields: { allowInternalNetwork?: boolean | null; allowSecureLocationAccess?: boolean | null } // SANDBOX 目标 = 工作区覆盖字段原值
   domainRules: Array<{ pattern: string; type: string; enabled: boolean; note: string | null; priority: number; deploymentId: string | null }>
   ipRules: Array<{ type: string; value: string; mode: string; note: string | null; deploymentId: string | null }>
   endpointRules: Array<{ pattern: string; type: string; enabled: boolean; note: string | null; priority: number; deploymentId: string | null }>
+  filePolicy?: { allowDownload: boolean; allowUpload: boolean; allowFileScheme: boolean } | null // 下发前该作用域文件策略条目（null=无条目）
 }
 
 // ============================================================
@@ -130,14 +144,15 @@ export async function deployPolicyBundle(operator: PolicyOperator, input: unknow
   // 限流：下发为高危批量操作
   if (!rateLimit(`policyDeploy:${ctx.userId}`, 10, 60_000).allowed) throw new Error("下发操作过于频繁，请稍后再试")
 
-  const totalTargets = p.targetUserIds.length + p.targetGroupIds.length
-  if (totalTargets === 0) throw new Error("请至少选择一个下发目标（用户或用户组）")
+  const totalTargets = p.targetUserIds.length + p.targetGroupIds.length + p.targetWorkspaceIds.length
+  if (totalTargets === 0) throw new Error("请至少选择一个下发目标（用户/用户组/单沙箱）")
   if (
     p.bundle.allowInternalNetwork === null &&
     p.bundle.allowSecureLocationAccess === null &&
     !p.bundle.domainRules &&
     !p.bundle.ipRules &&
-    !p.bundle.endpointRules
+    !p.bundle.endpointRules &&
+    !p.bundle.fileRules
   ) {
     throw new Error("策略包为空：请至少配置一项下发内容")
   }
@@ -154,13 +169,20 @@ export async function deployPolicyBundle(operator: PolicyOperator, input: unknow
   const groups = p.targetGroupIds.length
     ? await db.group.findMany({ where: { id: { in: p.targetGroupIds }, deletedAt: null, enabled: true }, select: { id: true, name: true } })
     : []
+  const workspaces = p.targetWorkspaceIds.length
+    ? await db.browserWorkspace.findMany({
+        where: { id: { in: p.targetWorkspaceIds }, deletedAt: null, mode: "novnc_full" },
+        select: { id: true, name: true, userId: true },
+      })
+    : []
 
   const usersById = new Map(users.map((u) => [u.id, u]))
   const groupsById = new Map(groups.map((g) => [g.id, g]))
-  if (usersById.size + groupsById.size !== totalTargets) throw new Error("部分目标不存在或已删除，请刷新后重试")
+  const wsById = new Map(workspaces.map((w) => [w.id, w]))
+  if (usersById.size + groupsById.size + wsById.size !== totalTargets) throw new Error("部分目标不存在、已删除或非 NoVNC 沙箱，请刷新后重试")
 
   if (myAdminGroups) {
-    // 组管理员：组目标必须在本管理组集合内；用户目标必须至少属于一个本管理组
+    // 组管理员：组目标必须在本管理组集合内；用户目标必须至少属于一个本管理组；沙箱目标所有者必须属于本管理组
     for (const gid of p.targetGroupIds) {
       if (!myAdminGroups.includes(gid)) throw new Error(`组管理员仅可下发本组目标（越权组已拦截）`)
     }
@@ -172,6 +194,17 @@ export async function deployPolicyBundle(operator: PolicyOperator, input: unknow
       const covered = new Set(memberships.map((m) => m.userId))
       for (const uid of p.targetUserIds) {
         if (!covered.has(uid)) throw new Error(`组管理员仅可下发本组成员（越权用户 ${usersById.get(uid)?.username || uid} 已拦截）`)
+      }
+    }
+    if (p.targetWorkspaceIds.length) {
+      const wsOwners = [...new Set(workspaces.map((w) => w.userId))]
+      const memberships = await db.groupUser.findMany({
+        where: { userId: { in: wsOwners }, groupId: { in: myAdminGroups } },
+        select: { userId: true },
+      })
+      const covered = new Set(memberships.map((m) => m.userId))
+      for (const w of workspaces) {
+        if (!covered.has(w.userId)) throw new Error(`组管理员仅可下发本组成员的沙箱（越权沙箱 ${w.name} 已拦截）`)
       }
     }
   }
@@ -223,9 +256,11 @@ export async function deployPolicyBundle(operator: PolicyOperator, input: unknow
         domainRules: p.bundle.domainRules ? { mode: p.bundle.domainRules.mode, patterns: domainPatterns } : null,
         ipRules: p.bundle.ipRules,
         endpointRules: p.bundle.endpointRules ? { mode: p.bundle.endpointRules.mode, patterns: endpointPatterns } : null,
+        fileRules: p.bundle.fileRules ?? null,
       }),
       targetUsers: p.targetUserIds,
       targetGroups: p.targetGroupIds,
+      targetWorkspaces: p.targetWorkspaceIds,
       status: scheduled ? "PENDING" : "RUNNING",
       effectiveMode: eff.mode,
       effectiveAt: eff.at,
@@ -248,6 +283,7 @@ export async function deployPolicyBundle(operator: PolicyOperator, input: unknow
         bundle: JSON.parse(deployment.bundleJson),
         groups: groups.map((g) => g.name),
         users: users.map((u) => u.username),
+        workspaces: workspaces.map((w) => w.name),
         effectiveAt: eff.at?.toISOString(),
         totalTargets,
       },
@@ -305,6 +341,7 @@ async function applyDeploymentToTargets(deploymentId: string, bundle: PolicyBund
   if (!deployment) throw new Error("下发批次不存在")
   const targetUserIds = (deployment.targetUsers as string[]) || []
   const targetGroupIds = (deployment.targetGroups as string[]) || []
+  const targetWorkspaceIds = (deployment.targetWorkspaces as string[]) || []
 
   const users = targetUserIds.length
     ? await db.user.findMany({ where: { id: { in: targetUserIds }, deletedAt: null }, select: { id: true, username: true, displayName: true } })
@@ -312,12 +349,18 @@ async function applyDeploymentToTargets(deploymentId: string, bundle: PolicyBund
   const groups = targetGroupIds.length
     ? await db.group.findMany({ where: { id: { in: targetGroupIds }, deletedAt: null, enabled: true }, select: { id: true, name: true } })
     : []
+  const workspaces = targetWorkspaceIds.length
+    ? await db.browserWorkspace.findMany({
+        where: { id: { in: targetWorkspaceIds }, deletedAt: null, mode: "novnc_full" },
+        select: { id: true, name: true, userId: true, status: true, containerRef: true },
+      })
+    : []
 
   const snapshots: TargetSnapshot[] = []
   const results: Array<{ targetId: string; targetType: string; targetName: string; ok: boolean; reason?: string }> = []
   let affectedUsers = 0
 
-  const applyToTarget = async (targetType: "USER" | "GROUP", targetId: string, targetName: string) => {
+  const applyToTarget = async (targetType: "USER" | "GROUP" | "SANDBOX", targetId: string, targetName: string) => {
     // 前置快照
     const snapshot: TargetSnapshot = {
       targetType,
@@ -327,36 +370,62 @@ async function applyDeploymentToTargets(deploymentId: string, bundle: PolicyBund
       domainRules: [],
       ipRules: [],
       endpointRules: [],
+      filePolicy: null,
     }
-    const scopeWhere = targetType === "USER" ? { scopeType: "USER", userId: targetId } : { scopeType: "GROUP", groupId: targetId }
+    // 作用域查询键：SANDBOX 目标规则挂 workspaceId；USER/GROUP 挂各自外键
+    const scopeWhere =
+      targetType === "USER"
+        ? { scopeType: "USER", userId: targetId }
+        : targetType === "GROUP"
+          ? { scopeType: "GROUP", groupId: targetId }
+          : { scopeType: "SANDBOX", workspaceId: targetId }
+    const fileScopeKey: { scopeType: string; scopeId: string } = {
+      scopeType: targetType,
+      scopeId: targetId,
+    }
 
     if (targetType === "USER") {
       const u = await db.user.findUnique({ where: { id: targetId }, select: { allowInternalNetwork: true, allowSecureLocationAccess: true } })
       snapshot.fields = { allowInternalNetwork: u?.allowInternalNetwork ?? null, allowSecureLocationAccess: u?.allowSecureLocationAccess ?? null }
-    } else {
+    } else if (targetType === "GROUP") {
       const g = await db.group.findUnique({ where: { id: targetId }, select: { allowInternalNetwork: true, allowSecureLocationAccess: true } })
       snapshot.fields = { allowInternalNetwork: g?.allowInternalNetwork ?? null, allowSecureLocationAccess: g?.allowSecureLocationAccess ?? null }
+    } else {
+      const w = await db.browserWorkspace.findUnique({ where: { id: targetId }, select: { policyAllowInternalNetwork: true, policyAllowSecureLocationAccess: true } })
+      snapshot.fields = { allowInternalNetwork: w?.policyAllowInternalNetwork ?? null, allowSecureLocationAccess: w?.policyAllowSecureLocationAccess ?? null }
     }
-    const prevDomain = await db.domainRule.findMany({ where: scopeWhere })
+    // 文件策略条目快照（下发前）
+    const prevFile = await db.filePolicyConfig.findUnique({ where: { scopeType_scopeId: fileScopeKey } })
+    snapshot.filePolicy = prevFile ? { allowDownload: prevFile.allowDownload, allowUpload: prevFile.allowUpload, allowFileScheme: prevFile.allowFileScheme } : null
+    const prevDomain = await db.domainRule.findMany({ where: scopeWhere as never })
     snapshot.domainRules = prevDomain.map((r) => ({ pattern: r.pattern, type: r.type, enabled: r.enabled, note: r.note, priority: r.priority, deploymentId: r.deploymentId ?? null }))
-    const prevIp = await db.riskListRule.findMany({ where: { ...scopeWhere, type: { in: ["IP_BLACK", "IP_WHITE"] } } })
+    const prevIp = await db.riskListRule.findMany({ where: { ...scopeWhere, type: { in: ["IP_BLACK", "IP_WHITE"] } } as never })
     snapshot.ipRules = prevIp.map((r) => ({ type: r.type, value: r.value, mode: r.mode, note: r.note, deploymentId: r.deploymentId ?? null }))
-    const prevEp = await db.networkEndpointRule.findMany({ where: scopeWhere })
+    const prevEp = await db.networkEndpointRule.findMany({ where: scopeWhere as never })
     snapshot.endpointRules = prevEp.map((r) => ({ pattern: r.pattern, type: r.type, enabled: r.enabled, note: r.note, priority: r.priority ?? 0, deploymentId: r.deploymentId ?? null }))
     snapshots.push(snapshot)
 
-    // 1) 开关覆盖
-    const fieldUpdate: Record<string, boolean> = {}
-    if (bundle.allowInternalNetwork !== null && bundle.allowInternalNetwork !== undefined) fieldUpdate.allowInternalNetwork = bundle.allowInternalNetwork
-    if (bundle.allowSecureLocationAccess !== null && bundle.allowSecureLocationAccess !== undefined) fieldUpdate.allowSecureLocationAccess = bundle.allowSecureLocationAccess
-    if (Object.keys(fieldUpdate).length > 0) {
-      if (targetType === "USER") await db.user.update({ where: { id: targetId }, data: fieldUpdate })
-      else await db.group.update({ where: { id: targetId }, data: fieldUpdate })
+    // 1) 开关覆盖（SANDBOX 目标 → BrowserWorkspace 覆盖字段，非 null 即四层最高优先）
+    if (targetType === "SANDBOX") {
+      const wsUpdate: Record<string, boolean | null> = {}
+      if (bundle.allowInternalNetwork !== null && bundle.allowInternalNetwork !== undefined) wsUpdate.policyAllowInternalNetwork = bundle.allowInternalNetwork
+      if (bundle.allowSecureLocationAccess !== null && bundle.allowSecureLocationAccess !== undefined) wsUpdate.policyAllowSecureLocationAccess = bundle.allowSecureLocationAccess
+      if (Object.keys(wsUpdate).length > 0) {
+        await db.browserWorkspace.update({ where: { id: targetId }, data: wsUpdate })
+      }
+    } else {
+      const fieldUpdate: Record<string, boolean> = {}
+      if (bundle.allowInternalNetwork !== null && bundle.allowInternalNetwork !== undefined) fieldUpdate.allowInternalNetwork = bundle.allowInternalNetwork
+      if (bundle.allowSecureLocationAccess !== null && bundle.allowSecureLocationAccess !== undefined) fieldUpdate.allowSecureLocationAccess = bundle.allowSecureLocationAccess
+      if (Object.keys(fieldUpdate).length > 0) {
+        if (targetType === "USER") await db.user.update({ where: { id: targetId }, data: fieldUpdate })
+        else await db.group.update({ where: { id: targetId }, data: fieldUpdate })
+      }
     }
 
     // 2) 域名规则替换（同作用域全量替换，打 deploymentId 标记便于追溯）
     if (bundle.domainRules) {
-      await db.domainRule.deleteMany({ where: scopeWhere })
+      await db.domainRule.deleteMany({ where: scopeWhere as never })
       if (bundle.domainRules.patterns.length > 0) {
         const type = bundle.domainRules.mode === "WHITELIST" ? "WHITE" : "BLACK"
         await db.domainRule.createMany({
@@ -368,6 +437,7 @@ async function applyDeploymentToTargets(deploymentId: string, bundle: PolicyBund
             scopeType: targetType,
             groupId: targetType === "GROUP" ? targetId : null,
             userId: targetType === "USER" ? targetId : null,
+            workspaceId: targetType === "SANDBOX" ? targetId : null,
             deploymentId: deployment.id,
             createdByUserId: operator.userId,
           })),
@@ -377,7 +447,7 @@ async function applyDeploymentToTargets(deploymentId: string, bundle: PolicyBund
 
     // 3) IP 黑白名单替换
     if (bundle.ipRules) {
-      await db.riskListRule.deleteMany({ where: { ...scopeWhere, type: { in: ["IP_BLACK", "IP_WHITE"] } } })
+      await db.riskListRule.deleteMany({ where: { ...scopeWhere, type: { in: ["IP_BLACK", "IP_WHITE"] } } as never })
       if (bundle.ipRules.values.length > 0) {
         const type = bundle.ipRules.mode === "WHITELIST" ? "IP_WHITE" : "IP_BLACK"
         await db.riskListRule.createMany({
@@ -389,6 +459,7 @@ async function applyDeploymentToTargets(deploymentId: string, bundle: PolicyBund
             scopeType: targetType,
             groupId: targetType === "GROUP" ? targetId : null,
             userId: targetType === "USER" ? targetId : null,
+            workspaceId: targetType === "SANDBOX" ? targetId : null,
             deploymentId: deployment.id,
             createdByUserId: operator.userId,
           })),
@@ -398,7 +469,7 @@ async function applyDeploymentToTargets(deploymentId: string, bundle: PolicyBund
 
     // 4) 端点级精确限制规则替换（host:port）
     if (bundle.endpointRules) {
-      await db.networkEndpointRule.deleteMany({ where: scopeWhere })
+      await db.networkEndpointRule.deleteMany({ where: scopeWhere as never })
       if (bundle.endpointRules.patterns.length > 0) {
         const type = bundle.endpointRules.mode === "WHITELIST" ? "WHITE" : "BLACK"
         await db.networkEndpointRule.createMany({
@@ -410,6 +481,7 @@ async function applyDeploymentToTargets(deploymentId: string, bundle: PolicyBund
             scopeType: targetType,
             groupId: targetType === "GROUP" ? targetId : null,
             userId: targetType === "USER" ? targetId : null,
+            workspaceId: targetType === "SANDBOX" ? targetId : null,
             deploymentId: deployment.id,
             createdByUserId: operator.userId,
           })),
@@ -417,10 +489,46 @@ async function applyDeploymentToTargets(deploymentId: string, bundle: PolicyBund
       }
     }
 
+    // 5) 文件限制策略条目（下载/上传/file://；upsert 该作用域配置条目）
+    if (bundle.fileRules) {
+      await db.filePolicyConfig.upsert({
+        where: { scopeType_scopeId: fileScopeKey },
+        create: {
+          scopeType: targetType,
+          scopeId: targetId,
+          allowDownload: bundle.fileRules.allowDownload,
+          allowUpload: bundle.fileRules.allowUpload,
+          allowFileScheme: bundle.fileRules.allowFileScheme,
+          note: `策略下发：${deployment.name}`,
+          createdByUserId: operator.userId,
+        },
+        update: {
+          allowDownload: bundle.fileRules.allowDownload,
+          allowUpload: bundle.fileRules.allowUpload,
+          allowFileScheme: bundle.fileRules.allowFileScheme,
+          note: `策略下发：${deployment.name}`,
+        },
+      })
+    }
+
     if (targetType === "USER") affectedUsers++
-    else {
+    else if (targetType === "GROUP") {
       const cnt = await db.groupUser.count({ where: { groupId: targetId } })
       affectedUsers += cnt
+    } else {
+      // 沙箱目标：即时生效 —— 重刷策略文件 + 运行中容器浏览器进程重启（USR1 同 Profile 1 秒拉起）
+      try {
+        const { refreshWorkspacePolicyFile } = await import("@/lib/network-policy-apply")
+        const refreshed = await refreshWorkspacePolicyFile(targetId)
+        if (refreshed) {
+          const wsRow = workspaces.find((w) => w.id === targetId)
+          if (wsRow?.containerRef && wsRow.status === "RUNNING") {
+            const { restartBrowserProcessInContainer } = await import("@/lib/external/docker")
+            await restartBrowserProcessInContainer(wsRow.containerRef).catch(() => null)
+          }
+        }
+      } catch { /* 策略文件刷新失败不阻塞下发记录；下次启动/自愈自然生效 */ }
+      affectedUsers++
     }
   }
 
@@ -446,6 +554,17 @@ async function applyDeploymentToTargets(deploymentId: string, bundle: PolicyBund
       const reason = e instanceof Error ? e.message : String(e)
       results.push({ targetId: u.id, targetType: "USER", targetName: u.displayName || u.username, ok: false, reason })
       failures.push({ target: `用户：${u.displayName || u.username}`, reason })
+    }
+  }
+  for (const w of workspaces) {
+    try {
+      await applyToTarget("SANDBOX", w.id, w.name)
+      results.push({ targetId: w.id, targetType: "SANDBOX", targetName: w.name, ok: true })
+      successTargets++
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e)
+      results.push({ targetId: w.id, targetType: "SANDBOX", targetName: w.name, ok: false, reason })
+      failures.push({ target: `沙箱：${w.name}`, reason })
     }
   }
 
@@ -476,6 +595,7 @@ async function applyDeploymentToTargets(deploymentId: string, bundle: PolicyBund
       bundle: JSON.parse(JSON.stringify(bundle)),
       groups: groups.map((g) => g.name),
       users: users.map((u) => u.username),
+      workspaces: workspaces.map((w) => w.name),
       success: successTargets,
       failed: failures.length,
       affectedUsers,
@@ -488,7 +608,7 @@ async function applyDeploymentToTargets(deploymentId: string, bundle: PolicyBund
     username: operator.username,
     eventType: viaScheduled ? "POLICY_DEPLOY_ACTIVATED" : "POLICY_DEPLOY",
     success: status !== "FAILED",
-    detail: `${viaScheduled ? "定时策略到点激活" : "策略下发"}「${deployment.name}」：目标 ${targetUserIds.length + targetGroupIds.length}（组 ${groups.length}/用户 ${users.length}），影响用户约 ${affectedUsers}，成功 ${successTargets} / 失败 ${failures.length}`,
+    detail: `${viaScheduled ? "定时策略到点激活" : "策略下发"}「${deployment.name}」：目标 ${targetUserIds.length + targetGroupIds.length + targetWorkspaceIds.length}（组 ${groups.length}/用户 ${users.length}/沙箱 ${workspaces.length}），影响用户约 ${affectedUsers}，成功 ${successTargets} / 失败 ${failures.length}`,
   })
 
   return { status, successTargets, failedTargets: failures.length, failures, affectedUsers }
@@ -595,39 +715,55 @@ export async function rollbackPolicyBundle(operator: PolicyOperator, input: unkn
   if (!deployment.snapshotJson) throw new Error("该批次缺少前置快照，无法回滚")
 
   // 顺序回滚保护：若有更晚的批次覆盖相同目标且尚未回滚，提示先回滚新批次
+  const snapshots = JSON.parse(deployment.snapshotJson) as TargetSnapshot[]
   const myUsers = (deployment.targetUsers as string[]) || []
   const myGroups = (deployment.targetGroups as string[]) || []
   const laterDeployments = await db.policyDeployment.findMany({
     where: { createdAt: { gt: deployment.createdAt }, status: { in: ["SUCCESS", "PARTIAL", "RUNNING"] } },
-    select: { id: true, name: true, targetUsers: true, targetGroups: true },
+    select: { id: true, name: true, targetUsers: true, targetGroups: true, targetWorkspaces: true },
     take: 50,
   })
+  const myWorkspaces = snapshots.filter((x) => x.targetType === "SANDBOX").map((x) => x.targetId)
   const overlapping = laterDeployments.filter((d) => {
     const du = (d.targetUsers as string[]) || []
     const dg = (d.targetGroups as string[]) || []
-    return du.some((u) => myUsers.includes(u)) || dg.some((g) => myGroups.includes(g))
+    const dw = (d.targetWorkspaces as string[]) || []
+    return du.some((u) => myUsers.includes(u)) || dg.some((g) => myGroups.includes(g)) || dw.some((w) => myWorkspaces.includes(w))
   })
   if (overlapping.length > 0) {
     throw new Error(`存在更晚下发且覆盖相同目标的批次（如「${overlapping[0].name}」），请先回滚最新批次以保证快照一致性`)
   }
 
-  const snapshots = JSON.parse(deployment.snapshotJson) as TargetSnapshot[]
   let rolledBackTargets = 0
 
   for (const snap of snapshots) {
-    const scopeWhere = snap.targetType === "USER" ? { scopeType: "USER", userId: snap.targetId } : { scopeType: "GROUP", groupId: snap.targetId }
-    // 1) 恢复开关字段
-    const restore: Record<string, boolean | null> = {}
-    if (snap.fields.allowInternalNetwork !== undefined) restore.allowInternalNetwork = snap.fields.allowInternalNetwork
-    if (snap.fields.allowSecureLocationAccess !== undefined) restore.allowSecureLocationAccess = snap.fields.allowSecureLocationAccess
-    if (Object.keys(restore).length > 0) {
-      if (snap.targetType === "USER") await db.user.update({ where: { id: snap.targetId }, data: restore }).catch(() => {})
-      else await db.group.update({ where: { id: snap.targetId }, data: restore }).catch(() => {})
+    const scopeWhere =
+      snap.targetType === "USER"
+        ? { scopeType: "USER", userId: snap.targetId }
+        : snap.targetType === "GROUP"
+          ? { scopeType: "GROUP", groupId: snap.targetId }
+          : { scopeType: "SANDBOX", workspaceId: snap.targetId }
+    // 1) 恢复开关字段（SANDBOX 目标 = 工作区覆盖字段恢复，null=回到继承）
+    if (snap.targetType === "SANDBOX") {
+      const wsRestore: Record<string, boolean | null> = {}
+      if (snap.fields.allowInternalNetwork !== undefined) wsRestore.policyAllowInternalNetwork = snap.fields.allowInternalNetwork
+      if (snap.fields.allowSecureLocationAccess !== undefined) wsRestore.policyAllowSecureLocationAccess = snap.fields.allowSecureLocationAccess
+      if (Object.keys(wsRestore).length > 0) {
+        await db.browserWorkspace.update({ where: { id: snap.targetId }, data: wsRestore }).catch(() => {})
+      }
+    } else {
+      const restore: Record<string, boolean | null> = {}
+      if (snap.fields.allowInternalNetwork !== undefined) restore.allowInternalNetwork = snap.fields.allowInternalNetwork
+      if (snap.fields.allowSecureLocationAccess !== undefined) restore.allowSecureLocationAccess = snap.fields.allowSecureLocationAccess
+      if (Object.keys(restore).length > 0) {
+        if (snap.targetType === "USER") await db.user.update({ where: { id: snap.targetId }, data: restore }).catch(() => {})
+        else await db.group.update({ where: { id: snap.targetId }, data: restore }).catch(() => {})
+      }
     }
     // 2) 清空该作用域规则 → 完整恢复快照（顺序回滚保护下，作用域内必为本批次产物；
     //    链式回滚时上一批次恢复的规则会被下一批次快照正确覆盖；
     //    恢复时保留快照中的原始 deploymentId —— 不污染为回滚批次号）
-    await db.domainRule.deleteMany({ where: scopeWhere }).catch(() => {})
+    await db.domainRule.deleteMany({ where: scopeWhere as never }).catch(() => {})
     if (snap.domainRules.length > 0) {
       await db.domainRule.createMany({
         data: snap.domainRules.map((r) => ({
@@ -662,7 +798,7 @@ export async function rollbackPolicyBundle(operator: PolicyOperator, input: unkn
       }).catch(() => {})
     }
     // 4) 端点规则恢复
-    await db.networkEndpointRule.deleteMany({ where: scopeWhere }).catch(() => {})
+    await db.networkEndpointRule.deleteMany({ where: scopeWhere as never }).catch(() => {})
     if (snap.endpointRules.length > 0) {
       await db.networkEndpointRule.createMany({
         data: snap.endpointRules.map((r) => ({
@@ -678,6 +814,23 @@ export async function rollbackPolicyBundle(operator: PolicyOperator, input: unkn
           createdByUserId: ctx.userId,
         })),
       }).catch(() => {})
+    }
+    // 5) 文件策略条目恢复（快照 null = 恢复为无条目 → 继承上层）
+    if (snap.targetType === "USER" || snap.targetType === "GROUP" || snap.targetType === "SANDBOX") {
+      const key = { scopeType: snap.targetType, scopeId: snap.targetId }
+      if (snap.filePolicy) {
+        await db.filePolicyConfig.upsert({
+          where: { scopeType_scopeId: key },
+          create: { ...key, ...snap.filePolicy, note: `回滚恢复：${deployment.name}`, createdByUserId: ctx.userId },
+          update: { ...snap.filePolicy, note: `回滚恢复：${deployment.name}` },
+        }).catch(() => {})
+      } else {
+        await db.filePolicyConfig.deleteMany({ where: { scopeType: snap.targetType, scopeId: snap.targetId } }).catch(() => {})
+      }
+    }
+    // 沙箱目标：回滚后即时重刷策略文件（运行中容器下次进程重启或自愈时生效）
+    if (snap.targetType === "SANDBOX") {
+      await import("@/lib/network-policy-apply").then((m) => m.refreshWorkspacePolicyFile(snap.targetId)).catch(() => null)
     }
     rolledBackTargets++
   }

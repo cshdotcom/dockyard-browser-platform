@@ -1,15 +1,16 @@
 // ============================================================
 // 网络访问策略（Network Access Policy）
-// 管理员按【用户 / 用户组】控制浏览器会话是否允许：
+// 管理员按【单沙箱 > 用户 / 用户组】控制浏览器会话是否允许：
 //   1. allowInternalNetwork       —— 访问内网（RFC1918 私有网段 / 链路本地 / 云元数据 / mDNS）
 //   2. allowSecureLocationAccess  —— 访问容器内所有安全位置
 //      （本机 CDP:9222 / VNC:5900 端口、file:// 协议、chrome:// 管理页、
 //        平台内部端点：Next 应用 / VNC 网关桥 / CDP 服务 / Docker API 代理）
 //
-// 解析优先级（三层，逐级回退，默认全部拒绝）：
-//   USER（用户级覆盖，allowXxx != null）
-//     > GROUP（所属组，沿 parentId 继承链向上取第一个显式组级值）
-//       > GLOBAL_DEFAULT（system_config：security.defaultAllowInternalNetwork / security.defaultAllowSecureLocationAccess，默认 false）
+// 解析优先级（四层，逐级回退，默认全部拒绝）：
+//   SANDBOX（单沙箱级覆盖，BrowserWorkspace.policyAllowXxx 非 null 即生效，最高优先）
+//     > USER（用户级覆盖，allowXxx != null）
+//       > GROUP（所属组，沿 parentId 继承链向上取第一个显式组级值）
+//         > GLOBAL_DEFAULT（system_config：security.defaultAllowInternalNetwork / security.defaultAllowSecureLocationAccess，默认 false）
 //
 // 执行层（纵深防御，双层真实拦截）：
 //   L1 Chromium 托管策略（/etc/chromium/policies/managed/dockyard.json，只读 bind-mount，
@@ -27,12 +28,14 @@ import { join } from "path"
 import type { DomainPolicy } from "./domain-policy"
 import type { EndpointPolicy } from "./endpoint-policy"
 import { expandEndpointPattern } from "./endpoint-policy"
+import { filePolicyManagedPrefs, fileSchemeBlockPatterns, type FilePolicy } from "./file-policy"
 
 export interface NetworkPolicy {
   allowInternalNetwork: boolean
   allowSecureLocationAccess: boolean
-  source: "USER" | "GROUP" | "GLOBAL_DEFAULT"
+  source: "SANDBOX" | "USER" | "GROUP" | "GLOBAL_DEFAULT"
   sourceGroupId?: string | null
+  sourceWorkspaceId?: string | null
   resolvedAt: string
 }
 
@@ -101,9 +104,25 @@ export function platformSecureEndpoints(): string[] {
   return ports.filter((p) => p > 0).map((p) => String(p))
 }
 
-// ---- 策略解析（三层回退，默认拒绝）----
-export async function resolveNetworkPolicy(userId: string): Promise<NetworkPolicy> {
+// ---- 策略解析（四层回退：单沙箱 > 用户 > 组 > 全局默认，默认拒绝）----
+export async function resolveNetworkPolicy(userId: string, workspaceId?: string | null): Promise<NetworkPolicy> {
   const resolvedAt = new Date().toISOString()
+
+  // 0) 沙箱级覆盖（最高优先；归属强校验：仅作用于该沙箱所有者的解析链，防越权串扰）
+  if (workspaceId) {
+    const ws = await db.browserWorkspace.findUnique({
+      where: { id: workspaceId },
+      select: { userId: true, policyAllowInternalNetwork: true, policyAllowSecureLocationAccess: true, deletedAt: true },
+    })
+    if (ws && !ws.deletedAt && ws.userId === userId) {
+      const a = ws.policyAllowInternalNetwork
+      const b = ws.policyAllowSecureLocationAccess
+      if (a !== null && a !== undefined && b !== null && b !== undefined) {
+        return { allowInternalNetwork: a, allowSecureLocationAccess: b, source: "SANDBOX", sourceWorkspaceId: workspaceId, resolvedAt }
+      }
+    }
+  }
+
   const user = await db.user.findUnique({
     where: { id: userId },
     select: { allowInternalNetwork: true, allowSecureLocationAccess: true, deletedAt: true },
@@ -175,6 +194,7 @@ export interface ChromiumPolicyOptions {
   domainPolicy?: DomainPolicy | null // 域名黑白名单（作用域合并后）
   endpointPolicy?: EndpointPolicy | null // 端点级精确限制（host:port 作用域合并后）
   crxManagedPolicy?: Record<string, unknown> | null // CRX 扩展管控策略（五级合并后的 Managed Preferences）
+  filePolicy?: import("./file-policy").FilePolicy | null // 文件访问限制策略（四层合并后；缺省按系统默认：下载/上传允许、file:// 禁）
 }
 
 export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<string, unknown> {
@@ -187,7 +207,11 @@ export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<
     blocklist.push(...expandPatterns(PRIVATE_HOST_PATTERNS))
   }
   if (!policy.allowSecureLocationAccess) {
-    blocklist.push(...expandPatterns(SECURE_LOCAL_ENDPOINTS))
+    // file:// 专属策略显式放行时，从安全位置粗粒度封禁集中剔除 file:// 条目
+    // （allowFileScheme 默认 false=禁止；显式 true = 管理员明确意图，细粒度覆盖粗粒度）
+    const fileAllowed = opts.filePolicy?.allowFileScheme === true
+    const secureEndpoints = fileAllowed ? SECURE_LOCAL_ENDPOINTS.filter((e) => !e.startsWith("file://")) : SECURE_LOCAL_ENDPOINTS
+    blocklist.push(...expandPatterns(secureEndpoints))
     // 平台内部端点（网关 IP + 平台端口）——显式 host:port 精确封禁
     const gw = opts.gatewayIp
     if (gw) {
@@ -240,10 +264,22 @@ export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<
 
   const managed: Record<string, unknown> = {
     URLBlocklist: blocklist,
-    // 沙箱内禁选文件（配合 file:// 封禁）
-    AllowFileSelectionDialogs: false,
     // 浏览器保持原汁原味：不注入任何 UDP/QUIC/WebRTC 全局限制（浏览器行为与原生一致）
     // 零 UDP 约束仅适用于平台后台链路（HTTP/WS/RFB/SMTP/Docker API 全 TCP）
+  }
+  // —— 文件访问限制策略（四层：单沙箱>用户>组>全局；缺省按系统默认）——
+  const fp: FilePolicy = opts.filePolicy ?? {
+    allowDownload: true,
+    allowUpload: true,
+    allowFileScheme: false,
+    source: "DEFAULT",
+    resolvedAt: "",
+  }
+  if (!fp.allowFileScheme) {
+    blocklist.push(...fileSchemeBlockPatterns())
+  }
+  for (const [k, v] of Object.entries(filePolicyManagedPrefs(fp))) {
+    managed[k] = v
   }
   if (whitelistMode) managed.URLAllowlist = allowlist
   // CRX 扩展管控策略合入（ExtensionInstallForcelist / Blocklist / ExtensionSettings）
@@ -326,20 +362,24 @@ export async function sessionNetworkGateway(): Promise<string | null> {
 
 // 策略人读摘要（列表/详情展示）
 export function describeNetworkPolicy(p: NetworkPolicy): string {
-  const src = p.source === "USER" ? "用户级覆盖" : p.source === "GROUP" ? "组级继承" : "全局默认"
+  const src =
+    p.source === "SANDBOX" ? "沙箱级覆盖" : p.source === "USER" ? "用户级覆盖" : p.source === "GROUP" ? "组级继承" : "全局默认"
   const inner = p.allowInternalNetwork ? "允许内网" : "禁止内网"
   const secure = p.allowSecureLocationAccess ? "允许安全位置" : "禁止安全位置"
   return `${src} · ${inner} · ${secure}`
 }
 
-// ---- 批量解析（列表页一次装配，避免逐行 N+1）----
+// ---- 批量解析（列表页一次装配，避免逐行 N+1；pairs 含 workspaceId 即按沙箱维度取最高优先覆盖）----
 export async function resolveNetworkPoliciesBatch(
-  userIds: string[],
+  pairs: Array<{ userId: string; workspaceId?: string | null }>,
 ): Promise<Map<string, NetworkPolicy>> {
+  // key = workspaceId（有）或 userId（无）
   const out = new Map<string, NetworkPolicy>()
-  if (userIds.length === 0) return out
+  if (pairs.length === 0) return out
   const resolvedAt = new Date().toISOString()
-  const [users, memberships, groups, defA, defB] = await Promise.all([
+  const userIds = [...new Set(pairs.map((p) => p.userId))].filter(Boolean)
+  const workspaceIds = [...new Set(pairs.map((p) => p.workspaceId).filter((x): x is string => !!x))]
+  const [users, memberships, groups, defA, defB, workspaces] = await Promise.all([
     db.user.findMany({
       where: { id: { in: userIds } },
       select: { id: true, allowInternalNetwork: true, allowSecureLocationAccess: true, deletedAt: true },
@@ -351,9 +391,18 @@ export async function resolveNetworkPoliciesBatch(
     }),
     getConfigBool("security.defaultAllowInternalNetwork", false),
     getConfigBool("security.defaultAllowSecureLocationAccess", false),
+    workspaceIds.length
+      ? db.browserWorkspace.findMany({
+          where: { id: { in: workspaceIds } },
+          select: { id: true, userId: true, policyAllowInternalNetwork: true, policyAllowSecureLocationAccess: true, deletedAt: true },
+        })
+      : Promise.resolve(
+          [] as Array<{ id: string; userId: string; policyAllowInternalNetwork: boolean | null; policyAllowSecureLocationAccess: boolean | null; deletedAt: Date | null }>,
+        ),
   ])
   const userById = new Map(users.map((u) => [u.id, u]))
   const groupsById = new Map(groups.map((g) => [g.id, g]))
+  const wsById = new Map(workspaces.map((w) => [w.id, w]))
   const groupIdsByUser = new Map<string, string[]>()
   for (const m of memberships) {
     const arr = groupIdsByUser.get(m.userId) || []
@@ -364,7 +413,21 @@ export async function resolveNetworkPoliciesBatch(
   const pick = (v: boolean | null | undefined): boolean | null =>
     v === null || v === undefined ? null : v
 
-  for (const uid of userIds) {
+  for (const p of pairs) {
+    const key = p.workspaceId || p.userId
+    // 0) 沙箱级覆盖（归属校验）
+    if (p.workspaceId) {
+      const ws = wsById.get(p.workspaceId)
+      if (ws && !ws.deletedAt && ws.userId === p.userId) {
+        const a = pick(ws.policyAllowInternalNetwork)
+        const b = pick(ws.policyAllowSecureLocationAccess)
+        if (a !== null && b !== null) {
+          out.set(key, { allowInternalNetwork: a, allowSecureLocationAccess: b, source: "SANDBOX", sourceWorkspaceId: p.workspaceId, resolvedAt })
+          continue
+        }
+      }
+    }
+    const uid = p.userId
     const u = userById.get(uid)
     if (!u || u.deletedAt) continue
     const ua = pick(u.allowInternalNetwork)
@@ -372,7 +435,7 @@ export async function resolveNetworkPoliciesBatch(
 
     // 用户级全显式 → 直接生效
     if (ua !== null && ub !== null) {
-      out.set(uid, { allowInternalNetwork: ua, allowSecureLocationAccess: ub, source: "USER", resolvedAt })
+      out.set(key, { allowInternalNetwork: ua, allowSecureLocationAccess: ub, source: "USER", resolvedAt })
       continue
     }
 
@@ -405,7 +468,7 @@ export async function resolveNetworkPoliciesBatch(
 
     if (ga !== null && gb !== null) {
       // 用户级半覆盖与组级合并
-      out.set(uid, {
+      out.set(key, {
         allowInternalNetwork: ua !== null ? ua : ga,
         allowSecureLocationAccess: ub !== null ? ub : gb,
         source: "GROUP",
@@ -416,7 +479,7 @@ export async function resolveNetworkPoliciesBatch(
     }
 
     // 全局默认（用户级半覆盖仍优先）
-    out.set(uid, {
+    out.set(key, {
       allowInternalNetwork: ua !== null ? ua : defA,
       allowSecureLocationAccess: ub !== null ? ub : defB,
       source: "GLOBAL_DEFAULT",

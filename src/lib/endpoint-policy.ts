@@ -1,6 +1,6 @@
 // ============================================================
 // 端点级精确限制策略（Endpoint Access Policy —— host:port 精确到端口）
-// 作用域三层（与域名规则同模型）：GLOBAL 全局 + 用户所属组（含继承链）+ 用户级
+// 作用域四层（与域名规则同模型）：GLOBAL 全局 + 用户所属组（含继承链）+ 用户级 + 单沙箱
 // 语义：
 //   · BLACK 规则 → Chromium URLBlocklist 精确拦截 host:port（内网放行后仍可封指定端点）
 //   · WHITE 规则 → 黑名单语义下的例外放行（“!host:port” 例外语法）
@@ -13,8 +13,9 @@
 //   · IPv6 字面量        [::1] / [::1]:9222 / [fe80::]:5900
 //   · 端口区间（≤16 展开） 10.0.0.5:8000-8003
 //   · 任意主机指定端口    *:22（Chromium 端 host 通配）
+//   · deny-wins 冲突抑制：同一 pattern 同封同放 → 封禁胜出（上层封禁不可被下层豁免）
 // 执行层：L1 Chromium 托管策略（与网络/域名策略合并写入同一只读策略文件）
-// 来源追踪：每条生效规则携带来源（GLOBAL/GROUP/USER + 规则ID）
+// 来源追踪：每条生效规则携带来源（GLOBAL/GROUP/USER/SANDBOX + 规则ID）
 // ============================================================
 
 import { db } from "./db"
@@ -25,9 +26,10 @@ export interface ScopedEndpointRule {
   pattern: string
   type: "BLACK" | "WHITE"
   priority: number
-  source: "GLOBAL" | "GROUP" | "USER"
+  source: "GLOBAL" | "GROUP" | "USER" | "SANDBOX"
   sourceGroupId?: string | null
   sourceUserId?: string | null
+  sourceWorkspaceId?: string | null
 }
 
 export interface EndpointPolicy {
@@ -152,11 +154,21 @@ export function expandEndpointPattern(pattern: string): string[] {
   return out
 }
 
-// ---- 单用户解析（三层合并）----
-export async function resolveEndpointPolicyForUser(userId: string): Promise<EndpointPolicy> {
+// ---- 单目标解析（四层合并；workspaceId 非空即含单沙箱规则层）----
+export async function resolveEndpointPolicyForUser(userId: string, workspaceId?: string | null): Promise<EndpointPolicy> {
   const resolvedAt = new Date().toISOString()
   const user = await db.user.findUnique({ where: { id: userId }, select: { deletedAt: true } })
   if (!user || user.deletedAt) return EMPTY_POLICY(resolvedAt)
+
+  // 沙箱归属强校验：仅当沙箱属于该用户时才并入 SANDBOX 层规则
+  let sandboxId: string | null = null
+  if (workspaceId) {
+    const ws = await db.browserWorkspace.findUnique({
+      where: { id: workspaceId },
+      select: { userId: true, deletedAt: true },
+    })
+    if (ws && !ws.deletedAt && ws.userId === userId) sandboxId = workspaceId
+  }
 
   const groupIds = await effectiveGroupIds(userId)
   const rules = await db.networkEndpointRule.findMany({
@@ -166,6 +178,7 @@ export async function resolveEndpointPolicyForUser(userId: string): Promise<Endp
         { scopeType: "GLOBAL" },
         { scopeType: "GROUP", groupId: { in: groupIds } },
         { scopeType: "USER", userId },
+        ...(sandboxId ? [{ scopeType: "SANDBOX", workspaceId: sandboxId }] : []),
       ],
     },
     orderBy: [{ priority: "desc" }, { createdAt: "asc" }],
@@ -174,17 +187,25 @@ export async function resolveEndpointPolicyForUser(userId: string): Promise<Endp
   return buildEndpointPolicy(rules, resolvedAt)
 }
 
-// ---- 批量解析（列表页一次装配）----
-export async function resolveEndpointPoliciesBatch(userIds: string[]): Promise<Map<string, EndpointPolicy>> {
+// ---- 批量解析（列表页一次装配；pairs 含 workspaceId 即按沙箱维度并入 SANDBOX 规则）----
+export async function resolveEndpointPoliciesBatch(
+  pairs: Array<{ userId: string; workspaceId?: string | null }>,
+): Promise<Map<string, EndpointPolicy>> {
   const out = new Map<string, EndpointPolicy>()
-  if (userIds.length === 0) return out
+  if (pairs.length === 0) return out
   const resolvedAt = new Date().toISOString()
-  const [users, memberships, groups, allRules] = await Promise.all([
+  const userIds = [...new Set(pairs.map((p) => p.userId))].filter(Boolean)
+  const workspaceIds = [...new Set(pairs.map((p) => p.workspaceId).filter((x): x is string => !!x))]
+  const [users, memberships, groups, allRules, workspaces] = await Promise.all([
     db.user.findMany({ where: { id: { in: userIds } }, select: { id: true, deletedAt: true } }),
     db.groupUser.findMany({ where: { userId: { in: userIds } }, select: { userId: true, groupId: true } }),
     db.group.findMany({ where: { deletedAt: null, enabled: true }, select: { id: true, parentId: true } }),
     db.networkEndpointRule.findMany({ where: { enabled: true }, orderBy: [{ priority: "desc" }, { createdAt: "asc" }] }),
+    workspaceIds.length
+      ? db.browserWorkspace.findMany({ where: { id: { in: workspaceIds } }, select: { id: true, userId: true } })
+      : Promise.resolve([] as Array<{ id: string; userId: string }>),
   ])
+  const wsById = new Map(workspaces.map((w) => [w.id, w]))
   const groupById = new Map(groups.map((g) => [g.id, g]))
   const groupsByUser = new Map<string, Set<string>>()
   for (const m of memberships) {
@@ -203,21 +224,27 @@ export async function resolveEndpointPoliciesBatch(userIds: string[]): Promise<M
   }
 
   const deletedUsers = new Set(users.filter((u) => u.deletedAt).map((u) => u.id))
-  for (const uid of userIds) {
+  for (const p of pairs) {
+    const key = p.workspaceId || p.userId
+    const uid = p.userId
     if (deletedUsers.has(uid)) {
-      out.set(uid, EMPTY_POLICY(resolvedAt))
+      out.set(key, EMPTY_POLICY(resolvedAt))
       continue
     }
+    // 沙箱归属校验：仅当沙箱属于该用户时并入 SANDBOX 规则
+    const sandboxOk = p.workspaceId ? (() => { const w = wsById.get(p.workspaceId!); return !!w && w.userId === uid })() : false
     const gids = groupsByUser.get(uid) ?? new Set<string>()
     const scoped = allRules.filter((r) => {
       const scope = (r as unknown as { scopeType?: string }).scopeType || "GLOBAL"
       const gid = (r as unknown as { groupId?: string | null }).groupId ?? null
       const ruid = (r as unknown as { userId?: string | null }).userId ?? null
+      const rwid = (r as unknown as { workspaceId?: string | null }).workspaceId ?? null
       if (scope === "USER") return ruid === uid
       if (scope === "GROUP") return !!gid && gids.has(gid)
+      if (scope === "SANDBOX") return sandboxOk && rwid === p.workspaceId
       return true
     })
-    out.set(uid, buildEndpointPolicy(scoped, resolvedAt))
+    out.set(key, buildEndpointPolicy(scoped, resolvedAt))
   }
   return out
 }
@@ -230,6 +257,7 @@ type RuleRow = {
   scopeType?: string
   groupId?: string | null
   userId?: string | null
+  workspaceId?: string | null
 }
 
 function buildEndpointPolicy(rules: RuleRow[], resolvedAt: string): EndpointPolicy {
@@ -240,23 +268,27 @@ function buildEndpointPolicy(rules: RuleRow[], resolvedAt: string): EndpointPoli
       pattern: r.pattern,
       type: r.type === "WHITE" ? "WHITE" : "BLACK",
       priority: r.priority ?? 0,
-      source: scope === "USER" ? "USER" : scope === "GROUP" ? "GROUP" : "GLOBAL",
+      source: scope === "USER" ? "USER" : scope === "GROUP" ? "GROUP" : scope === "SANDBOX" ? "SANDBOX" : "GLOBAL",
       sourceGroupId: r.groupId ?? null,
       sourceUserId: r.userId ?? null,
+      sourceWorkspaceId: r.workspaceId ?? null,
     }
   })
+  // 解析期二次规范化（纵深防御）+ deny-wins 冲突抑制（同封同放 → 封禁胜出）
   const blackPatterns: string[] = []
   const whitePatterns: string[] = []
   for (const r of scoped) {
-    // 解析期二次规范化（纵深防御：库中历史数据可能为原始未规范化形态，如 CIDR 记法）
     const normalized = normalizeEndpointPattern(r.pattern) ?? r.pattern
     if (r.type === "WHITE") whitePatterns.push(normalized)
     else blackPatterns.push(normalized)
   }
+  const blackSet = new Set(blackPatterns.filter(Boolean))
+  const whiteSet = new Set(whitePatterns.filter(Boolean))
+  for (const b of blackSet) whiteSet.delete(b)
   return {
     rules: scoped,
-    blackPatterns: [...new Set(blackPatterns.filter(Boolean))],
-    whitePatterns: [...new Set(whitePatterns.filter(Boolean))],
+    blackPatterns: [...blackSet],
+    whitePatterns: [...whiteSet],
     resolvedAt,
   }
 }
