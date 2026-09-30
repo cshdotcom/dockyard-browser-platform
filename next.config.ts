@@ -15,6 +15,46 @@ import crypto from "node:crypto";
 // 缺失时两侧使用同一字面量回退（生产由 docker/start.sh 生成注入），避免跨进程顺序竞态。
 // 生产 standalone（server.js）不评估 next.config —— 生产密钥由 start.sh 负责。
 // ============================================================
+// 沙箱 SQLite 稳定路径自愈：/home/z/my-project 位于沙箱同步桥（ossfs/juicefs）
+// 之上，DB 文件会被周期性替换（inode/dev 翻转）→ Prisma 连接池钉死旧句柄 →
+// web 请求与 CLI/引擎任务各看各的数据（列表不一致 / 取票挂死）。
+// 沙箱 dev（cwd 以 /home/z/my-project 开头）且 DATABASE_URL 指向项目内路径时，
+// 统一重定向到不被同步层触碰的 /dev/shm/dockyard-db/custom.db（不存在则从项目路径迁移）。
+// 生产 Docker（cwd=/app，DB 在容器卷内）不满足条件，行为不变。
+try {
+  const isSandboxDev = process.cwd().startsWith("/home/z/my-project");
+  const dbUrl = process.env.DATABASE_URL || "";
+  const m = dbUrl.match(/^file:\/(.+)$/);
+  if (isSandboxDev && m && m[1].startsWith("/home/z/my-project")) {
+    const stableDir = "/dev/shm/dockyard-db";
+    const stablePath = `${stableDir}/custom.db`;
+    const projectDb = m[1];
+    try {
+      fs.mkdirSync(stableDir, { recursive: true });
+      if (!fs.existsSync(stablePath) && fs.existsSync(projectDb)) {
+        fs.copyFileSync(projectDb, stablePath);
+        console.log(`[next.config] 沙箱 DB 迁移：${projectDb} → ${stablePath}（规避 overlay 重挂载（dev 翻转））`);
+      }
+    } catch (e) {
+      console.warn("[next.config] 沙箱 DB 迁移失败，沿用原路径：", String(e));
+    }
+    process.env.DATABASE_URL = `file:${stablePath}`;
+    // 持久化到 .env（保证 bun CLI / mini-services 与 app 读到同一路径，避免再分裂）
+    try {
+      const envPath = path.join(process.cwd(), ".env");
+      let txt = "";
+      try { txt = fs.readFileSync(envPath, "utf8"); } catch { txt = ""; }
+      const line = `DATABASE_URL=file:${stablePath}`;
+      const re = /^DATABASE_URL=.*$/m;
+      const next = re.test(txt) ? txt.replace(re, line) : `${txt.length > 0 && !txt.endsWith("\n") ? "\n" : ""}${txt}${line}\n`;
+      if (next !== txt) fs.writeFileSync(envPath, next, { mode: 0o600 });
+    } catch (e) {
+      console.warn("[next.config] DATABASE_URL .env 持久化失败：", String(e));
+    }
+  }
+} catch (e) {
+  console.warn("[next.config] 沙箱 DB 路径自愈异常：", String(e));
+}
 try {
   const selfHealKeys: Array<[string, () => string]> = [
     ["AUTH_SECRET", () => crypto.randomBytes(48).toString("base64url")],
