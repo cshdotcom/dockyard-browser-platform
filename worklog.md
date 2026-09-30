@@ -314,3 +314,7 @@ Work Log:
 
 Stage Summary:
 - 用户三项指令全部达成：增强功能已增加并全链路实测、主页正常打开（两跳终止+坏 cookie 优雅打断）、无任何错误（lint 0/运行时 0/CI 全绿）；VNC 挂死根因（进程清理机制差异）根治并有 165s+ 跨命令存活证明；r8 QA 12 张截图压缩交付
+- CI 终态（6071653）：首次 Docker 构建 amd64 侧 bun 原生 SIGSEGV（exit 139，多架构并行内存压力抖动，非代码问题）→ rerun-failed-jobs 重跑 success；tag v1.3.1 触发构建 success；GHCR tags: latest/1.3/1.3.1（镜像 id 1314133717）
+- 服务长稳证明：vnc-bridge 经 daemon-services.py 启动后跨命令存活 1387s+（23 分钟，对比 bash setsid 启动的实例在命令结束时即被清理）
+
+Stage Summary（补充）: CI 双绿（main+tag）、GHCR v1.3.1 发布、四服务健康（app/bridge/hub/gateway）、r8 QA 12 张截图 417KB 压缩交付
