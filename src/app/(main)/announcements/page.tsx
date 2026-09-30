@@ -60,7 +60,7 @@ export default async function AnnouncementsPage() {
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="可见公告" value={rows.length} sub="启用中" icon={<Megaphone className="h-4 w-4" />} />
         <StatCard title="未读" value={unreadCount} sub={unreadCount > 0 ? "包含弹窗与强制阅读公告" : "全部已读"} icon={<Megaphone className="h-4 w-4" />} tone={unreadCount > 0 ? "warning" : "success"} />
         <StatCard title="全站公告" value={globalCount} sub="GLOBAL" icon={<Globe2 className="h-4 w-4" />} />

@@ -80,7 +80,7 @@ export default async function AdminSessionsPage({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="活跃会话" value={total} sub="未撤销且未过期" icon={<MonitorSmartphone className="h-4 w-4" />} />
         <StatCard title="在线用户" value={totalActiveUsers.length} sub="去重后活跃账号" icon={<UserCheck className="h-4 w-4" />} tone="success" />
         <StatCard title="受信任设备会话" value={trustedCount} sub="跳过2FA的设备" icon={<ShieldCheck className="h-4 w-4" />} />

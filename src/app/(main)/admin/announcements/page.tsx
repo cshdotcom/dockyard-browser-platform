@@ -77,7 +77,7 @@ export default async function AdminAnnouncementsPage({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="公告总数" value={totalCount} sub={`当前筛选 ${total} 条`} icon={<Megaphone className="h-4 w-4" />} />
         <StatCard title="启用中" value={enabledCount} sub={`${totalCount - enabledCount} 条已停用`} icon={<ToggleRight className="h-4 w-4" />} tone="success" />
         <StatCard title="全站公告" value={globalCount} sub="GLOBAL 类型" icon={<Globe2 className="h-4 w-4" />} />

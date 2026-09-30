@@ -90,7 +90,7 @@ export default async function AdminRecyclePage({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="待处置条目" value={statPending} sub="未恢复" icon={<Recycle className="h-4 w-4" />} />
         <StatCard title="锁定保护" value={statLocked} sub="禁止自动过期/用户恢复" icon={<Lock className="h-4 w-4" />} tone={statLocked > 0 ? "warning" : "default"} />
         <StatCard title="24h 内到期清除" value={statDueSoon} sub="未锁定" icon={<Trash2 className="h-4 w-4" />} tone={statDueSoon > 0 ? "danger" : "default"} />

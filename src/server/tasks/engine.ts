@@ -19,10 +19,15 @@ import { crxInstallPoll, crxGrayRollout } from "./crx-engine"
 
 const g = globalThis as unknown as {
   __dyTaskLocks?: Map<string, { lockedAt: number; heartbeat: number }>
+  __dyVncFps?: Map<string, { frames: number; at: number }> // 桥帧计数差分 → 真实 fps
 }
 function locks() {
   if (!g.__dyTaskLocks) g.__dyTaskLocks = new Map()
   return g.__dyTaskLocks
+}
+function vncFpsTracker() {
+  if (!g.__dyVncFps) g.__dyVncFps = new Map()
+  return g.__dyVncFps
 }
 
 // 内存锁：任务执行时置标记，结束清除；锁超时自动释放（死锁解除）
@@ -454,7 +459,8 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
     const idleMin = await getConfigNumber("session.novncIdleTimeoutMin", 30)
     const maxRecoverFails = 3 // 连续 3 轮失败才判定不可恢复
     for (const ws of vncSessions) {
-      const health = await novncHealth(ws.novncSessionId!).catch(() => null)
+      // 自托管模式：容器真实状态 + 桥统计（键鼠/帧请求真实活跃度）
+      const health = await novncHealth(ws.novncSessionId!, { workspaceId: ws.id, containerRef: ws.containerRef }).catch(() => null)
       if (!health || !health.alive) {
         // ---- 防退出自愈：崩溃会话自动以同一 Profile / 同一代理重建（用户无感知）----
         const fails = (vncFailCounter().get(ws.id) || 0) + 1
@@ -508,13 +514,32 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
         }
       } else {
         vncFailCounter().delete(ws.id) // 恢复正常：清零失败计数
-        const idleMs = Date.now() - health.lastInputAt
+        // 真实输入活跃（桥侧键鼠/帧请求）回写 lastActiveAt：防止闲置回收误杀正在使用的会话
+        const wsLast = ws.lastActiveAt?.getTime() ?? 0
+        if (health.lastInputAt != null && health.lastInputAt > wsLast) {
+          await db.browserWorkspace.update({ where: { id: ws.id }, data: { lastActiveAt: new Date(health.lastInputAt) } }).catch(() => {})
+        }
+        // 闲置判定：真实输入信号优先，回退工作区自身活跃记录（无桥统计时不误判）
+        const lastInput = health.lastInputAt ?? (ws.lastActiveAt ?? ws.updatedAt ?? ws.createdAt).getTime()
+        const idleMs = Date.now() - lastInput
         if (idleMs > idleMin * 60_000 && ws.status === "RUNNING") {
           await destroyNovncSession(ws.novncSessionId!).catch(() => {})
           await db.browserWorkspace.update({ where: { id: ws.id }, data: { status: "DESTROYED", crashCategory: "NoVNC闲置回收" } })
           n++
         } else {
-          await db.browserWorkspace.update({ where: { id: ws.id }, data: { novncConnCount: health.clients, novncFps: health.fps } })
+          // 桥帧计数差分 → 真实 fps（差分窗口 60s，冷启动首笔不计算）
+          let fps = health.fps
+          if (typeof health.frames === "number") {
+            const prev = vncFpsTracker().get(ws.id)
+            vncFpsTracker().set(ws.id, { frames: health.frames, at: Date.now() })
+            if (prev) {
+              const dt = (Date.now() - prev.at) / 1000
+              if (dt > 1) fps = Math.max(0, Math.round(((health.frames - prev.frames) / dt) * 10) / 10)
+            }
+          } else {
+            vncFpsTracker().delete(ws.id)
+          }
+          await db.browserWorkspace.update({ where: { id: ws.id }, data: { novncConnCount: health.clients, novncFps: fps } })
         }
       }
     }

@@ -248,7 +248,7 @@ export function ConfigPanel({
   return (
     <div className="space-y-6">
       {/* ---- 快捷开关卡片（置顶）：维护模式 / 只读模式 ---- */}
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
         <div className="rounded-lg border p-4 space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -374,7 +374,7 @@ export function ConfigPanel({
                   </Button>
                 )}
               </div>
-              <div className="grid gap-3 lg:grid-cols-2">
+              <div className="grid gap-3 grid-cols-1 lg:grid-cols-2">
                 {c === "MAIL" && <SmtpCard canEdit={canEdit} />}
                 {list.map(renderItemRow)}
               </div>
@@ -539,7 +539,7 @@ function SmtpCard({ canEdit }: { canEdit: boolean }) {
       <p className="text-xs text-muted-foreground">
         验证码 / 激活 / 告警邮件的发送服务器。修改后立即生效（30 秒内），连接测试执行真实 SMTP 握手；密码 AES 加密落库、界面永不回显。
       </p>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <div className="space-y-1">
           <Label className="text-xs text-muted-foreground">SMTP 服务器</Label>
           <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="smtp.example.com" disabled={!canEdit} />

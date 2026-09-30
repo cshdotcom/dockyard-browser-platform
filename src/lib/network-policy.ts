@@ -14,7 +14,7 @@
 // 执行层（纵深防御，双层真实拦截）：
 //   L1 Chromium 托管策略（/etc/chromium/policies/managed/dockyard.json，只读 bind-mount，
 //      只读根 FS 下用户无法篡改）：URLBlocklist 在 URL 分类阶段直接拦截导航/子资源/WebSocket，
-//      与是否走代理无关；WebRtcIPHandling 关闭非代理 UDP 防局域网泄漏。
+//      与是否走代理无关；内网封禁时 WebRtcIPHandling 关闭非代理 UDP 防局域网泄漏（仅该场景，浏览器其余行为保持原汁原味）。
 //   L2 Sing-Box 路由拦截（ip_cidr 真实 CIDR，action=block）：供内部 sing-box / 管理端编排注入。
 //   L3 Docker 网络层：会话网络 ICC=false（容器互访封禁，跨用户浏览器网络不可达）。
 // ============================================================
@@ -242,12 +242,8 @@ export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<
     URLBlocklist: blocklist,
     // 沙箱内禁选文件（配合 file:// 封禁）
     AllowFileSelectionDialogs: false,
-    // —— 全链路零 UDP：禁用 QUIC/HTTP3（UDP 传输）与 WebRTC 非代理 UDP ——
-    // 平台自身全部协议均基于 TCP（HTTP/WebSocket/RFB/SMTP/Docker API），
-    // 浏览器侧同样禁止任何 UDP 承载的协议出口
-    QuicAllowed: false,
-    WebRtcIPHandling: "disable_non_proxied_udp",
-    AllowWebRtcUdpPorts: [] as number[],
+    // 浏览器保持原汁原味：不注入任何 UDP/QUIC/WebRTC 全局限制（浏览器行为与原生一致）
+    // 零 UDP 约束仅适用于平台后台链路（HTTP/WS/RFB/SMTP/Docker API 全 TCP）
   }
   if (whitelistMode) managed.URLAllowlist = allowlist
   // CRX 扩展管控策略合入（ExtensionInstallForcelist / Blocklist / ExtensionSettings）
@@ -259,6 +255,11 @@ export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<
     managed.ProxyMode = "fixed_servers"
     managed.ProxyServer = opts.proxyUrl
     managed.ProxyBypassList = "<-loopback>"
+  }
+  // 内网封禁时：WebRTC 仅走代理，防本机/局域网 IP 泄漏与 P2P 直连（仅此场景生效，浏览器其余行为保持原汁原味）
+  if (!policy.allowInternalNetwork) {
+    managed.WebRtcIPHandling = "disable_non_proxied_udp"
+    managed.AllowWebRtcUdpPorts = [] as number[]
   }
   return managed
 }

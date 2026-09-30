@@ -70,7 +70,7 @@ export function ProfileForm({ username, displayName, email, emailVerified, theme
         <CardDescription>显示名会展示在页面问候与协作场景中；邮箱为账号核心凭证，不可在此修改</CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2">
           <div className="space-y-1.5">
             <Label htmlFor="displayName">显示名</Label>
             <Input

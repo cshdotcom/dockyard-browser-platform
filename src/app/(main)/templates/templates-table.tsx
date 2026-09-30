@@ -392,7 +392,7 @@ export function TemplatesTable({ rows, total, page, pageSize, keyword, sortField
           </DialogHeader>
 
           <div className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4 grid-cols-1 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label htmlFor="tpl-name">模板名称</Label>
                 <Input id="tpl-name" value={fName} onChange={(e) => setFName(e.target.value)} placeholder="例如：欧洲电商采集" maxLength={100} />
@@ -471,7 +471,7 @@ export function TemplatesTable({ rows, total, page, pageSize, keyword, sortField
                 <p className="text-xs text-muted-foreground font-mono truncate" title={fUa}>{fUa || "默认 UA"}</p>
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="tpl-tz">时区</Label>
                   <Input id="tpl-tz" value={fTimezone} onChange={(e) => setFTimezone(e.target.value)} placeholder="Asia/Shanghai" />

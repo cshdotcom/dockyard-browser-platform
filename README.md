@@ -167,7 +167,9 @@ docker run -d --name dockyard --network host \
 - 平台主镜像：`.github/workflows/docker-image.yml`
 - 硬隔离浏览器镜像（supervisor 防退出）：`.github/workflows/docker-browser.yml`（`docker/browser/`）
 
-> 镜像为 **All-In-One 独立服务端完整包**：内置全部依赖、WS枢纽、HelmPort VNC 网关桥（票据HMAC鉴权）、数据库初始化与自检，启动脚本自动执行 `prisma db push` + 种子 + 目录/端口自检（主服务/WS枢纽/VNC桥三进程统一托管与优雅退出）。
+> 镜像为 **All-In-One 独立服务端完整包**：内置全部依赖、WS枢纽、HelmPort VNC 网关桥（票据HMAC鉴权）、数据库初始化与自检，启动脚本自动执行 `prisma db push` + 种子 + 目录/端口自检（主服务/WS枢纽/VNC桥三进程统一托管与优雅退出）。入口为**守护式 guard**：主进程崩溃后自动整轮重启并将崩溃原因（server.log 尾部）输出至 `docker logs`，容器不会静默停止。
+>
+> 部署可选环境变量：`BUILTIN_CRON`（默认 1，镜像内置定时调度器，每 `CRON_INTERVAL_SEC` 秒（默认 300）触发一次引擎任务，可与外部 cron 并存）；`DOCKER_API_URL` 指向宿主 Docker Engine 时即可编排真实硬隔离浏览器沙箱。
 
 ### 外部服务对接（生产环境）
 | 环境变量 | 说明 | 缺省行为 |
@@ -181,7 +183,8 @@ docker run -d --name dockyard --network host \
 
 未配置外部服务时平台全链路可跑（模拟适配器，含内置演示 RFB 帧缓冲引擎），生产配置后即真实调度。
 
-### 定时任务（外部 cron）
+### 定时任务（内置调度器，外部 cron 可选）
+镜像默认内置定时调度器（每 5 分钟自动触发全部启用任务，`BUILTIN_CRON=0` 关闭，`CRON_INTERVAL_SEC` 调整间隔）。外部 cron 仍可叠加触发（接口侧内存锁防重入）：
 ```cron
 */5 * * * * curl -s -H "x-cron-secret: <CRON_SECRET>" http://127.0.0.1:3000/api/cron?task=all
 ```
@@ -195,7 +198,7 @@ src/app/api/       auth(登录/验证码/注册/重置) cron mcp openapi files c
 src/lib/           认证/权限/审计/配置/加密/TOTP/限流/幂等/风控/回收站/外部适配器/告警/WS推送
 src/server/        actions(全部Server Actions) tasks(定时任务引擎) mcp(批量任务引擎)
 mini-services/     ws-hub（WebSocket枢纽，端口3003/事件注入3004）
-docker/            start/stop/healthcheck/守护脚本
+docker/            start/stop/healthcheck/entrypoint-guard（守护入口：崩溃自愈）脚本
 ```
 
 ## 六、安全设计要点

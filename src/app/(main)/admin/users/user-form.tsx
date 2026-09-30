@@ -186,7 +186,7 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2">
           {mode === "create" && (
             <div className="space-y-1.5">
               <Label>用户名 *</Label>
@@ -272,7 +272,7 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
             <Switch checked={quotaEnabled} onCheckedChange={setQuotaEnabled} />
           </div>
           {quotaEnabled && (
-            <div className="grid gap-3 sm:grid-cols-3">
+            <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
               <div className="space-y-1.5">
                 <Label className="text-xs">并发会话配额</Label>
                 <PrecisionInput value={qSessions} onChange={setQSessions} min={0} max={100000} suffix="个" />

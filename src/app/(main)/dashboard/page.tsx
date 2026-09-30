@@ -59,7 +59,7 @@ export default async function DashboardPage() {
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 min-[420px]:grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 min-w-0">
         <StatCard title="我的活跃工作区" value={myWorkspaces} sub="CDP + NoVNC 运行中" icon={<Globe className="h-4 w-4" />} />
         <StatCard title="平台活跃工作区" value={isAdmin ? globalActive : "—"} sub={isAdmin ? "全部用户合计" : "仅管理员可见"} icon={<Activity className="h-4 w-4" />} />
         <StatCard title="NoVNC 重度会话" value={isAdmin ? novncActive : "—"} sub={isAdmin ? "全局运行中" : "仅管理员可见"} icon={<Globe className="h-4 w-4" />} tone="warning" />
@@ -72,8 +72,8 @@ export default async function DashboardPage() {
         />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-3">
-        <div className="lg:col-span-2 space-y-4">
+      <div className="grid gap-4 grid-cols-1 lg:grid-cols-3 min-w-0">
+        <div className="lg:col-span-2 space-y-4 min-w-0">
           <TrendChart data={days} />
           {isAdmin && (
             <Card>

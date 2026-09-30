@@ -91,7 +91,7 @@ export default async function ProfilePage() {
       </div>
 
       {/* 个人统计 */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="累计创建会话" value={totalSessions} sub="含已结束/已删除" icon={<Globe className="h-4 w-4" />} />
         <StatCard title="当前活跃" value={activeSessions + activeNovnc} sub={`CDP ${activeSessions} · NoVNC ${activeNovnc}`} icon={<Globe className="h-4 w-4" />} tone="success" />
         <StatCard title="快照数量" value={snapshotCount} sub="浏览器配置快照" icon={<Camera className="h-4 w-4" />} />
@@ -150,7 +150,7 @@ export default async function ProfilePage() {
           </CardTitle>
           <CardDescription>账号安全相关字段为只读，如需变更请前往账号安全页</CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-3 sm:grid-cols-2 text-sm">
+        <CardContent className="grid gap-3 grid-cols-1 sm:grid-cols-2 text-sm">
           <div className="flex justify-between sm:block">
             <span className="text-muted-foreground">用户名</span>
             <p className="font-medium font-mono">{user.username}</p>

@@ -103,7 +103,7 @@ export default async function SnapshotsPage({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="可见快照" value={total} sub={`当前筛选 ${total} 条`} icon={<Camera className="h-4 w-4" />} />
         <StatCard title="我的快照" value={myTotal} sub={`共 ${fmtBytes(mySizeBytes)}`} icon={<Package className="h-4 w-4" />} />
         <StatCard title="我的快照总大小" value={fmtBytes(mySizeBytes)} sub="未删除快照合计" icon={<Layers className="h-4 w-4" />} tone="success" />

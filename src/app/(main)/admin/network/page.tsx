@@ -120,7 +120,7 @@ async function ProxyTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Rec
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="总节点数" value={statTotal} sub="不含软删除" icon={<Network className="h-4 w-4" />} />
         <StatCard title="健康节点" value={statHealthy} sub="HEALTHY" icon={<ShieldCheck className="h-4 w-4" />} tone="success" />
         <StatCard title="故障/降级" value={statFailed} sub="FAILED + DEGRADED" icon={<TriangleAlert className="h-4 w-4" />} tone={statFailed > 0 ? "danger" : "default"} />
@@ -181,7 +181,7 @@ async function SteelTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Rec
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="Steel 节点" value={statTotal} sub="浏览器执行集群" icon={<Globe2 className="h-4 w-4" />} />
         <StatCard title="在线" value={statOnline} sub="ONLINE" icon={<Server className="h-4 w-4" />} tone="success" />
         <StatCard title="已隔离" value={statIsolated} sub="连续探测失败≥3" icon={<TriangleAlert className="h-4 w-4" />} tone={statIsolated > 0 ? "danger" : "default"} />
@@ -253,7 +253,7 @@ async function HostTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Reco
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="宿主机" value={statTotal} sub="Docker Engine 集群" icon={<Server className="h-4 w-4" />} />
         <StatCard title="在线可用" value={statOnline} sub="ONLINE 且启用" icon={<ShieldCheck className="h-4 w-4" />} tone="success" />
         <StatCard title="水位超限" value={statHighWater} sub="CPU>80% 或磁盘>85%" icon={<TriangleAlert className="h-4 w-4" />} tone={statHighWater > 0 ? "danger" : "success"} />

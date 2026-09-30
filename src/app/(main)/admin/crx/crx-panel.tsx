@@ -780,7 +780,7 @@ function PluginDialog({ open, plugin, canManage, busy, onClose, onSaved }: {
             后台只维护扩展 ID 与 update_url 元数据（不存 CRX 二进制）。权限清单将自动判定高危标记；源地址/版本格式实时校验。
           </DialogDescription>
         </DialogHeader>
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
           <div className="space-y-1">
             <Label className="text-xs">CRX-ID（32 位 a-p，Chrome/Edge 商店真实 ID）</Label>
             <Input value={form.crxId} onChange={(e) => setForm({ ...form, crxId: e.target.value })} disabled={!!plugin} className="font-mono text-xs" placeholder="cjpalhdlnbpafiamejdnhcphjbkeiagm" />
@@ -937,7 +937,7 @@ function GrayDialog({ open, plugins, workspaces, onClose, onCreated }: {
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
-          <div className="grid gap-3 sm:grid-cols-3">
+          <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
             <div className="space-y-1">
               <Label className="text-xs">任务名称</Label>
               <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="内网插件灰度-第一批" />
@@ -1008,7 +1008,7 @@ function BlockForm({ canManage, onSaved }: { canManage: boolean; onSaved: () => 
   const [saving, setSaving] = React.useState(false)
   return (
     <div className="space-y-3">
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
         <div className="space-y-1">
           <Label className="text-xs">作用域</Label>
           <select value={scopeType} onChange={(e) => setScopeType(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2 text-sm">

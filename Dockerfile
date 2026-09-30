@@ -25,6 +25,8 @@ RUN bunx next build
 # ---- 运行层（All-In-One 独立包）----
 FROM oven/bun:1.3-alpine AS runner
 WORKDIR /app
+# Prisma 查询引擎在 musl 上动态链接 OpenSSL 3；busybox wget 供健康检查/内置调度器使用
+RUN apk add --no-cache openssl
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
@@ -46,8 +48,8 @@ COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/mini-services ./mini-services
 COPY --from=builder /app/src/lib/config.ts ./src/lib/config.ts
 
-# 启动/停止/守护脚本（自动初始化数据库 + 自检）
-COPY docker/start.sh docker/stop.sh docker/healthcheck.sh /app/docker/
+# 启动/停止/守护/自检脚本（自动初始化数据库 + 守护自愈 + 自检）
+COPY docker/start.sh docker/stop.sh docker/healthcheck.sh docker/entrypoint-guard.sh /app/docker/
 RUN chmod +x /app/docker/*.sh \
     && mkdir -p /app/db /app/storage/backups /app/storage/uploads \
     && echo "dockyard" > /app/.app-marker
@@ -63,5 +65,6 @@ EXPOSE 9222
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD /app/docker/healthcheck.sh
 
-# 自检程序：启动自动检测端口/数据库/目录完整性
-ENTRYPOINT ["/app/docker/start.sh"]
+# 守护式入口：主进程崩溃自动整轮重启（崩溃原因输出 docker logs）；docker stop 优雅终止
+# 此前直接执行 start.sh：主进程任何异常退出都会让容器静默停止
+ENTRYPOINT ["/app/docker/entrypoint-guard.sh"]

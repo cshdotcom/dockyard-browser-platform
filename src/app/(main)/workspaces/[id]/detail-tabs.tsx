@@ -405,7 +405,7 @@ function IsolationPanel({ hardening, containerRef }: { hardening: Record<string,
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
           {items.map((it) => (
             <div key={it.title} className={cn("flex gap-2 rounded-lg border p-2.5", it.ok ? "border-emerald-500/25 bg-emerald-500/[0.06]" : "border-slate-200 bg-muted/30")}>
               <div className={cn("mt-0.5 shrink-0 rounded-md p-1.5", it.ok ? "bg-emerald-500/15 text-emerald-600" : "bg-muted text-muted-foreground")}>
@@ -451,7 +451,7 @@ function CdpPanel({ workspace, canOperate }: { workspace: WorkspaceDetailData; c
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
+    <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base"><Terminal className="h-4 w-4 inline mr-1" />连接信息</CardTitle>
@@ -585,7 +585,7 @@ function ScriptPanel({ workspace, scripts, runLogs, canOperate }: { workspace: W
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
+    <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">执行脚本</CardTitle>

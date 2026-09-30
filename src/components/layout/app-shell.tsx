@@ -131,9 +131,9 @@ export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenan
             </Button>
             <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
               <DialogTrigger asChild>
-                <Button variant="outline" size="sm" className="gap-2 text-muted-foreground w-64 justify-start">
+                <Button variant="outline" size="sm" className="gap-2 text-muted-foreground w-9 sm:w-64 justify-start sm:justify-start justify-center shrink-0">
                   <Search className="h-4 w-4" />
-                  <span className="text-xs">全局搜索（工作区/实例/用户）</span>
+                  <span className="hidden sm:inline text-xs">全局搜索（工作区/实例/用户）</span>
                 </Button>
               </DialogTrigger>
               <DialogContent className="max-w-xl">
@@ -144,11 +144,11 @@ export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenan
               </DialogContent>
             </Dialog>
 
-            <div className="ml-auto flex items-center gap-1.5">
+            <div className="ml-auto flex items-center gap-1.5 min-w-0 shrink-0">
               <NotificationBell initial={unreadCount} />
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="sm" className="gap-2">
+                  <Button variant="ghost" size="sm" className="gap-2 shrink-0">
                     <div className="h-7 w-7 rounded-full bg-teal-600/15 text-teal-700 dark:text-teal-300 flex items-center justify-center text-xs font-semibold">
                       {(user.displayName || user.username).slice(0, 1).toUpperCase()}
                     </div>

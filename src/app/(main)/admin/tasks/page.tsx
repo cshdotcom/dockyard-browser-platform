@@ -43,7 +43,7 @@ export default async function AdminTasksPage({
   }))
 
   const stats = (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
       <StatCard title="任务总数" value={tasks.length} sub={`启用 ${tasks.filter((t) => t.enabled).length} 个`} icon={<Clock className="h-4 w-4" />} />
       <StatCard title="24h 执行次数" value={exec24h} sub="含 CRON + 手动" icon={<PlayCircle className="h-4 w-4" />} />
       <StatCard title="24h 平均耗时" value="-" sub="见任务列表平均耗时列" icon={<Timer className="h-4 w-4" />} />

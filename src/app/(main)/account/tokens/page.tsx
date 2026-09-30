@@ -124,7 +124,7 @@ export default async function TokensPage({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="令牌总数" value={totalCount} sub={`上限 ${maxPerUser} 个`} icon={<KeyRound className="h-4 w-4" />} />
         <StatCard title="启用中" value={activeCount} sub={`${totalCount - activeCount} 个已禁用`} icon={<ShieldAlert className="h-4 w-4" />} tone="success" />
         <StatCard

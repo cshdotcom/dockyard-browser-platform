@@ -96,7 +96,7 @@ async function ListTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Reco
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="规则总数" value={statTotal} sub="全部黑白名单" icon={<ListChecks className="h-4 w-4" />} />
         <StatCard title="临时规则" value={statTemp} sub="到期自动解封" icon={<Clock className="h-4 w-4" />} />
         <StatCard title="永久规则" value={statPermanent} sub="需手动删除" icon={<ShieldCheck className="h-4 w-4" />} />
@@ -162,7 +162,7 @@ async function ProfileTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: R
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
         <StatCard title="画像用户数" value={statUsers} sub="已产生行为数据的用户" icon={<Users className="h-4 w-4" />} />
         <StatCard title="风控触发总数" value={statRiskTriggers._sum.riskTriggers || 0} sub="riskTriggers 汇总" icon={<ShieldAlert className="h-4 w-4" />} tone={(statRiskTriggers._sum.riskTriggers || 0) > 0 ? "danger" : "success"} />
         <StatCard title="异常操作总数" value={statAbnormal._sum.abnormalOps || 0} sub="abnormalOps 汇总" icon={<Activity className="h-4 w-4" />} tone={(statAbnormal._sum.abnormalOps || 0) > 0 ? "warning" : "success"} />

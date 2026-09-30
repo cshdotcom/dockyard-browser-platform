@@ -109,7 +109,7 @@ export function BackupsTable({ rows, total, page, pageSize, keyword, sortField, 
   return (
     <div className="space-y-6">
       {/* 保留策略 + 恢复风险提示 */}
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
         <div className="rounded-lg border bg-card p-4 space-y-2">
           <div className="flex items-center gap-2">
             <ListChecks className="h-4 w-4 text-teal-600" />

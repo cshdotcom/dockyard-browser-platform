@@ -101,7 +101,7 @@ export default async function AdminFilesPage({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="总文件数" value={statAll} sub="不含回收站软删" icon={<FileText className="h-4 w-4" />} />
         <StatCard title="总占用空间" value={fmtBytes(statSize._sum.size || 0)} sub="全部未删除文件" icon={<HardDrive className="h-4 w-4" />} />
         <StatCard title="今日新增" value={statToday} sub="当天上传文件" icon={<FilePlus2 className="h-4 w-4" />} tone="success" />
@@ -114,7 +114,7 @@ export default async function AdminFilesPage({
         />
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[2fr_1fr]">
+      <div className="grid gap-6 grid-cols-1 xl:grid-cols-[2fr_1fr]">
         <div className="space-y-6">
           <UploadCard quotaMb={quotaMb} totalUsedBytes={myUsedAgg._sum.size || 0} virusScanEnabled={virusScanEnabled} />
           <FilesTable

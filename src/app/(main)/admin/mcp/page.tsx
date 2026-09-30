@@ -144,7 +144,7 @@ export default async function AdminMcpPage({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-6">
         <StatCard title="总任务数" value={statTotal} sub="全部用户" icon={<MessageSquareCode className="h-4 w-4" />} />
         <StatCard title="进行中" value={statRunning} sub="PENDING + RUNNING + PAUSED" icon={<PlayCircle className="h-4 w-4" />} tone={statRunning > 0 ? "warning" : "default"} />
         <StatCard title="成功完成" value={statSuccess} sub="SUCCESS" icon={<CheckCircle2 className="h-4 w-4" />} tone="success" />

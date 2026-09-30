@@ -82,7 +82,7 @@ export default async function AdminBackupsPage({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="备份总数" value={allCount} sub={`当前筛选 ${total} 条`} icon={<DatabaseBackup className="h-4 w-4" />} />
         <StatCard title="最近一次备份" value={lastBackup ? fmtDate(lastBackup.createdAt) : "从未备份"} sub={lastBackup ? `${lastBackup.type} · ${fmtBytes(lastBackup.sizeBytes)}` : "建议立即执行首次备份"} icon={<History className="h-4 w-4" />} />
         <StatCard title="备份总占用" value={fmtBytes(totalSizeAgg._sum.sizeBytes || 0)} sub="含加密备份密文体积" icon={<HardDrive className="h-4 w-4" />} />

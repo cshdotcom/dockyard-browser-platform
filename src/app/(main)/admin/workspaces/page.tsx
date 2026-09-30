@@ -196,7 +196,7 @@ export default async function AdminWorkspacesPage({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
         <StatCard title="总工作区" value={statTotal} sub={`今日新建 ${statToday}`} icon={<Globe className="h-4 w-4" />} />
         <StatCard title="运行中" value={statRunning} sub="RUNNING" icon={<PlayCircle className="h-4 w-4" />} tone="success" />
         <StatCard title="CDP 轻量" value={statCdp} sub="cdp_light" icon={<Terminal className="h-4 w-4" />} />

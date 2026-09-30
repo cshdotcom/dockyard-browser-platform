@@ -1,7 +1,8 @@
 #!/bin/sh
 # ============================================================
-# Dockyard All-In-One 启动脚本：自检 → 数据库初始化 → WS枢纽 → 主服务
+# Dockyard All-In-One 启动脚本：自检 → 数据库初始化 → WS枢纽 → VNC桥 → 内置调度 → 主服务
 # 自检：端口占用 / 数据库连通 / 目录权限
+# 由 entrypoint-guard.sh 守护调用：本脚本退出（崩溃）时 guard 自动整轮重启
 # ============================================================
 set -e
 
@@ -41,6 +42,12 @@ fi
 # VNC 桥公网接入形态：port = 同主机独立端口直连（单域名反代部署可改为 gateway）
 export VNC_BRIDGE_PUBLIC="${VNC_BRIDGE_PUBLIC:-port}"
 
+# 内部调度密钥（未显式配置时随机生成；内置调度器与外部 cron 均用它触发 /api/cron）
+if [ -z "${CRON_SECRET:-}" ]; then
+  CRON_SECRET=$( (openssl rand -hex 32 2>/dev/null || cat /proc/sys/kernel/random/uuid | tr -d '-') )
+  export CRON_SECRET
+fi
+
 # ---- 2. 数据库结构初始化（幂等）----
 log "初始化数据库结构..."
 cd "$APP_DIR"
@@ -64,16 +71,50 @@ log "启动 VNC 网关桥..."
 (cd mini-services/vnc-bridge && VNC_BRIDGE_PORT=$VNC_BRIDGE_PORT bun index.ts >> /app/storage/vnc-bridge.log 2>&1) &
 BRIDGE_PID=$!
 
+# ---- 4.6 内置定时任务调度器（默认开启；与外部 cron 可并存 —— 接口侧内存锁防重入）----
+# 环回 TCP 触发受保护 /api/cron（此前依赖用户手工配置外部 crontab，漏配时
+# 闲置回收/看门狗/定时策略激活等引擎任务全部静默停摆）
+if [ "${BUILTIN_CRON:-1}" = "1" ]; then
+  log "启动内置定时调度器（间隔 ${CRON_INTERVAL_SEC:-300}s，BUILTIN_CRON=0 可关闭）..."
+  (
+    CRON_WAIT=20
+    CRON_INTERVAL="${CRON_INTERVAL_SEC:-300}"
+    sleep "$CRON_WAIT" # 等主服务完成启动
+    while :; do
+      wget -q -O /dev/null --timeout=20 --header="x-cron-secret: ${CRON_SECRET}" \
+        "http://127.0.0.1:${PORT}/api/cron?task=all" 2>/dev/null || true
+      sleep "$CRON_INTERVAL"
+    done
+  ) >> /app/storage/cron-ping.log 2>&1 &
+  CRON_PID=$!
+else
+  CRON_PID=""
+fi
+
 # ---- 5. Next.js 主服务（standalone）----
-log "启动 Dockyard 主服务：http://0.0.0.0:${PORT}"
+# 镜像布局：COPY .next/standalone ./ → server.js 位于 /app/server.js（standalone 约定根布局）
+# 兼容两种布局探测，杜绝路径错误导致的静默崩溃（历史缺陷：误指向 .next/standalone/server.js
+# → bun 模块找不到退出 → 错误仅写入 server.log，docker logs 表现为“无错误但容器停止”）
+if [ -f "$APP_DIR/server.js" ]; then
+  SERVER_JS="$APP_DIR/server.js"
+elif [ -f "$APP_DIR/.next/standalone/server.js" ]; then
+  SERVER_JS="$APP_DIR/.next/standalone/server.js"
+else
+  log "严重错误：standalone 主服务产物缺失（server.js 不存在）"
+  exit 1
+fi
+log "启动 Dockyard 主服务：http://0.0.0.0:${PORT}（server.js=${SERVER_JS}）"
 export HOSTNAME=0.0.0.0
 cd "$APP_DIR"
 term_handler() {
   log "收到终止信号，停止全部服务..."
+  if [ -n "$MAIN_PID" ]; then kill "$MAIN_PID" 2>/dev/null || true; fi
   kill $WS_PID $BRIDGE_PID 2>/dev/null || true
+  if [ -n "$CRON_PID" ]; then kill "$CRON_PID" 2>/dev/null || true; fi
+  if [ -n "$MAIN_PID" ]; then wait "$MAIN_PID" 2>/dev/null || true; fi
   exit 0
 }
 trap term_handler SIGTERM SIGINT
-bun .next/standalone/server.js >> /app/storage/server.log 2>&1 &
+bun "$SERVER_JS" >> /app/storage/server.log 2>&1 &
 MAIN_PID=$!
 wait $MAIN_PID

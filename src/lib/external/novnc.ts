@@ -11,6 +11,7 @@ import {
   createIsolatedBrowserContainer,
   ensureSessionNetwork,
   resolveContainerIp,
+  inspectContainer,
   browserProfileDir,
   type BrowserHardeningInfo,
   type BrowserHardeningSpec,
@@ -205,13 +206,72 @@ export async function novncDialTarget(sessionId: string, containerRef?: string |
   return { k: "demo" }
 }
 
-export async function novncHealth(sessionId: string): Promise<{ alive: boolean; clients: number; fps: number; lastInputAt: number } | null> {
+// ---- 自托管模式健康探测辅助 ----
+// 桥侧会话统计（statsByWs 键 = 工作区 ID；App 与桥同容器/同主机部署，环回 TCP 直连，不引入任何 UDP）
+interface BridgeStats { clients: number; lastAt: number; keys: number; pointers: number; frames: number; startedAt: number }
+async function bridgeStats(workspaceId: string): Promise<BridgeStats | null> {
+  const url = `http://127.0.0.1:${ENV.vncBridgePort}/stats?ws=${encodeURIComponent(workspaceId)}`
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 4000)
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, headers: { "x-internal": "1" } })
+    if (!res.ok) return null
+    const json = (await res.json().catch(() => null)) as { ok?: boolean; stats?: Partial<BridgeStats> } | null
+    if (!json?.stats || typeof json.stats.lastAt !== "number") return null
+    const s = json.stats
+    return {
+      clients: s.clients ?? 0,
+      lastAt: s.lastAt,
+      keys: s.keys ?? 0,
+      pointers: s.pointers ?? 0,
+      frames: s.frames ?? 0,
+      startedAt: s.startedAt ?? s.lastAt,
+    }
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// 健康探测上下文（自托管模式必需：容器引用 + 工作区 ID 用于桥统计）
+export interface NovncHealthCtx {
+  workspaceId?: string | null
+  containerRef?: string | null
+}
+
+export async function novncHealth(
+  sessionId: string,
+  ctx?: NovncHealthCtx,
+): Promise<{ alive: boolean; clients: number; fps: number; lastInputAt: number | null; frames?: number } | null> {
   if (externalAvailable.novnc) {
     const res = await novncFetch(`/api/sessions/${sessionId}/health`)
     if (res.status === 404) return null
     if (!res.ok) throw new Error(`NoVNC API health failed: HTTP ${res.status}`)
     const json = (await res.json()) as { alive: boolean; clients: number; fps: number; lastInputAt: number }
     return json
+  }
+  // ---- 自托管容器编排模式：以 Docker 真实容器状态为权威，桥统计提供真实输入活跃度 ----
+  // 修复历史缺陷：此前自托管模式落入模拟表查询 → 永远返回 null → 看门狗误判“崩溃”
+  // → 每轮 cron 摧毁并重建健康容器（用户观察到的“容器莫名其妙停了”）
+  if (externalAvailable.docker) {
+    const ref = ctx?.containerRef || sessionId // 自托管模式 novncSessionId 即容器名
+    const info = await inspectContainer(ref).catch(() => null)
+    if (!info) return null // 容器已不存在（会话已销毁/已回收）
+    const alive = info.state === "running" || info.state === "restarting"
+    // 桥统计（键鼠/帧请求真实活跃）：lastInputAt=null 表示无真实输入信号（调用方回退自身记录）
+    let lastInputAt: number | null = null
+    let clients = 0
+    let frames: number | undefined
+    if (ctx?.workspaceId) {
+      const st = await bridgeStats(ctx.workspaceId)
+      if (st) {
+        lastInputAt = st.lastAt
+        clients = st.clients
+        frames = st.frames
+      }
+    }
+    return { alive, clients, fps: 0, lastInputAt, frames }
   }
   const s = simNovnc().get(sessionId)
   if (!s) return null

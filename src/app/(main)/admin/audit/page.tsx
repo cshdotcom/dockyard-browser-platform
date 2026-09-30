@@ -68,7 +68,7 @@ export default async function AdminAuditPage({
             只读安全视图：登录 / 2FA / 密码 / 设备等安全事件全量检索（不可篡改）
           </p>
         </div>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
           <StatCard title="安全事件总数" value={total} sub="当前筛选范围" icon={<ShieldAlert className="h-4 w-4" />} />
           <StatCard title="24h 事件" value={eventCount24h} sub="最近一天" icon={<Activity className="h-4 w-4" />} />
           <StatCard title="24h 失败事件" value={failedCount24h} sub="失败登录/验证" icon={<TriangleAlert className="h-4 w-4" />} tone={failedCount24h > 0 ? "danger" : "success"} />
@@ -133,7 +133,7 @@ export default async function AdminAuditPage({
           全平台操作审计（只插入不可改删）：支持按资源ID追踪完整操作链路 / JSON diff / CSV导出
         </p>
       </div>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="审计记录总数" value={totalAudit} sub="全量（不可篡改）" icon={<ScrollText className="h-4 w-4" />} />
         <StatCard title="当前筛选结果" value={total} sub="时间/操作人/资源维度" icon={<Activity className="h-4 w-4" />} />
         <StatCard title="WARN 级记录" value={warnCount} sub="全量警告级" icon={<TriangleAlert className="h-4 w-4" />} tone="warning" />

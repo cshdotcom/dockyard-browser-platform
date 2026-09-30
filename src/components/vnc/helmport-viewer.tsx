@@ -857,7 +857,7 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
             <Lock className="h-3 w-3 text-teal-600" /> 剪贴板逐沙箱隔离
           </span>
           <span className="inline-flex items-center gap-1">
-            <Anchor className="h-3 w-3 text-teal-600" /> 纯 TCP/WS 链路（无 UDP）
+            <Anchor className="h-3 w-3 text-teal-600" /> 平台链路纯 TCP/WS（无 UDP）
           </span>
           <span className="ml-auto font-mono text-slate-400">DEV-{deviceTag()}</span>
         </div>
@@ -914,7 +914,7 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
                   </div>
                   <p className="text-sm font-medium text-slate-100">HelmPort 远程桌面 · {workspace.name}</p>
                   <p className="max-w-md px-6 text-center text-xs leading-relaxed text-slate-400">
-                    会话经统一网关中转（工作区 UUID + HMAC 单次票据双因子校验），原始内网地址不暴露。全链路纯 TCP/WS，无 UDP。
+                    会话经统一网关中转（工作区 UUID + HMAC 单次票据双因子校验），原始内网地址不暴露。平台链路全程 TCP/WS、无 UDP（浏览器沙箱内保持原生网络栈，不受影响）。
                     {readonly && " 您持有只读授权：画面镜像可见，键鼠与剪贴板输入将被服务端丢弃。"}
                   </p>
                   {(status === "RUNNING" || status === "IDLE") ? (

@@ -72,9 +72,7 @@ while :; do
     --remote-debugging-address=0.0.0.0 \
     --remote-debugging-port=9222 \
     --download.default_directory=/home/browser/downloads \
-    --disable-quic \
-    --force-webrtc-ip-handling-policy=disable_non_proxied_udp \
-    --disable-features=ExitWarningBubble,WebRtcAllowInputVolumeAdjustment \
+    --disable-features=ExitWarningBubble \
     $PROXY_ARGS \
     "${START_URL:-about:blank}" &
   CHROME_PID=$!

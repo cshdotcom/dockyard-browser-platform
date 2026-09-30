@@ -189,7 +189,7 @@ export function SingboxManager(props: Props) {
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 sm:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <StatCard title="运行中实例" value={props.runningCount} icon={<Server className="h-4 w-4" />} tone="success" />
         <StatCard title="异常/停止" value={props.abnormalCount} icon={<Activity className="h-4 w-4" />} tone={props.abnormalCount > 0 ? "danger" : "default"} />
         <StatCard title="代理池节点" value={props.proxyCount} sub="internal_singbox 类型" icon={<Boxes className="h-4 w-4" />} />

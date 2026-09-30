@@ -215,7 +215,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2">
           <div className="space-y-1.5">
             <Label>组名 *</Label>
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：华东运营组" />
@@ -318,7 +318,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
             </div>
           </div>
           {quotaEnabled && (
-            <div className="grid gap-3 sm:grid-cols-3">
+            <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
               <div className="space-y-1.5">
                 <Label className="text-xs">并发会话</Label>
                 <PrecisionInput value={qSessions} onChange={setQSessions} min={0} max={100000} suffix="个" />
@@ -345,7 +345,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
             <Switch checked={reservedEnabled} onCheckedChange={setReservedEnabled} />
           </div>
           {reservedEnabled && (
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label className="text-xs">预留会话</Label>
                 <PrecisionInput value={rSessions} onChange={setRSessions} min={0} max={100000} suffix="个" />

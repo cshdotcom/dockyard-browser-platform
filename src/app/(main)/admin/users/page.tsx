@@ -146,7 +146,7 @@ export default async function AdminUsersPage({
         </div>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="总用户数" value={statAll} sub="不含软删除" icon={<Users className="h-4 w-4" />} />
         <StatCard title="管理员" value={statAdmin} sub="SUPER_ADMIN + ADMIN" icon={<ShieldCheck className="h-4 w-4" />} />
         <StatCard title="启用账号" value={statEnabled} sub={`${statAll - statEnabled} 个已禁用`} icon={<UserCheck className="h-4 w-4" />} tone="success" />

@@ -133,7 +133,7 @@ export default async function SessionsPage({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="活跃会话" value={activeCount} sub="含当前设备" icon={<MonitorSmartphone className="h-4 w-4" />} />
         <StatCard title="受信任设备" value={trustedCount} sub="免 2FA 直接登录" icon={<ShieldCheck className="h-4 w-4" />} tone="success" />
         <StatCard

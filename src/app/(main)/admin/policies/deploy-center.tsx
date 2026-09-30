@@ -367,7 +367,7 @@ export function PolicyDeployCenter(props: Props) {
       </div>
 
       {/* 统计卡 */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
+      <div className="grid gap-4 grid-cols-1 min-[420px]:grid-cols-2 sm:grid-cols-2 lg:grid-cols-6">
         {props.stats.map((s) => (
           <div key={s.title} className={cn("rounded-lg border p-4 flex items-center gap-3", s.tone === "warning" && "border-amber-300/60 bg-amber-50/50 dark:border-amber-800/50 dark:bg-amber-950/20")}>
             <div className={cn("h-9 w-9 rounded-lg flex items-center justify-center shrink-0", s.tone === "warning" ? "bg-amber-600/10 text-amber-600" : "bg-teal-600/10 text-teal-600")}>{s.icon}</div>
@@ -379,9 +379,9 @@ export function PolicyDeployCenter(props: Props) {
         ))}
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-5">
+      <div className="grid gap-6 grid-cols-1 lg:grid-cols-5 min-w-0">
         {/* ===== 左：策略包编辑 ===== */}
-        <div className="lg:col-span-3 space-y-4">
+        <div className="lg:col-span-3 space-y-4 min-w-0">
           <div className="rounded-xl border p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold flex items-center gap-1.5"><Network className="h-4 w-4 text-teal-600" /> 网络访问开关</h2>

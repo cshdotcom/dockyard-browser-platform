@@ -115,7 +115,7 @@ export default async function AdminGroupsPage() {
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="用户组总数" value={groups.length} sub="树形层级组织" icon={<FolderTree className="h-4 w-4" />} />
         <StatCard title="组成员关系" value={totalUsers} sub="组-用户绑定总数" icon={<Users2 className="h-4 w-4" />} />
         <StatCard title="代理绑定" value={totalProxyBinds} sub={`组-代理节点绑定 / ${totalAdminBinds} 组管理员`} icon={<Network className="h-4 w-4" />} />

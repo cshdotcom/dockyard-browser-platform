@@ -35,7 +35,7 @@ export default async function AdminAlertsPage({
   ])
 
   const stats = (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
       <StatCard title="24h 告警数" value={todayCount} sub="最近一天新增告警" icon={<Bell className="h-4 w-4" />} />
       <StatCard title="待处理告警" value={pendingCount} sub="handleStatus=PENDING" icon={<TriangleAlert className="h-4 w-4" />} tone={pendingCount > 0 ? "warning" : "success"} />
       <StatCard title="待处理 CRITICAL" value={pendingCriticalCount} sub="严重级未处理" icon={<ShieldAlert className="h-4 w-4" />} tone={pendingCriticalCount > 0 ? "danger" : "success"} />

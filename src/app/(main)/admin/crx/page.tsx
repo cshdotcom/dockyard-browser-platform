@@ -215,7 +215,7 @@ export default async function CrxAdminPage({
           全部基于 Chromium Managed Preferences 原生策略（零内核 Patch，后台不存 CRX 二进制）。
         </p>
       </div>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="插件库（启用）" value={totalActive} sub={`回收站外启用插件 / 筛选结果 ${totalPlugins}`} icon={<CheckCircle2 className="h-4 w-4" />} />
         <StatCard title="高危插件" value={totalHighRisk} sub="高危权限自动标记" icon={<TriangleAlert className="h-4 w-4" />} tone="warning" />
         <StatCard title="已安装/已下发" value={stateCount("INSTALLED") + stateCount("POLICY_APPLIED")} sub={`失败 ${stateCount("ALL_FAILED") + stateCount("PRIMARY_FAILED")} · 降级重试 ${stateCount("BACKUP_RETRY")}`} icon={<GitBranch className="h-4 w-4" />} tone="default" />

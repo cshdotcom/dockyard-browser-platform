@@ -94,7 +94,7 @@ async function UaTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Record
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="UA 总数" value={statTotal} sub="池内记录" icon={<MonitorSmartphone className="h-4 w-4" />} />
         <StatCard title="启用中" value={statEnabled} sub="可被调度" icon={<CheckCircle2 className="h-4 w-4" />} tone="success" />
         <StatCard title="累计使用次数" value={statUsage._sum.usageCount || 0} sub="被模板/会话引用" icon={<Shuffle className="h-4 w-4" />} />
@@ -162,7 +162,7 @@ async function DomainTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Re
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="规则总数" value={statTotal} sub="当前筛选" icon={<Globe className="h-4 w-4" />} />
         <StatCard title="黑名单" value={statBlack} sub="BLACK" icon={<CircleSlash className="h-4 w-4" />} tone="danger" />
         <StatCard title="白名单" value={statWhite} sub="WHITE" icon={<CheckCircle2 className="h-4 w-4" />} tone="success" />
@@ -240,7 +240,7 @@ async function EndpointTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: 
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard title="端点规则总数" value={statTotal} sub="当前筛选" icon={<Plug className="h-4 w-4" />} />
         <StatCard title="封禁端点" value={statBlack} sub="BLACK（host:port）" icon={<CircleSlash className="h-4 w-4" />} tone="danger" />
         <StatCard title="放行例外" value={statWhite} sub="WHITE 例外" icon={<CheckCircle2 className="h-4 w-4" />} tone="success" />
@@ -315,7 +315,7 @@ async function ModifyTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Re
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
         <StatCard title="篡改规则总数" value={statTotal} sub="未软删" icon={<Shuffle className="h-4 w-4" />} />
         <StatCard title="生效中" value={statEnabled} sub="enabled" icon={<CheckCircle2 className="h-4 w-4" />} tone="success" />
         <StatCard title="绑定模板数" value={rows.filter((r) => r.templateBinding).length} sub="当前页统计" icon={<Globe className="h-4 w-4" />} />
