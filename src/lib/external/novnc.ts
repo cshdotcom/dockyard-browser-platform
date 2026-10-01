@@ -1,9 +1,10 @@
-// NoVNC 池客户端：三种真实形态按优先级自动选择
-//   1. NOVNC_POOL_URL 配置 → 独立 NoVNC 容器池集群 API（仅 NextJS 内网访问，带硬隔离规格下发）
-//   2. DOCKER_API_URL 配置 → 平台经 Docker API 直接编排硬隔离浏览器容器（自托管）
-//   3. 均未配置 → 本地模拟模式（全链路演示/沙箱验证）
-// 浏览器容器安全模型：只读根FS + CapDrop=ALL + no-new-privileges + 唯一本人Profile卷(noexec)
-//   + 下载目录 noexec tmpfs（下载软件运行即权限错误）+ RestartPolicy=always + supervisor 防退出死循环
+// NoVNC 池客户端：四种运行形态（r13 起单容器内嵌为默认）
+//   1. embedded（默认）→ 单容器全内置：Xvfb+Chromium+x11vnc 同容器进程树，零外部服务
+//   2. DOCKER_API_URL 配置 → 平台经 Docker API 直接编排硬隔离浏览器容器（可选外部形态）
+//   3. NOVNC_POOL_URL 配置 → 独立 NoVNC 容器池集群 API（可选外部形态）
+//   4. 均不可用 → 本地模拟模式（全链路演示/沙箱验证）
+// 浏览器隔离安全模型（内嵌形态）：独立 Linux 用户 Profile 700 隔离 + prlimit 进程硬上限
+//   + unshare 用户/挂载命名空间每沙箱私有策略视图 + 监督循环防退出（同一 Profile 1s 拉起）
 
 import { ENV, externalAvailable } from "../env"
 import { randomUUID } from "crypto"
@@ -16,7 +17,7 @@ import {
   type BrowserHardeningInfo,
   type BrowserHardeningSpec,
 } from "./docker"
-import { writeNetworkPolicyFile, sessionNetworkGateway, type NetworkPolicy } from "../network-policy"
+import { writeNetworkPolicyFile, sessionNetworkGateway, embeddedSandboxBaseline, type NetworkPolicy } from "../network-policy"
 import { resolveWorkspaceCrxPolicy, buildCrxManagedPolicy } from "../crx-policy"
 import type { DomainPolicy } from "../domain-policy"
 import type { EndpointPolicy } from "../endpoint-policy"
@@ -28,8 +29,9 @@ export interface NovncSession {
   resolution: string
   simulated: boolean
   rfb?: { host: string; port: number } | null // RFB(TCP) 拨号目标 —— VNC 桥据此转发
-  containerName?: string | null // 自托管容器引用（防退出看门狗/进程级重启）
+  containerName?: string | null // 内嵌沙箱 id / 自托管容器名（防退出看门狗/进程级重启）
   hardening?: BrowserHardeningInfo | null // 隔离防护快照（落库展示）
+  cdpUrl?: string | null // 内嵌形态：真实 CDP 端点（http://127.0.0.1:<port>/json）
 }
 
 // VNC 桥拨号目标（与 mini-services/vnc-bridge 票据 tgt 结构一致）
@@ -74,6 +76,56 @@ export interface NovncProvisionParams {
 }
 
 export async function createNovncSession(params: NovncProvisionParams): Promise<NovncSession> {
+  // ---- 单容器全内置（默认形态）：Xvfb+Chromium+x11vnc 同容器进程树 ----
+  const { resolveBrowserRuntimeMode, createEmbeddedSandbox } = await import("../embedded-sandbox")
+  const { mode } = resolveBrowserRuntimeMode()
+  if (mode === "embedded" && params.userId && params.profileKey) {
+    // 每沙箱 Chromium 托管策略：四层合并 + CRX + 文件限制 + 代理锁定（写入每沙箱专属策略文件，
+    // 由 unshare 私有挂载命名空间 bind 到 /etc/chromium/policies/managed/ —— 沙箱间互不可见）
+    const policy = params.networkPolicy || {
+      allowInternalNetwork: false,
+      allowSecureLocationAccess: false,
+      source: "GLOBAL_DEFAULT" as const,
+      resolvedAt: new Date().toISOString(),
+    }
+    const crxManaged = params.workspaceId
+      ? buildCrxManagedPolicy(await resolveWorkspaceCrxPolicy(params.workspaceId).catch(() => ({ entries: [], blocklist: [], inheritEnabled: true, blocklistExempt: false, conflicts: [] })))
+      : null
+    const policyFile = await writeNetworkPolicyFile(`ws-${params.profileKey}`, {
+      policy,
+      gatewayIp: null, // 单容器形态无独立会话网络网关；平台自身端口由回环基线封禁
+      proxyUrl: params.proxyUrl || null,
+      domainPolicy: params.domainPolicy || null,
+      endpointPolicy: params.endpointPolicy || null,
+      crxManagedPolicy: crxManaged,
+      filePolicy: params.filePolicy || null,
+      // deny-wins 基线：跨沙箱 CDP/RFB 端口段 + 平台回环端口（安全位置未授予时）
+      extraBaselineBlock: embeddedSandboxBaseline(!policy.allowSecureLocationAccess),
+    }).catch(() => null)
+    const sb = await createEmbeddedSandbox({
+      userId: params.userId,
+      profileKey: params.profileKey,
+      workspaceId: params.workspaceId || null,
+      resolution: params.resolution || "1280x800",
+      startUrl: params.startUrl,
+      proxyUrl: params.proxyUrl || null,
+      cpuLimit: params.cpuLimit,
+      memLimitMb: params.memLimitMb,
+      pidsLimit: 256,
+      policyFile,
+    })
+    return {
+      novncSessionId: sb.id,
+      wsPath: `/novnc/${sb.id}`,
+      secret: randomUUID(),
+      resolution: params.resolution || "1280x800",
+      simulated: false,
+      rfb: sb.rfb,
+      containerName: sb.id,
+      hardening: sb.hardening,
+      cdpUrl: `http://127.0.0.1:${sb.cdpPort}/json`,
+    }
+  }
   if (externalAvailable.novnc) {
     const res = await novncFetch("/api/sessions", {
       method: "POST",
@@ -185,8 +237,15 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
   }
 }
 
-// 解析 VNC 桥拨号目标：池集群(可返回RFB端点) / 自托管容器IP / 模拟(演示RFB引擎)
+// 解析 VNC 桥拨号目标：内嵌沙箱(127.0.0.1:rfbPort) / 池集群(RFB端点) / 自托管容器IP / 模拟(演示RFB引擎)
 export async function novncDialTarget(sessionId: string, containerRef?: string | null): Promise<VncDialTarget | null> {
+  // 单容器内嵌：回环拨号每沙箱 x11vnc（仅本容器网络命名空间内可达，无任何 UDP）
+  if (containerRef && containerRef.startsWith("emb-")) {
+    const { embeddedSandbox } = await import("../embedded-sandbox")
+    const entry = await embeddedSandbox(containerRef)
+    if (entry && entry.rfbPort > 0) return { k: "tcp", h: "127.0.0.1", p: entry.rfbPort }
+    return null
+  }
   if (externalAvailable.novnc && sessionId) {
     try {
       const res = await novncFetch(`/api/sessions/${encodeURIComponent(sessionId)}/endpoint`, undefined, 6000)
@@ -252,6 +311,25 @@ export async function novncHealth(
     const json = (await res.json()) as { alive: boolean; clients: number; fps: number; lastInputAt: number }
     return json
   }
+  // ---- 单容器内嵌：以监督进程存活为权威，桥统计提供真实输入活跃度 ----
+  if ((ctx?.containerRef || sessionId).startsWith("emb-")) {
+    const { embeddedSandbox, embeddedSandboxAlive } = await import("../embedded-sandbox")
+    const entry = await embeddedSandbox(ctx?.containerRef || sessionId)
+    if (!entry) return null // 沙箱已销毁/回收
+    const alive = embeddedSandboxAlive(entry)
+    let lastInputAt: number | null = null
+    let clients = 0
+    let frames: number | undefined
+    if (ctx?.workspaceId) {
+      const st = await bridgeStats(ctx.workspaceId)
+      if (st) {
+        lastInputAt = st.lastAt
+        clients = st.clients
+        frames = st.frames
+      }
+    }
+    return { alive, clients, fps: 0, lastInputAt, frames }
+  }
   // ---- 自托管容器编排模式：以 Docker 真实容器状态为权威，桥统计提供真实输入活跃度 ----
   // 修复历史缺陷：此前自托管模式落入模拟表查询 → 永远返回 null → 看门狗误判“崩溃”
   // → 每轮 cron 摧毁并重建健康容器（用户观察到的“容器莫名其妙停了”）
@@ -279,7 +357,13 @@ export async function novncHealth(
   return { alive: !s.crashed, clients: s.clients, fps: Math.round(s.fps * 1000) / 1000, lastInputAt: s.lastInputAt }
 }
 
-export async function destroyNovncSession(sessionId: string): Promise<boolean> {
+export async function destroyNovncSession(sessionId: string, containerRef?: string | null): Promise<boolean> {
+  // 单容器内嵌：级联终止沙箱进程树（chromium/x11vnc/Xvfb）
+  if ((containerRef || sessionId).startsWith("emb-")) {
+    const { destroyEmbeddedSandbox } = await import("../embedded-sandbox")
+    await destroyEmbeddedSandbox(containerRef || sessionId)
+    return true
+  }
   if (externalAvailable.novnc) {
     const res = await novncFetch(`/api/sessions/${sessionId}`, { method: "DELETE" })
     if (!res.ok && res.status !== 404) throw new Error(`NoVNC API destroy failed: HTTP ${res.status}`)
@@ -312,8 +396,13 @@ export async function disconnectNovncClients(sessionId: string): Promise<boolean
   return true
 }
 
-// 池集群形态：请求池侧重启浏览器进程（同Profile拉起，防退出语义一致）
-export async function restartNovncBrowser(sessionId: string): Promise<{ restarted: boolean }> {
+// 进程级重启（同 Profile 拉起，防退出语义一致）：内嵌 USR1 → 监督循环；池侧 API
+export async function restartNovncBrowser(sessionId: string, containerRef?: string | null): Promise<{ restarted: boolean }> {
+  if ((containerRef || sessionId).startsWith("emb-")) {
+    const { restartEmbeddedBrowser } = await import("../embedded-sandbox")
+    const r = await restartEmbeddedBrowser(containerRef || sessionId)
+    return { restarted: r.restarted }
+  }
   if (externalAvailable.novnc) {
     const res = await novncFetch(`/api/sessions/${encodeURIComponent(sessionId)}/browser/restart`, { method: "POST" }, 15000)
     if (!res.ok) throw new Error(`NoVNC API browser restart failed: HTTP ${res.status}`)

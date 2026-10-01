@@ -51,22 +51,20 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          build-args: |
-            SINGBOX_IMAGE=ghcr.io/sagernet/sing-box:latest
 
       - name: Image summary
         run: |
-          echo "## 镜像构建完成 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "## 镜像构建完成（单容器全内置）🚀" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "镜像地址：" >> $GITHUB_STEP_SUMMARY
+          echo "镜像地址（含平台/浏览器/VNC/sing-box 全部组件）：" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "运行（host 网络模式，CDP 端口可变）：" >> $GITHUB_STEP_SUMMARY
+          echo "运行（一条命令，零外部服务）：" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
           echo "docker run -d --name dockyard --network host \\" >> $GITHUB_STEP_SUMMARY
-          echo "  -e PORT=3000 -e CDP_SERVICE_PORT=9222 \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -e PORT=3000 \\" >> $GITHUB_STEP_SUMMARY
           echo "  -e AUTH_SECRET=change-me -e ENCRYPTION_KEY=change-me-32bytes \\" >> $GITHUB_STEP_SUMMARY
           echo "  -v dockyard-data:/app/db -v dockyard-storage:/app/storage \\" >> $GITHUB_STEP_SUMMARY
           echo "  ghcr.io/${{ github.repository }}:latest" >> $GITHUB_STEP_SUMMARY

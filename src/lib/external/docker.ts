@@ -61,6 +61,12 @@ export interface BrowserHardeningInfo {
   endpointPolicy?: { blackPatterns: string[]; whitePatterns: string[] }
   policyManagedChromium: boolean // Chromium 托管策略文件已注入（只读、不可篡改）
   iccDisabledNetwork: boolean // 会话网络容器互访封禁（跨用户网络不可达）
+  // —— 单容器全内置形态（r13）——
+  runtime?: "embedded" | "docker" // 运行时形态（缺省 docker = 历史快照兼容）
+  separateLinuxUser?: boolean // 每平台用户独立 Linux 用户（Profile 700 隔离）
+  mountNamespacePolicy?: boolean // unshare 用户+挂载命名空间：每沙箱私有策略视图
+  vncLoopbackOnly?: boolean // RFB/CDP 仅回环绑定
+  perSandboxDisplay?: boolean // 每沙箱独立虚拟显示
 }
 
 export const SESSION_NETWORK = "dockyard-sessions"
@@ -220,8 +226,14 @@ export async function resolveContainerIp(idOrName: string): Promise<string | nul
   return null
 }
 
-// 防退出运维动作：向容器内 supervisor(PID 1) 发送 USR1 → 杀掉浏览器子进程 → 主循环立即以同一 Profile 拉起
+// 防退出运维动作：浏览器进程级重启（同一 Profile 1 秒内拉起）
+// 单容器内嵌形态：USR1 → 嵌入式监督循环；外部容器形态：docker exec 容器内 PID 1
 export async function restartBrowserProcessInContainer(idOrName: string): Promise<{ restarted: boolean; simulated: boolean }> {
+  if (idOrName.startsWith("emb-")) {
+    const { restartEmbeddedBrowser } = await import("../embedded-sandbox")
+    const r = await restartEmbeddedBrowser(idOrName)
+    return { restarted: r.restarted, simulated: false }
+  }
   if (externalAvailable.docker) {
     const execCreate = await dockerFetch(`/containers/${encodeURIComponent(idOrName)}/exec`, {
       method: "POST",
@@ -292,8 +304,29 @@ async function dockerFetch(path: string, init?: RequestInit, timeoutMs = ENV.doc
   }
 }
 
+// ---- 嵌入式进程形态（r13：sing-box 容器内进程，单容器全内置）----
+// 条件：未配置 DOCKER_API_URL 且镜像内 sing-box 二进制可用；调用方（singbox 编排）无感知切换
+async function embeddedProcessRuntime() {
+  return await import("../embedded-sandbox")
+}
+function isEmbProcId(id: string): boolean {
+  return id.startsWith("sbx-")
+}
+
 // 创建容器（Sing-Box编排专用：配置JSON通过环境变量注入容器）
 export async function createContainer(spec: DockerContainerSpec): Promise<{ id: string; simulated: boolean }> {
+  // 单容器全内置：sing-box 以同容器进程运行（零外部镜像/零 Docker API）
+  if (!externalAvailable.docker && spec.envVars && typeof spec.envVars.DY_SINGBOX_CONFIG === "string") {
+    const m = await embeddedProcessRuntime()
+    if (m.embeddedSingboxAvailable()) {
+      const r = await m.createEmbeddedProcess({
+        name: spec.name,
+        configJson: spec.envVars.DY_SINGBOX_CONFIG,
+        memLimitMb: spec.memLimitMb,
+      })
+      return { id: r.id, simulated: false }
+    }
+  }
   if (externalAvailable.docker) {
     // HostConfig 资源硬限制：CPU/内存超限直接OOM终止，禁止特权，不挂载宿主机敏感目录
     const body = {
@@ -327,6 +360,7 @@ export async function createContainer(spec: DockerContainerSpec): Promise<{ id: 
 }
 
 export async function startContainer(id: string): Promise<boolean> {
+  if (isEmbProcId(id)) return true // 进程创建即运行
   if (externalAvailable.docker) {
     const res = await dockerFetch(`/containers/${id}/start`, { method: "POST" }, 30000)
     if (!res.ok && res.status !== 304) throw new Error(`Docker API start failed: HTTP ${res.status}`)
@@ -340,6 +374,10 @@ export async function startContainer(id: string): Promise<boolean> {
 }
 
 export async function stopContainer(id: string, timeoutSec = 10): Promise<boolean> {
+  if (isEmbProcId(id)) {
+    const m = await embeddedProcessRuntime()
+    return m.stopEmbeddedProcess(id)
+  }
   if (externalAvailable.docker) {
     const res = await dockerFetch(`/containers/${id}/stop?t=${timeoutSec}`, { method: "POST" }, (timeoutSec + 5) * 1000)
     if (!res.ok && res.status !== 304) throw new Error(`Docker API stop failed: HTTP ${res.status}`)
@@ -351,8 +389,12 @@ export async function stopContainer(id: string, timeoutSec = 10): Promise<boolea
   return true
 }
 
-// 信号触发 sing-box 热重载（SIGHUP）
+// 信号触发 sing-box 热重载（SIGHUP；嵌入式进程同语义）
 export async function signalContainer(id: string, signal = "SIGHUP"): Promise<boolean> {
+  if (isEmbProcId(id)) {
+    const m = await embeddedProcessRuntime()
+    return m.signalEmbeddedProcess(id, signal)
+  }
   if (externalAvailable.docker) {
     const res = await dockerFetch(`/containers/${id}/kill?signal=${signal}`, { method: "POST" })
     if (!res.ok) throw new Error(`Docker API signal failed: HTTP ${res.status}`)
@@ -362,6 +404,10 @@ export async function signalContainer(id: string, signal = "SIGHUP"): Promise<bo
 }
 
 export async function removeContainer(id: string, force = false): Promise<boolean> {
+  if (isEmbProcId(id)) {
+    const m = await embeddedProcessRuntime()
+    return m.removeEmbeddedProcess(id)
+  }
   if (externalAvailable.docker) {
     const res = await dockerFetch(`/containers/${id}?force=${force}&v=1`, { method: "DELETE" }, 30000)
     if (!res.ok && res.status !== 404) throw new Error(`Docker API remove failed: HTTP ${res.status}`)
@@ -372,6 +418,12 @@ export async function removeContainer(id: string, force = false): Promise<boolea
 }
 
 export async function inspectContainer(id: string): Promise<DockerContainerInfo | null> {
+  if (isEmbProcId(id)) {
+    const m = await embeddedProcessRuntime()
+    const info = await m.embeddedProcessInfo(id)
+    if (!info) return null
+    return { id, name: id, state: info.state, status: info.state }
+  }
   if (externalAvailable.docker) {
     const res = await dockerFetch(`/containers/${id}/json`)
     if (res.status === 404) return null
@@ -394,6 +446,12 @@ export async function inspectContainer(id: string): Promise<DockerContainerInfo 
 }
 
 export async function containerStats(id: string): Promise<DockerContainerStats> {
+  if (isEmbProcId(id)) {
+    const m = await embeddedProcessRuntime()
+    const s = await m.embeddedProcessStats(id)
+    if (!s) return { cpuPct: 0, memMb: 0, netRxMb: 0, netTxMb: 0 }
+    return s
+  }
   if (externalAvailable.docker) {
     const res = await dockerFetch(`/containers/${id}/stats?stream=false`, undefined, 15000)
     if (!res.ok) throw new Error(`Docker API stats failed: HTTP ${res.status}`)
@@ -433,6 +491,10 @@ export async function containerStats(id: string): Promise<DockerContainerStats> 
 }
 
 export async function containerLogs(id: string, tail = 200): Promise<string[]> {
+  if (isEmbProcId(id)) {
+    const m = await embeddedProcessRuntime()
+    return m.embeddedProcessLogs(id, tail)
+  }
   if (externalAvailable.docker) {
     const res = await dockerFetch(`/containers/${id}/logs?stdout=1&stderr=1&tail=${tail}&timestamps=1`)
     if (!res.ok) throw new Error(`Docker API logs failed: HTTP ${res.status}`)

@@ -82,7 +82,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
         const reason = ttlExpired ? "TTL到期" : "闲置超时"
         log(`回收 ${ws.name}（${reason}）`)
         if (ws.mode === "cdp_light" && ws.steelSessionId) await destroySession(ws.steelSessionId).catch(() => {})
-        if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId).catch(() => {})
+        if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId, ws.containerRef).catch(() => {})
         const runtimeDelta = ws.startedAt ? Math.max(0, Math.floor((Date.now() - ws.startedAt.getTime()) / 1000)) : 0
         await db.browserWorkspace.update({
           where: { id: ws.id },
@@ -467,7 +467,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
         vncFailCounter().set(ws.id, fails)
         if (fails < maxRecoverFails) {
           try {
-            await destroyNovncSession(ws.novncSessionId!).catch(() => {})
+            await destroyNovncSession(ws.novncSessionId!, ws.containerRef).catch(() => {})
             const { createNovncSession } = await import("@/lib/external/novnc")
             const { encrypt } = await import("@/lib/crypto")
             const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
@@ -509,7 +509,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
         } else {
           // 连续失败 → 判定不可恢复，释放资源并告警
           vncFailCounter().delete(ws.id)
-          await destroyNovncSession(ws.novncSessionId!).catch(() => {})
+          await destroyNovncSession(ws.novncSessionId!, ws.containerRef).catch(() => {})
           await db.browserWorkspace.update({ where: { id: ws.id }, data: { status: "ERROR", crashCategory: "连续自愈失败(3轮)" } })
           await raiseAlert({ title: `NoVNC会话自愈失败转ERROR：${ws.name}`, level: "ERROR", content: "防退出看门狗连续3轮重建失败，会话已转入错误态等待人工处置", resourceType: "WORKSPACE", resourceId: ws.id, ownerUserId: ws.userId })
           n++
@@ -525,7 +525,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
         const lastInput = health.lastInputAt ?? (ws.lastActiveAt ?? ws.updatedAt ?? ws.createdAt).getTime()
         const idleMs = Date.now() - lastInput
         if (idleMs > idleMin * 60_000 && ws.status === "RUNNING") {
-          await destroyNovncSession(ws.novncSessionId!).catch(() => {})
+          await destroyNovncSession(ws.novncSessionId!, ws.containerRef).catch(() => {})
           await db.browserWorkspace.update({ where: { id: ws.id }, data: { status: "DESTROYED", crashCategory: "NoVNC闲置回收" } })
           n++
         } else {

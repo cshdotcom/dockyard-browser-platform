@@ -64,10 +64,18 @@ export const ENV = {
     return process.env.VNC_BRIDGE_URL || ""
   },
   get browserImage() {
-    return process.env.BROWSER_IMAGE || "ghcr.io/cshdotcom/dockyard-browser:latest" // 自托管硬隔离浏览器镜像
+    return process.env.BROWSER_IMAGE || "ghcr.io/cshdotcom/dockyard-browser:latest" // 自托管硬隔离浏览器镜像（可选外部形态）
   },
   get browserVncPort() {
     return Number(process.env.BROWSER_VNC_PORT || 5900)
+  },
+  // ---- 单容器全内置（r13：默认形态，零外部服务）----
+  get browserRuntime() {
+    // auto（默认）：容器内浏览器组件齐备 → 单容器内嵌沙箱；否则按外部配置降级
+    return (process.env.BROWSER_RUNTIME || "auto").toLowerCase() // auto | embedded | docker | pool
+  },
+  get embeddedBrowserBin() {
+    return process.env.EMBEDDED_BROWSER_BIN || "" // 开发/特殊环境手动指定 chromium 二进制
   },
 }
 

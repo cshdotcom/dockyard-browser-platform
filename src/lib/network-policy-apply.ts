@@ -10,7 +10,7 @@
 // ============================================================
 
 import { db } from "./db"
-import { writeNetworkPolicyFile, sessionNetworkGateway } from "./network-policy"
+import { writeNetworkPolicyFile, sessionNetworkGateway, embeddedSandboxBaseline } from "./network-policy"
 import { resolveAccessPolicies } from "./domain-policy"
 import { buildCrxManagedPolicy, resolveWorkspaceCrxPolicy } from "./crx-policy"
 import { ENV, externalAvailable } from "./env"
@@ -49,6 +49,11 @@ export async function refreshWorkspacePolicyFile(workspaceId: string): Promise<b
   // 代理锁定地址保留（安全位置封禁时 ProxyMode=fixed_servers 不因刷新丢失）
   const proxyUrl = await resolveProxyLockUrl(ws.proxyNodeId).catch(() => null)
 
+  // 单容器内嵌形态：注入 deny-wins 回环基线（跨沙箱 CDP/RFB 段 + 平台端口）；
+  // 与创建链路（novnc.ts embedded 分支）同语义，刷新不丢失
+  const isEmbedded = (hardening.runtime as string) === "embedded"
+  const baseline = isEmbedded ? embeddedSandboxBaseline(!bundle.network.allowSecureLocationAccess) : null
+
   const path = await writeNetworkPolicyFile(`ws-${profileKey}`, {
     policy: bundle.network,
     gatewayIp,
@@ -57,6 +62,7 @@ export async function refreshWorkspacePolicyFile(workspaceId: string): Promise<b
     endpointPolicy: bundle.endpoint,
     filePolicy: bundle.file,
     crxManagedPolicy: crxManaged,
+    extraBaselineBlock: baseline,
   }).catch(() => null)
   return !!path
 }

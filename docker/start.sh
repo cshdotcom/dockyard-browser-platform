@@ -1,7 +1,8 @@
 #!/bin/sh
 # ============================================================
-# Dockyard All-In-One 启动脚本：自检 → 数据库初始化 → WS枢纽 → VNC桥 → 内置调度 → 主服务
-# 自检：端口占用 / 数据库连通 / 目录权限
+# Dockyard All-In-One 启动脚本（r13：单容器全内置）
+# 自检 → 数据库初始化 → WS枢纽 → VNC桥 → 内置调度 → 主服务
+# 自检：端口占用 / 数据库连通 / 目录权限 / 嵌入式浏览器组件
 # 由 entrypoint-guard.sh 守护调用：本脚本退出（崩溃）时 guard 自动整轮重启
 # ============================================================
 set -e
@@ -17,22 +18,46 @@ if [ ! -d "$APP_DIR/.next" ]; then
   log "严重错误：.next 构建产物缺失，镜像不完整"
   exit 1
 fi
-mkdir -p /app/db /app/storage/uploads /app/storage/backups /app/storage/snapshots
+mkdir -p /app/db /app/storage/uploads /app/storage/backups /app/storage/snapshots \
+  /app/storage/sandboxes /app/storage/homes /app/storage/netpolicy
 touch /app/storage/.write-test 2>/dev/null || { log "严重错误：存储目录不可写"; exit 1; }
 rm -f /app/storage/.write-test
 
-# 端口占用检测（host 模式下防冲突提示）
+# 端口占用检测（host 模式下防冲突提示；iproute2(ss)，旧环境回退 netstat）
 PORT="${PORT:-3000}"
 VNC_BRIDGE_PORT="${VNC_BRIDGE_PORT:-3005}"
-if command -v netstat >/dev/null 2>&1; then
-  if netstat -ltn 2>/dev/null | grep -q ":$PORT "; then
-    log "警告：端口 $PORT 已被占用（host 模式请用 PORT 环境变量改端口）"
-  fi
-  if netstat -ltn 2>/dev/null | grep -q ":$VNC_BRIDGE_PORT "; then
-    log "警告：VNC 桥端口 $VNC_BRIDGE_PORT 已被占用（可用 VNC_BRIDGE_PORT 环境变量改端口）"
+port_listen() {
+  if command -v ss >/dev/null 2>&1; then ss -ltn 2>/dev/null; elif command -v netstat >/dev/null 2>&1; then netstat -ltn 2>/dev/null; else true; fi
+}
+if port_listen | grep -q ":$PORT "; then
+  log "警告：端口 $PORT 已被占用（host 模式请用 PORT 环境变量改端口）"
+fi
+if port_listen | grep -q ":$VNC_BRIDGE_PORT "; then
+  log "警告：VNC 桥端口 $VNC_BRIDGE_PORT 已被占用（可用 VNC_BRIDGE_PORT 环境变量改端口）"
+fi
+log "自检通过：构建产物/目录权限正常；主服务端口 $PORT；VNC桥端口 $VNC_BRIDGE_PORT"
+
+# ---- 1.5 嵌入式沙箱运行时能力探测（单容器全内置核心组件）----
+# chromium/xvfb/x11vnc 齐备 → BROWSER_RUNTIME=auto 自动进入单容器内嵌形态（默认）
+if [ "${BROWSER_RUNTIME:-auto}" = "auto" ] || [ "${BROWSER_RUNTIME:-auto}" = "embedded" ]; then
+  EMB_OK=1
+  for b in chromium Xvfb x11vnc; do
+    command -v "$b" >/dev/null 2>&1 || EMB_OK=0
+  done
+  if [ "$EMB_OK" = "1" ]; then
+    log "嵌入式沙箱运行时就绪：chromium + Xvfb + x11vnc（单容器内嵌，零外部服务）"
+    if unshare -Urm true 2>/dev/null; then
+      log "用户/挂载命名空间可用：每沙箱私有 Chromium 托管策略已启用"
+    else
+      log "警告：unshare 用户命名空间不可用（内核/安全模块限制）→ 每沙箱策略降级为全局基线；可尝试 docker run --cap-add SYS_ADMIN"
+    fi
+  else
+    log "警告：容器内缺少 chromium/xvfb/x11vnc 组件 → 浏览器会话以演示模式运行（镜像异常或手动裁剪）"
   fi
 fi
-log "自检通过：构建产物/目录权限正常；主服务端口 $PORT；CDP服务端口 ${CDP_SERVICE_PORT:-9222}；VNC桥端口 $VNC_BRIDGE_PORT"
+if command -v /usr/local/bin/sing-box >/dev/null 2>&1; then
+  log "sing-box 容器内进程模式就绪（代理编排无需外部容器）"
+fi
 
 # VNC 桥共享密钥（未显式配置时随机生成，同进程树内两侧一致，绝不回显）
 if [ -z "${VNC_BRIDGE_SECRET:-}" ]; then

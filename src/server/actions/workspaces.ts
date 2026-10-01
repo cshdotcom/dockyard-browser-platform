@@ -252,6 +252,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           novncSessionId: novnc.novncSessionId,
           novncSecret: encrypt(novnc.secret),
           novncConnCount: 1,
+          cdpUrl: novnc.cdpUrl || null, // 内嵌形态：真实 CDP 端点（http://127.0.0.1:<port>/json）
           containerRef: novnc.containerName || null,
           hardeningJson: hardeningJsonInput,
           networkPolicyJson: netPolicyJson(netPolicy, domPolicy, endPolicy, filePolicy),
@@ -284,7 +285,7 @@ export async function stopWorkspaceAction(input: unknown): Promise<ActionResult>
     if (ctx.userId !== ws.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作该工作区")
 
     if (ws.mode === "cdp_light" && ws.steelSessionId) await destroySession(ws.steelSessionId).catch(() => {})
-    if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId).catch(() => {})
+    if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId, ws.containerRef).catch(() => {})
     if (ws.proxyNodeId) await db.proxyNode.update({ where: { id: ws.proxyNodeId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
     if (ws.singboxInstanceId) await db.singboxInstance.update({ where: { id: ws.singboxInstanceId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
 
@@ -342,6 +343,7 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
         where: { id },
         data: {
           status: "RUNNING", novncSessionId: novnc.novncSessionId, novncSecret: encrypt(novnc.secret),
+          cdpUrl: novnc.cdpUrl || null,
           startedAt: new Date(),
           containerRef: novnc.containerName || null,
           hardeningJson: JSON.parse(JSON.stringify(novnc.hardening ? { ...novnc.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,
@@ -372,7 +374,7 @@ export async function deleteWorkspaceAction(input: unknown): Promise<ActionResul
 
     if (ws.status === "RUNNING" || ws.status === "CREATING") {
       if (ws.mode === "cdp_light" && ws.steelSessionId) await destroySession(ws.steelSessionId).catch(() => {})
-      if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId).catch(() => {})
+      if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId, ws.containerRef).catch(() => {})
     }
     if (ws.proxyNodeId) await db.proxyNode.update({ where: { id: ws.proxyNodeId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
     if (ws.singboxInstanceId) await db.singboxInstance.update({ where: { id: ws.singboxInstanceId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
@@ -413,7 +415,7 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
         data: { steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, proxyNodeId: proxyNodeId || null, singboxInstanceId: proxyInfo.singboxInstanceId || null, status: "RUNNING", startedAt: new Date() },
       })
     } else {
-      if (ws.novncSessionId) await destroyNovncSession(ws.novncSessionId).catch(() => {})
+      if (ws.novncSessionId) await destroyNovncSession(ws.novncSessionId, ws.containerRef).catch(() => {})
       const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
       const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
       const switchedPolicy = await resolveNetworkPolicy(ws.userId, ws.id)
@@ -440,6 +442,7 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
         where: { id },
         data: {
           novncSessionId: novnc.novncSessionId, novncSecret: encrypt(novnc.secret),
+          cdpUrl: novnc.cdpUrl || null,
           containerRef: novnc.containerName || null,
           hardeningJson: JSON.parse(JSON.stringify(novnc.hardening ? { ...novnc.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,
           networkPolicyJson: netPolicyJson(switchedPolicy, switchedDomain, switchedEndpoint, switchedFile),
@@ -797,7 +800,7 @@ export async function restartBrowserProcessAction(input: unknown): Promise<Actio
       result = await restartBrowserProcessInContainer(ws.containerRef)
     } else if (ws.novncSessionId) {
       // 池集群：委托池侧重启；模拟模式同样走适配器
-      const r = await restartNovncBrowser(ws.novncSessionId)
+      const r = await restartNovncBrowser(ws.novncSessionId, ws.containerRef)
       result = { restarted: r.restarted, simulated: !ws.containerRef && !(await import("@/lib/env")).externalAvailable.novnc && !(await import("@/lib/env")).externalAvailable.docker }
     } else {
       throw new Error("会话通道不存在")

@@ -100,8 +100,29 @@ export function platformSecureEndpoints(): string[] {
     ENV.vncBridgePort, // HelmPort VNC 网关桥
     ENV.cdpServicePort, // CDP 服务后台端口
     Number(process.env.WS_HUB_PORT || 3003), // 事件推送枢纽
+    Number(process.env.WS_EVENT_PORT || 3004), // 事件注入（仅回环监听）
   ]
   return ports.filter((p) => p > 0).map((p) => String(p))
+}
+
+// ---- 单容器全内置（r13）：跨沙箱安全基线（deny-wins，不可被任何作用域豁免）----
+// 嵌入式沙箱与平台共享网络命名空间：即便管理员放行内网，也必须无条件封禁：
+//   · 其他沙箱的 CDP/RFB 端口段（防跨沙箱浏览器接管 —— 单容器形态的 ICC 等价物）
+//   · 平台自身端口（allowSecureLocationAccess=false 时；管理员显式授予后放行）
+export const EMBEDDED_CDP_PORT_RANGE = { base: 29222, span: 60 } // 每沙箱 CDP 端口段（仅 127.0.0.1 绑定）
+export const EMBEDDED_RFB_PORT_RANGE = { base: 25900, span: 60 } // 每沙箱 x11vnc 端口段（仅 127.0.0.1 绑定）
+
+export function embeddedSandboxBaseline(includePlatform: boolean): string[] {
+  const ports: number[] = []
+  for (let i = 0; i < EMBEDDED_CDP_PORT_RANGE.span; i++) ports.push(EMBEDDED_CDP_PORT_RANGE.base + i)
+  for (let i = 0; i < EMBEDDED_RFB_PORT_RANGE.span; i++) ports.push(EMBEDDED_RFB_PORT_RANGE.base + i)
+  if (includePlatform) for (const p of platformSecureEndpoints()) ports.push(Number(p))
+  // 三种环回形态全部覆盖（IPv4 / localhost / IPv6 字面量）
+  const out: string[] = []
+  for (const h of ["127.0.0.1", "localhost", "[::1]"]) {
+    for (const p of ports) out.push(`${h}:${p}`)
+  }
+  return out
 }
 
 // ---- 策略解析（四层回退：单沙箱 > 用户 > 组 > 全局默认，默认拒绝）----
@@ -195,6 +216,7 @@ export interface ChromiumPolicyOptions {
   endpointPolicy?: EndpointPolicy | null // 端点级精确限制（host:port 作用域合并后）
   crxManagedPolicy?: Record<string, unknown> | null // CRX 扩展管控策略（五级合并后的 Managed Preferences）
   filePolicy?: import("./file-policy").FilePolicy | null // 文件访问限制策略（四层合并后；缺省按系统默认：下载/上传允许、file:// 禁）
+  extraBaselineBlock?: string[] | null // 单容器内嵌基线（deny-wins：跨沙箱 CDP/RFB 段 + 平台回环端口；不可被任何作用域豁免）
 }
 
 export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<string, unknown> {
@@ -296,6 +318,12 @@ export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<
   if (!policy.allowInternalNetwork) {
     managed.WebRtcIPHandling = "disable_non_proxied_udp"
     managed.AllowWebRtcUdpPorts = [] as number[]
+  }
+  // —— 单容器内嵌基线（deny-wins，最后注入）：即便管理员放行内网，跨沙箱 CDP/RFB 段也绝不豁免 ——
+  // 注：Chromium URLAllowlist 命中优先于 URLBlocklist（引擎语义）；此处仅防域名白名单模式叠加放行，
+  // 管理员显式将环回端口段加入白名单属极端配置，由部署文档声明禁止
+  if (opts.extraBaselineBlock && opts.extraBaselineBlock.length > 0) {
+    blocklist.push(...expandPatterns(opts.extraBaselineBlock))
   }
   return managed
 }
