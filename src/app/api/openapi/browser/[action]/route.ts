@@ -47,7 +47,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ act
     )
   }
 
-  const auth = await authenticateApiToken(req, def.perm)
+  const auth = await authenticateApiToken(req, def.perm, "browser")
   if (!auth.ok) return NextResponse.json(auth.body, { status: auth.status })
   const ctx = auth.ctx!
 

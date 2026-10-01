@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { MCP_OPERATIONS } from "@/server/mcp/engine"
 import { BROWSER_ACTIONS } from "@/lib/external/cdp-control"
+import { TOKEN_SCOPES, scopeForMcpCode } from "@/lib/token-scopes"
 
 // OpenAPI 3.0 标准化接口文档自动生成：可直接被第三方平台/AI客户端/运维系统对接
 // 同时输出 MCP 工具描述（tools/list 兼容）
@@ -119,7 +120,7 @@ export async function GET() {
       title: "Dockyard 浏览器工作平台 OpenAPI",
       version: "1.0.0",
       description:
-        "企业级远程浏览器工作平台对外接口。统一网关：单域名+单WebSocket+单API入口；APIKey隔离全部资源（APIKey=租户，UUID=资源，Token=用户，SessionID=客户端，DeviceID=设备 五重隔离）。鉴权：请求头 x-api-key。所有响应 { code, msg, data, traceId }。",
+        "企业级远程浏览器工作平台对外接口。统一网关：单域名+单WebSocket+单API入口；APIKey隔离全部资源（APIKey=租户，UUID=资源，Token=用户，SessionID=客户端，DeviceID=设备 五重隔离）。鉴权：请求头 x-api-key。所有响应 { code, msg, data, traceId }。令牌双重授权模型：① 权限级别（只读=仅查询 / 读写=查询+创建+修改+执行 / 管理级=含管理操作）② 功能范围 scope 白名单（空=不限；非空=仅允许命中功能面）。",
     },
     servers: [{ url: "/", description: "统一网关入口（与Web控制台同域）" }],
     components: {
@@ -147,6 +148,7 @@ export async function GET() {
       batch: op.batch,
       danger: !!op.danger,
       requiredPermission: op.perm === 8 ? "ADMIN" : op.perm === 4 ? "EXECUTE" : op.perm === 2 ? "WRITE" : "READ",
+      requiredScope: scopeForMcpCode(op.code) || "-",
       inputSchema: op.schema,
     })),
     "x-browser-actions": BROWSER_ACTIONS.map((a) => ({
@@ -155,6 +157,12 @@ export async function GET() {
       params: a.params,
       requiredPermission: a.perm === 8 ? "ADMIN" : a.perm === 4 ? "EXECUTE" : a.perm === 2 ? "WRITE" : "READ",
     })),
+    "x-token-scopes": TOKEN_SCOPES.map((s) => ({ key: s.key, label: s.label, description: s.desc })),
+    "x-token-levels": {
+      READ_ONLY: "仅查询类操作（列表/状态/任务查询）",
+      READ_WRITE: "查询 + 创建/修改/执行（浏览器控制、批量编排等）",
+      ADMIN: "含用户/令牌/强制管控等管理操作（仅平台管理员账号可授予）",
+    },
     "x-rate-limits": {
       perKeyPerSecond: "mcp.perKeyPerSecond 配置（默认20）",
       perKeyPerMinute: "默认300",

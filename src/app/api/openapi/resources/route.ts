@@ -6,7 +6,7 @@ import { authenticateApiToken, tokenResponse, TOKEN_PERM, attachOwnership } from
 // ownerUserId / ownerUserName / createdByUserId / createdByUserName / userGroupId / userGroupName
 
 export async function GET(req: NextRequest) {
-  const auth = await authenticateApiToken(req, TOKEN_PERM.READ)
+  const auth = await authenticateApiToken(req, TOKEN_PERM.READ, "resources")
   if (!auth.ok) return NextResponse.json(auth.body, { status: auth.status })
   const ctx = auth.ctx!
   return tokenResponse(req, ctx, async () => {

@@ -2,12 +2,12 @@
 
 // 令牌列表交互：新建（明文一次展示）/ 编辑 / 删除 / 启停
 // 有效期：快捷选项 7天/30天/90天/1年/永久 + 自定义 datetime-local
-// 权限：read/write/execute/admin 复选框 → 位掩码 1/2/4/8
+// r12：权限级别单选（只读/读写/管理级）+ 功能范围 scope 复选（空 = 不限）
 
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Copy, Eye, EyeOff, KeyRound, Loader2, Pencil, Plus, Trash2 } from "lucide-react"
+import { Copy, Eye, EyeOff, KeyRound, Loader2, Pencil, Plus, Trash2, ShieldCheck } from "lucide-react"
 import { DataTable } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { Badge } from "@/components/ui/badge"
@@ -36,6 +36,7 @@ import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
+import { TOKEN_SCOPES, levelOfMask, levelLabel, scopeLabel } from "@/lib/token-scopes"
 import {
   createApiTokenAction,
   updateApiTokenAction,
@@ -43,11 +44,21 @@ import {
   toggleApiTokenAction,
 } from "@/server/actions/tokens"
 
+type Level = "READ_ONLY" | "READ_WRITE" | "ADMIN"
+const IS_ADMIN_ROLE = (role: string) => role === "ADMIN" || role === "SUPER_ADMIN"
+
+const LEVEL_OPTIONS: { key: Level; title: string; hint: string; adminOnly?: boolean }[] = [
+  { key: "READ_ONLY", title: "只读", hint: "仅查询类操作：列表/状态/任务查询，不能创建/修改/删除任何资源" },
+  { key: "READ_WRITE", title: "读写", hint: "查询 + 创建/修改/执行（含浏览器控制、批量编排等业务操作）" },
+  { key: "ADMIN", title: "管理级", hint: "含用户/令牌/强制管控等管理操作，仅平台管理员可授予", adminOnly: true },
+]
+
 export interface TokenRow {
   id: string
   name: string
   prefix: string
   permissionsMask: number
+  scopes: string[] | null
   status: "PERMANENT" | "NORMAL" | "EXPIRING" | "EXPIRED"
   enabled: boolean
   qpsLimit: number
@@ -67,12 +78,22 @@ const STATUS_META: Record<TokenRow["status"], { label: string; className: string
 }
 
 function maskLabel(mask: number): string {
+  const lv = levelOfMask(mask)
+  if (lv === "READ_ONLY" || lv === "READ_WRITE" || lv === "ADMIN") return levelLabel(mask)
   const parts: string[] = []
   if (mask & 1) parts.push("读")
   if (mask & 2) parts.push("写")
   if (mask & 4) parts.push("执行")
   if (mask & 8) parts.push("管理")
-  return parts.length ? parts.join(" / ") : "无"
+  return parts.length ? `自定义(${parts.join("/")})` : "无"
+}
+
+// 掩码 → 表单级别（自定义旧数据归到读写，保存时归一化）
+function levelOfRow(mask: number): Level {
+  const lv = levelOfMask(mask)
+  if (lv === "READ_ONLY") return "READ_ONLY"
+  if (lv === "ADMIN") return "ADMIN"
+  return "READ_WRITE"
 }
 
 // ISO → datetime-local 值（本地时区）
@@ -137,7 +158,9 @@ export function TokensTable({ rows, total, page, pageSize, keyword, sortField, s
   const [fName, setFName] = React.useState("")
   const [fExpiryMode, setFExpiryMode] = React.useState<ExpiryMode>("30d")
   const [fCustomExpire, setFCustomExpire] = React.useState("")
-  const [fPerm, setFPerm] = React.useState({ read: true, write: false, execute: false, admin: false })
+  const [fLevel, setFLevel] = React.useState<Level>("READ_WRITE")
+  const [fScopeUnlimited, setFScopeUnlimited] = React.useState(true) // true = 不限（全功能面）
+  const [fScopes, setFScopes] = React.useState<string[]>([])
   const [fIpList, setFIpList] = React.useState("")
   const [fQps, setFQps] = React.useState(0)
   const [submitting, setSubmitting] = React.useState(false)
@@ -147,7 +170,9 @@ export function TokensTable({ rows, total, page, pageSize, keyword, sortField, s
     setFName("")
     setFExpiryMode("30d")
     setFCustomExpire("")
-    setFPerm({ read: true, write: false, execute: false, admin: false })
+    setFLevel("READ_WRITE")
+    setFScopeUnlimited(true)
+    setFScopes([])
     setFIpList("")
     setFQps(0)
     setFormOpen(true)
@@ -163,12 +188,9 @@ export function TokensTable({ rows, total, page, pageSize, keyword, sortField, s
       setFExpiryMode("custom")
       setFCustomExpire(isoToLocalInput(row.expireAtIso))
     }
-    setFPerm({
-      read: !!(row.permissionsMask & 1),
-      write: !!(row.permissionsMask & 2),
-      execute: !!(row.permissionsMask & 4),
-      admin: !!(row.permissionsMask & 8),
-    })
+    setFLevel(levelOfRow(row.permissionsMask))
+    setFScopeUnlimited(!row.scopes || row.scopes.length === 0)
+    setFScopes(row.scopes || [])
     setFIpList(row.ipWhitelist.join("\n"))
     setFQps(row.qpsLimit)
     setFormOpen(true)
@@ -193,6 +215,10 @@ export function TokensTable({ rows, total, page, pageSize, keyword, sortField, s
       toast.error("令牌名称必填")
       return
     }
+    if (!fScopeUnlimited && fScopes.length === 0) {
+      toast.error("请至少勾选一项功能范围，或选择「不限」")
+      return
+    }
     const expireIso = buildExpireIso()
     if (expireIso === undefined) return
     const ipList = fIpList.split("\n").map((s) => s.trim()).filter(Boolean)
@@ -202,7 +228,8 @@ export function TokensTable({ rows, total, page, pageSize, keyword, sortField, s
         id: editing?.id,
         name: fName.trim(),
         expireAtIso: expireIso,
-        permissions: fPerm,
+        level: fLevel,
+        scopes: fScopeUnlimited ? [] : fScopes,
         ipWhitelist: ipList,
         qps: fQps,
       }
@@ -288,16 +315,38 @@ export function TokensTable({ rows, total, page, pageSize, keyword, sortField, s
     },
     {
       key: "permissionsMask",
-      title: "权限",
+      title: "权限级别",
       render: (row: TokenRow) => (
-        <div className="flex flex-wrap gap-1">
-          {row.permissionsMask & 1 && <Badge variant="outline" className="text-xs">读</Badge>}
-          {row.permissionsMask & 2 && <Badge variant="outline" className="text-xs">写</Badge>}
-          {row.permissionsMask & 4 && <Badge variant="outline" className="text-xs">执行</Badge>}
-          {row.permissionsMask & 8 && <Badge variant="outline" className="text-xs">管理</Badge>}
-          {row.permissionsMask === 0 && <span className="text-xs text-muted-foreground">无</span>}
+        <div className="flex flex-col gap-1 items-start">
+          <Badge
+            variant="outline"
+            className={cn(
+              "text-xs",
+              levelOfRow(row.permissionsMask) === "ADMIN" && "border-red-300 text-red-700 dark:text-red-400",
+              levelOfRow(row.permissionsMask) === "READ_ONLY" && "border-sky-300 text-sky-700 dark:text-sky-400",
+              levelOfRow(row.permissionsMask) === "READ_WRITE" && "border-emerald-300 text-emerald-700 dark:text-emerald-400",
+            )}
+          >
+            {maskLabel(row.permissionsMask)}
+          </Badge>
         </div>
       ),
+    },
+    {
+      key: "scopes",
+      title: "功能范围",
+      render: (row: TokenRow) =>
+        !row.scopes || row.scopes.length === 0 ? (
+          <span className="text-xs text-muted-foreground">不限（全功能面）</span>
+        ) : (
+          <div className="flex flex-wrap gap-1 max-w-[220px]">
+            {row.scopes.map((s) => (
+              <Badge key={s} variant="secondary" className="text-[11px] font-normal">
+                {scopeLabel(s)}
+              </Badge>
+            ))}
+          </div>
+        ),
     },
     {
       key: "status",
@@ -457,35 +506,74 @@ export function TokensTable({ rows, total, page, pageSize, keyword, sortField, s
             </div>
 
             <div className="space-y-1.5">
-              <Label>权限（位掩码）</Label>
-              <div className="grid grid-cols-2 gap-2">
-                {(
-                  [
-                    { key: "read", label: "读取", hint: "位 1 · 查询类接口" },
-                    { key: "write", label: "写入", hint: "位 2 · 创建/修改" },
-                    { key: "execute", label: "执行", hint: "位 4 · 运行类操作" },
-                    { key: "admin", label: "管理", hint: "位 8 · 高危管理操作" },
-                  ] as const
-                ).map((it) => (
+              <Label>权限级别</Label>
+              <div className="space-y-2">
+                {LEVEL_OPTIONS.filter((it) => !it.adminOnly || IS_ADMIN_ROLE(role)).map((it) => (
                   <label
                     key={it.key}
                     className={cn(
                       "flex items-start gap-2 rounded-md border p-3 cursor-pointer transition-colors",
-                      fPerm[it.key] ? "border-teal-600 bg-teal-50 dark:bg-teal-950/40" : "border-input"
+                      fLevel === it.key ? "border-teal-600 bg-teal-50 dark:bg-teal-950/40" : "border-input"
                     )}
                   >
-                    <Checkbox
-                      checked={fPerm[it.key]}
-                      onCheckedChange={(v) => setFPerm((prev) => ({ ...prev, [it.key]: v === true }))}
-                      className="mt-0.5"
+                    <input
+                      type="radio"
+                      name="token-level"
+                      className="mt-1 accent-teal-600"
+                      checked={fLevel === it.key}
+                      onChange={() => setFLevel(it.key)}
                     />
                     <div>
-                      <p className="text-sm font-medium">{it.label}</p>
+                      <p className="text-sm font-medium">{it.title}</p>
                       <p className="text-xs text-muted-foreground">{it.hint}</p>
                     </div>
                   </label>
                 ))}
+                {fLevel === "ADMIN" && (
+                  <p className="text-xs text-red-600">管理级令牌可执行用户/令牌/强制管控等高危操作，请谨慎授予</p>
+                )}
               </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <Label className="flex items-center gap-1.5">
+                  <ShieldCheck className="h-4 w-4 text-teal-600" />
+                  功能范围限制
+                </Label>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+                  <Checkbox checked={fScopeUnlimited} onCheckedChange={(v) => setFScopeUnlimited(v === true)} />
+                  不限（开放全部功能面）
+                </label>
+              </div>
+              {!fScopeUnlimited && (
+                <div className="rounded-md border p-3 space-y-2">
+                  <p className="text-xs text-muted-foreground">勾选该令牌允许调用的功能面（与权限级别正交：只读令牌只能查，读写令牌可改）</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {TOKEN_SCOPES.map((s) => (
+                      <label
+                        key={s.key}
+                        className={cn(
+                          "flex items-start gap-2 rounded-md border p-2.5 cursor-pointer transition-colors",
+                          fScopes.includes(s.key) ? "border-teal-600 bg-teal-50 dark:bg-teal-950/40" : "border-input"
+                        )}
+                      >
+                        <Checkbox
+                          checked={fScopes.includes(s.key)}
+                          onCheckedChange={(v) => {
+                            setFScopes((prev) => (v === true ? [...new Set([...prev, s.key])] : prev.filter((k) => k !== s.key)))
+                          }}
+                          className="mt-0.5"
+                        />
+                        <div>
+                          <p className="text-sm font-medium">{s.label}</p>
+                          <p className="text-xs text-muted-foreground">{s.desc}</p>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="space-y-1.5">

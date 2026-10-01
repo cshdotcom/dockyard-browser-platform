@@ -1,6 +1,7 @@
 import { db } from "@/lib/db"
 import { requireAuth } from "@/lib/permissions"
 import { getConfigBool, getConfigNumber } from "@/lib/config"
+import { normalizeScopes } from "@/lib/token-scopes"
 import { parseListQuery, pageSkipTake, safeOrderBy, fmtDate } from "@/lib/utils-server"
 import { StatCard } from "@/components/shared/confirm"
 import { KeyRound, Clock, ShieldAlert, Infinity as InfinityIcon } from "lucide-react"
@@ -62,6 +63,7 @@ export default async function TokensPage({
     // 掩码：仅显示前 8 位前缀
     prefix: `${t.tokenPrefix}••••`,
     permissionsMask: t.permissionsMask,
+    scopes: normalizeScopes(t.scopes),
     status: tokenStatusOf(t.expireAt, warnDays),
     enabled: t.enabled,
     qpsLimit: t.qpsLimit,

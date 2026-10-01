@@ -290,6 +290,9 @@ model ApiToken {
   tokenHash      String    @unique
   tokenPrefix    String // 前8位用于辨识
   permissionsMask Int      @default(0)
+  // 功能范围（scope 白名单）：null/[] = 不限（全部授权范围）；
+  // 非空数组 = 仅允许调用命中数组内 scope 的功能面（browser/proxy/user/token/recycle/session/crx/resources）
+  scopes         Json?
   ipWhitelist    Json?
   qpsLimit       Float     @default(0) // 0 = 全局默认
   expireAt       DateTime? // null = 永久

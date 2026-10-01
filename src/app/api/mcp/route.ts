@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
 import { db } from "@/lib/db"
-import { authenticateApiToken, TOKEN_PERM } from "@/lib/api-token-auth"
+import { authenticateApiToken, TOKEN_PERM, checkTokenScope, scopeForMcpCode } from "@/lib/api-token-auth"
 import { writeAudit } from "@/lib/audit"
 import { rateLimit } from "@/lib/rate-limit"
 import { getConfigBool } from "@/lib/config"
@@ -40,7 +40,9 @@ function jsonRpcOk(id: unknown, data: unknown) {
 
 export async function POST(req: NextRequest) {
   const traceId = crypto.randomUUID()
-  const auth = await authenticateApiToken(req, TOKEN_PERM.EXECUTE)
+  // 门禁位 READ：让只读令牌也能调用查询类工具（workspace.list 等）；
+  // 每个操作自身的权限位（WRITE/EXECUTE/ADMIN）与功能范围 scope 在引擎层逐操作强制
+  const auth = await authenticateApiToken(req, TOKEN_PERM.READ)
   if (!auth.ok) return NextResponse.json(auth.body, { status: auth.status })
   const ctx = auth.ctx!
 
@@ -64,7 +66,12 @@ export async function POST(req: NextRequest) {
     }
     const p = parsed.data
     if (p.method === "tools/list") {
-      return jsonRpcOk(p.id, { tools: MCP_OPERATIONS.map((op) => ({ name: op.code, description: op.description, inputSchema: op.schema })) })
+      // 只列出该令牌有权调用的工具（权限位 + 功能范围双重过滤）
+      const tools = MCP_OPERATIONS.filter((op) => {
+        if ((ctx.permissions & op.perm) !== op.perm) return false
+        return checkTokenScope(ctx, scopeForMcpCode(op.code)).ok
+      }).map((op) => ({ name: op.code, description: op.description, inputSchema: op.schema }))
+      return jsonRpcOk(p.id, { tools })
     }
     if (p.method === "tasks/list") {
       const tasks = await listTasks(ctx.userId, 20)
@@ -72,14 +79,19 @@ export async function POST(req: NextRequest) {
     }
     const code = p.params?.code
     if (!code) return NextResponse.json({ jsonrpc: "2.0", id: p.id ?? null, error: { code: -32602, message: "缺少操作 code" } })
-    const result = await runBatchOperation({
-      code,
-      params: p.params?.arguments || {},
-      targets: p.params?.targets || [],
-      priority: p.params?.priority || "MEDIUM",
-      ctx,
-    })
-    return jsonRpcOk(p.id, result)
+    try {
+      const result = await runBatchOperation({
+        code,
+        params: p.params?.arguments || {},
+        targets: p.params?.targets || [],
+        priority: p.params?.priority || "MEDIUM",
+        ctx,
+      })
+      return jsonRpcOk(p.id, result)
+    } catch (e) {
+      // 权限位 / 功能范围不足：引擎层拒绝（403 语义，不建任务记录）
+      return NextResponse.json({ jsonrpc: "2.0", id: p.id ?? null, error: { code: 40300, message: e instanceof Error ? e.message : String(e) } })
+    }
   }
 
   // ---- 原生风格调用 ----
@@ -100,7 +112,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ code: res.ok ? 0 : 40001, msg: res.message, traceId })
   }
 
-  const result = await runBatchOperation({ code: p.code, params: p.params, targets: p.targets, priority: p.priority, ctx })
+  let result
+  try {
+    result = await runBatchOperation({ code: p.code, params: p.params, targets: p.targets, priority: p.priority, ctx })
+  } catch (e) {
+    // 权限位 / 功能范围不足：引擎层拒绝（403，不建任务记录）
+    return NextResponse.json({ code: 40300, msg: e instanceof Error ? e.message : String(e), data: null, traceId }, { status: 403 })
+  }
   await writeAudit({
     operatorUserId: ctx.userId,
     operatorName: ctx.username,

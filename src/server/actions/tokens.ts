@@ -4,6 +4,10 @@
 // 全局策略校验：token.maxPerUser / token.allowPermanent(仅 SUPER_ADMIN 豁免) / token.maxLifetimeDays
 // 权限锁：blockCreateApiToken / blockEditTokenExpiry / blockDeleteResource
 // 明文 token 仅创建时返回一次，库内只存 sha256 哈希
+//
+// r12 升级：权限级别（只读 READ_ONLY / 读写 READ_WRITE / 管理级 ADMIN）+ 功能范围 scope 白名单
+// 安全约束：ADMIN 级别（掩码含管理位）仅平台管理员本人可授予 —— 封堵普通用户自助签发管理位令牌的提权路径
+// scope 白名单：null/空 = 不限（全功能面）；非空 = 仅允许命中数组内 scope 的功能面
 
 import { z } from "zod"
 import { Prisma } from "@prisma/client"
@@ -17,26 +21,30 @@ import { getConfigBool, getConfigNumber } from "@/lib/config"
 import { moveToRecycle } from "@/lib/recycle"
 import { trackBehavior } from "@/lib/risk"
 import { bizError, ErrorCode } from "@/lib/errors"
+import { TOKEN_PERM, TOKEN_SCOPES, normalizeScopes, levelOfMask, levelLabel } from "@/lib/token-scopes"
 
 const IP_CIDR_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\/(?:[12]\d|[0-9]))?$/
+
+// 权限级别 → 掩码
+const LEVEL_MASK: Record<"READ_ONLY" | "READ_WRITE" | "ADMIN", number> = {
+  READ_ONLY: TOKEN_PERM.READ,
+  READ_WRITE: TOKEN_PERM.READ | TOKEN_PERM.WRITE | TOKEN_PERM.EXECUTE,
+  ADMIN: TOKEN_PERM.READ | TOKEN_PERM.WRITE | TOKEN_PERM.EXECUTE | TOKEN_PERM.ADMIN,
+}
+const ADMIN_ROLES = new Set(["ADMIN", "SUPER_ADMIN"])
 
 const tokenInputSchema = z.object({
   id: zId.optional(),
   name: z.string().min(1, "令牌名称必填").max(64),
+  // 权限级别：只读 / 读写 / 管理级（管理级仅平台管理员可授予）
+  level: z.enum(["READ_ONLY", "READ_WRITE", "ADMIN"]),
+  // 功能范围白名单：空数组 = 不限；否则仅允许勾选的功能面
+  scopes: z.array(z.string().max(32)).max(8, "功能范围最多 8 项").optional().default([]),
   // null / "" = 永久有效；否则为 ISO 时间字符串
   expireAtIso: z.string().nullable().optional(),
-  permissions: z.object({
-    read: z.boolean(),
-    write: z.boolean(),
-    execute: z.boolean(),
-    admin: z.boolean(),
-  }),
   ipWhitelist: z.array(z.string().max(64)).max(20, "IP 白名单最多 20 条"),
   qps: zPrecision("QPS 限制", 0, 100000),
 })
-
-// 权限位掩码语义：read=1 / write=2 / execute=4 / admin=8
-// （纯函数不允许从 "use server" 文件导出，掩码语义在页面层实现）
 
 // 有效期策略校验（创建与编辑共用）
 async function validateExpireAt(expireAtIso: string | null | undefined, role: string): Promise<Date | null> {
@@ -57,8 +65,23 @@ async function validateExpireAt(expireAtIso: string | null | undefined, role: st
   return expireAt
 }
 
-function maskOf(p: { read: boolean; write: boolean; execute: boolean; admin: boolean }): number {
-  return (p.read ? 1 : 0) | (p.write ? 2 : 0) | (p.execute ? 4 : 0) | (p.admin ? 8 : 0)
+// 级别 → 掩码 + 管理位防提权校验
+function resolveMask(level: "READ_ONLY" | "READ_WRITE" | "ADMIN", role: string): number {
+  if (level === "ADMIN" && !ADMIN_ROLES.has(role)) {
+    throw bizError(ErrorCode.FORBIDDEN, "管理级令牌（含用户/令牌/强制管控等管理操作）仅平台管理员可授予")
+  }
+  return LEVEL_MASK[level]
+}
+
+// scope 白名单校验与规整：未知 key 直接报错（防止静默忽略造成「以为限制了实际没限制」）
+function resolveScopes(input: string[]): string[] | null {
+  const validKeys = new Set(TOKEN_SCOPES.map((s) => s.key as string))
+  for (const s of input) {
+    if (!validKeys.has(s)) {
+      throw bizError(ErrorCode.PARAM_ERROR, `未知功能范围：${s}（可用：${[...validKeys].join(" / ")}）`)
+    }
+  }
+  return normalizeScopes(input)
 }
 
 function validateIpList(list: string[]) {
@@ -77,8 +100,8 @@ export async function createApiTokenAction(input: unknown): Promise<ActionResult
     const p = zodValidate(tokenInputSchema, input)
 
     const expireAt = await validateExpireAt(p.expireAtIso ?? null, ctx.role)
-    const mask = maskOf(p.permissions)
-    if (mask === 0) throw bizError(ErrorCode.PARAM_ERROR, "至少勾选一项权限")
+    const mask = resolveMask(p.level, ctx.role)
+    const scopes = resolveScopes(p.scopes || [])
     validateIpList(p.ipWhitelist)
 
     const maxPerUser = await getConfigNumber("token.maxPerUser", 10)
@@ -95,6 +118,7 @@ export async function createApiTokenAction(input: unknown): Promise<ActionResult
         tokenHash: sha256(plain),
         tokenPrefix: plain.slice(0, 8),
         permissionsMask: mask,
+        scopes: scopes ? (scopes as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
         ipWhitelist: p.ipWhitelist.length ? (p.ipWhitelist as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
         qpsLimit: p.qps,
         expireAt,
@@ -114,7 +138,9 @@ export async function createApiTokenAction(input: unknown): Promise<ActionResult
       after: {
         name: token.name,
         tokenPrefix: token.tokenPrefix,
+        level: p.level,
         permissionsMask: mask,
+        scopes: scopes || "不限",
         expireAt: expireAt ? expireAt.toISOString() : "永久",
         qpsLimit: p.qps,
         ipWhitelistCount: p.ipWhitelist.length,
@@ -139,8 +165,8 @@ export async function updateApiTokenAction(input: unknown): Promise<ActionResult
     if (before.userId !== ctx.userId) throw bizError(ErrorCode.FORBIDDEN, "只能操作自己的令牌")
 
     const expireAt = await validateExpireAt(p.expireAtIso ?? null, ctx.role)
-    const mask = maskOf(p.permissions)
-    if (mask === 0) throw bizError(ErrorCode.PARAM_ERROR, "至少勾选一项权限")
+    const mask = resolveMask(p.level, ctx.role)
+    const scopes = resolveScopes(p.scopes || [])
     validateIpList(p.ipWhitelist)
 
     // 有效期变化 → 单独的权限锁拦截
@@ -155,6 +181,7 @@ export async function updateApiTokenAction(input: unknown): Promise<ActionResult
       data: {
         name: p.name,
         permissionsMask: mask,
+        scopes: scopes ? (scopes as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
         ipWhitelist: p.ipWhitelist.length ? (p.ipWhitelist as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
         qpsLimit: p.qps,
         expireAt,
@@ -171,14 +198,18 @@ export async function updateApiTokenAction(input: unknown): Promise<ActionResult
       ownerUserId: ctx.userId,
       before: {
         name: before.name,
+        level: levelOfMask(before.permissionsMask),
         permissionsMask: before.permissionsMask,
+        scopes: before.scopes ?? "不限",
         expireAt: before.expireAt ? before.expireAt.toISOString() : "永久",
         qpsLimit: before.qpsLimit,
         ipWhitelist: before.ipWhitelist,
       },
       after: {
         name: p.name,
+        level: p.level,
         permissionsMask: mask,
+        scopes: scopes || "不限",
         expireAt: expireAt ? expireAt.toISOString() : "永久",
         qpsLimit: p.qps,
         ipWhitelist: p.ipWhitelist,
@@ -220,7 +251,7 @@ export async function deleteApiTokenAction(input: unknown): Promise<ActionResult
       resourceId: token.id,
       resourceName: token.name,
       ownerUserId: ctx.userId,
-      before: { name: token.name, tokenPrefix: token.tokenPrefix, expireAt: token.expireAt ? token.expireAt.toISOString() : "永久" },
+      before: { name: token.name, tokenPrefix: token.tokenPrefix, level: levelLabel(token.permissionsMask), expireAt: token.expireAt ? token.expireAt.toISOString() : "永久" },
       after: { deleted: true, softDeleted: true },
       severity: "WARN",
     })

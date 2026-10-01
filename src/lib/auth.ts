@@ -162,6 +162,24 @@ export async function revokeLoginSession(sessionId: string, reason: string) {
   }
 }
 
+// ============================================================
+// 会话 Cookie Secure 属性决策
+// 历史缺陷：secure 挂在 NODE_ENV=production 上 → Docker 生产镜像下恒为 true，
+// 而平台常通过 http://IP:81（Caddy 明文网关）访问 —— 浏览器会直接丢弃带 Secure
+// 属性的 Cookie（仅 HTTPS / localhost 可信来源可存），于是 signIn 返回成功、
+// 前端提示「登录成功」，但 Cookie 从未落盘 → 跳转 /dashboard 被守卫弹回 /login，
+// 表现为「一直没登进去」。
+// 修正为环境驱动自动检测：COOKIE_SECURE=1/true 强制开、0/false 强制关；
+// 未配置时仅当公开访问地址（AUTH_PUBLIC_URL/AUTH_URL/NEXTAUTH_URL）为 https 才启用。
+// ============================================================
+const AUTH_PUBLIC_URL = process.env.AUTH_PUBLIC_URL || process.env.AUTH_URL || process.env.NEXTAUTH_URL || ""
+export const sessionCookieSecure: boolean =
+  process.env.COOKIE_SECURE === "1" || process.env.COOKIE_SECURE === "true"
+    ? true
+    : process.env.COOKIE_SECURE === "0" || process.env.COOKIE_SECURE === "false"
+      ? false
+      : AUTH_PUBLIC_URL.startsWith("https://")
+
 export const authOptions: NextAuthOptions = {
   session: {
     strategy: "jwt",
@@ -173,7 +191,7 @@ export const authOptions: NextAuthOptions = {
       options: {
         httpOnly: true, // XSS 防护：禁止JS读取
         sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
+        secure: sessionCookieSecure,
         path: "/",
       },
     },

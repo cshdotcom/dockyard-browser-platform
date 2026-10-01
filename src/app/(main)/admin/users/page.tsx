@@ -14,7 +14,7 @@ export default async function AdminUsersPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>
 }) {
-  await requireAdmin()
+  const ctx = await requireAdmin()
   const sp = await searchParams
   const q = parseListQuery(sp)
   const f = q.filters
@@ -65,6 +65,7 @@ export default async function AdminUsersPage({
         force2faSetup: true,
         allowInternalNetwork: true,
         allowSecureLocationAccess: true,
+        vncSessionMaxMinutes: true,
         lockedUntil: true,
         failedLoginCount: true,
         quota: true,
@@ -163,6 +164,7 @@ export default async function AdminUsersPage({
         sortOrder={q.sortOrder}
         filters={f}
         groupOptions={groups.map((g) => ({ id: g.id, name: g.name }))}
+        viewerRole={ctx.role}
       />
     </div>
   )

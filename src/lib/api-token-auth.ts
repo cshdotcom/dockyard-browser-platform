@@ -5,17 +5,32 @@ import { rateLimit } from "./rate-limit"
 import { checkIpRisk } from "./risk"
 import { trackBehavior } from "./risk"
 import { getConfigNumber } from "./config"
+import {
+  TOKEN_PERM,
+  TOKEN_LEVELS,
+  TOKEN_SCOPES,
+  normalizeScopes,
+  scopeForMcpCode,
+  checkTokenScope,
+  levelOfMask,
+  levelLabel,
+} from "./token-scopes"
 
 // API-Token 鉴权中间件：所有 /api/mcp、/api/openapi 外部调用统一走这里
-// 校验链：密钥哈希 → 启用状态 → 过期时间 → IP白名单 → QPS限流 → 权限位掩码
+// 校验链：密钥哈希 → 启用状态 → 过期时间 → IP白名单 → QPS限流 → 权限位掩码（只读/读写级别）→ 功能范围 scope 白名单
 // 全程写调用日志（含 wasExpired 标记）；五重隔离：APIKey(租户) + UUID(资源) + SessionID(客户端) + DeviceID(设备)
 
-export const TOKEN_PERM = {
-  READ: 1,
-  WRITE: 2,
-  EXECUTE: 4,
-  ADMIN: 8,
-} as const
+// 纯定义/纯函数从 token-scopes.ts（双端安全模块）重导出，供服务端调用方统一入口
+export {
+  TOKEN_PERM,
+  TOKEN_LEVELS,
+  TOKEN_SCOPES,
+  normalizeScopes,
+  scopeForMcpCode,
+  checkTokenScope,
+  levelOfMask,
+  levelLabel,
+}
 
 export interface ApiTokenContext {
   tokenId: string
@@ -23,6 +38,7 @@ export interface ApiTokenContext {
   username: string
   permissions: number
   role: string
+  scopes: string[] | null
 }
 
 interface AuthResult {
@@ -38,7 +54,8 @@ function trace() {
 
 export async function authenticateApiToken(
   req: NextRequest,
-  requiredPerm: number
+  requiredPerm: number,
+  requiredScope?: string | null
 ): Promise<AuthResult> {
   const traceId = trace()
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || "127.0.0.1"
@@ -118,10 +135,18 @@ export async function authenticateApiToken(
   if (!rateLimit(`mcp-min:${token.id}`, perMin, 60_000).allowed) { await writeLog(429); return fail(42900, "单Key每分钟配额超限", 429) }
   if (!rateLimit(`mcp-hour:${token.id}`, perHour, 3600_000).allowed) { await writeLog(429); return fail(42900, "单Key每小时配额超限", 429) }
 
-  // ---- 权限位掩码 ----
+  // ---- 权限位掩码（只读/读写级别） ----
   if ((token.permissionsMask & requiredPerm) !== requiredPerm) {
     await writeLog(403)
-    return fail(40300, "Token 权限不足（缺少所需权限位）", 403)
+    return fail(40300, "Token 权限不足（只读令牌不能执行写入/执行类操作）", 403)
+  }
+
+  // ---- 功能范围（scope 白名单） ----
+  const tokenScopes = normalizeScopes(token.scopes)
+  const scopeCheck = checkTokenScope({ scopes: tokenScopes }, requiredScope ?? null)
+  if (!scopeCheck.ok) {
+    await writeLog(403)
+    return fail(40300, scopeCheck.msg, 403)
   }
 
   const user = await db.user.findUnique({ where: { id: token.userId } })
@@ -138,7 +163,7 @@ export async function authenticateApiToken(
     ok: true,
     status: 200,
     body: { code: 0, msg: "ok", traceId },
-    ctx: { tokenId: token.id, userId: token.userId, username: user.username, permissions: token.permissionsMask, role: user.role },
+    ctx: { tokenId: token.id, userId: token.userId, username: user.username, permissions: token.permissionsMask, role: user.role, scopes: tokenScopes },
   }
 }
 

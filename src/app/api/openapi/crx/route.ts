@@ -26,7 +26,7 @@ const POST_OPS = [
 
 export async function GET(req: NextRequest) {
   const traceId = crypto.randomUUID()
-  const auth = await authenticateApiToken(req, TOKEN_PERM.READ)
+  const auth = await authenticateApiToken(req, TOKEN_PERM.READ, "crx")
   if (!auth.ok) return NextResponse.json(auth.body, { status: auth.status })
 
   if (!rateLimit(`openapiCrx:${auth.ctx!.userId}`, 120, 60_000).allowed) {
@@ -86,7 +86,7 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   const traceId = crypto.randomUUID()
-  const auth = await authenticateApiToken(req, TOKEN_PERM.WRITE)
+  const auth = await authenticateApiToken(req, TOKEN_PERM.WRITE, "crx")
   if (!auth.ok) return NextResponse.json(auth.body, { status: auth.status })
 
   const mcpEnabled = await getConfigBool("mcp.enabled", true)
@@ -100,7 +100,7 @@ export async function POST(req: NextRequest) {
 
   // 灰度创建需 ADMIN 权限
   if (op === "gray-create") {
-    const adminAuth = await authenticateApiToken(req, TOKEN_PERM.ADMIN)
+    const adminAuth = await authenticateApiToken(req, TOKEN_PERM.ADMIN, "crx")
     if (!adminAuth.ok) return NextResponse.json(adminAuth.body, { status: adminAuth.status })
   }
 

@@ -3,7 +3,7 @@
 
 import { db } from "@/lib/db"
 import type { ApiTokenContext } from "@/lib/api-token-auth"
-import { TOKEN_PERM } from "@/lib/api-token-auth"
+import { TOKEN_PERM, checkTokenScope, scopeForMcpCode } from "@/lib/api-token-auth"
 import { getConfigBool, getConfigNumber } from "@/lib/config"
 import { writeAudit } from "@/lib/audit"
 import { raiseAlert } from "@/lib/alerts"
@@ -423,6 +423,14 @@ export async function runBatchOperation(input: {
 }> {
   const op = MCP_OPERATIONS.find((o) => o.code === input.code)
   if (!op) throw new Error(`未知操作：${input.code}（可用操作见 GET /api/mcp）`)
+
+  // ---- 逐操作权限位强制（只读令牌仅可执行 READ 级操作） ----
+  if ((input.ctx.permissions & op.perm) !== op.perm) {
+    throw new Error(`Token 权限不足：「${input.code}」需要更高权限（只读令牌不能执行写入/执行/管理类操作）`)
+  }
+  // ---- 逐操作功能范围（scope 白名单）强制 ----
+  const scopeCheck = checkTokenScope(input.ctx, scopeForMcpCode(input.code))
+  if (!scopeCheck.ok) throw new Error(scopeCheck.msg)
 
   // 任务记录
   const task = await db.mcpTask.create({

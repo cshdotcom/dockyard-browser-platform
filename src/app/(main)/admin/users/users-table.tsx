@@ -5,7 +5,7 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer } from "lucide-react"
+import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { Button } from "@/components/ui/button"
@@ -30,6 +30,7 @@ import {
   type CsvImportReport,
 } from "@/server/actions/users"
 import { UserFormDialog, type GroupOption } from "./user-form"
+import { UserApiTokensDialog } from "./user-api-tokens"
 
 export interface AdminUserRow {
   id: string
@@ -66,6 +67,7 @@ interface UsersTableProps {
   sortOrder?: "asc" | "desc"
   filters: Record<string, string>
   groupOptions: GroupOption[]
+  viewerRole: string // 当前操作者角色（API 密钥代管对话框用）
 }
 
 const ROLE_LABEL: Record<string, string> = {
@@ -104,7 +106,7 @@ function NetPolicyCell({ row }: { row: AdminUserRow }) {
   )
 }
 
-export function UsersTable({ rows, total, page, pageSize, keyword, sortField, sortOrder, filters, groupOptions }: UsersTableProps) {
+export function UsersTable({ rows, total, page, pageSize, keyword, sortField, sortOrder, filters, groupOptions, viewerRole }: UsersTableProps) {
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -125,6 +127,9 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
   const [formOpen, setFormOpen] = React.useState(false)
   const [formMode, setFormMode] = React.useState<"create" | "edit">("create")
   const [editingUser, setEditingUser] = React.useState<AdminUserRow | null>(null)
+
+  // API 密钥代管
+  const [apiTokenUser, setApiTokenUser] = React.useState<AdminUserRow | null>(null)
 
   const [importOpen, setImportOpen] = React.useState(false)
   const [importMode, setImportMode] = React.useState<"skip" | "update">("skip")
@@ -400,6 +405,13 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
             </DropdownMenuItem>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
+        <DropdownMenuItem
+          onClick={() => {
+            setApiTokenUser(row)
+          }}
+        >
+          <KeyRound className="mr-1.5 h-4 w-4" /> API 密钥（查看/创建/修改）
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={() => callAction(row.id, () => kickUserSessionsAction({ ids: [row.id] }))}>
           强制下线全部会话
         </DropdownMenuItem>
@@ -521,6 +533,14 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
 
       {/* 新建/编辑弹窗 */}
       <UserFormDialog open={formOpen} onOpenChange={setFormOpen} mode={formMode} user={editingUser} groupOptions={groupOptions} />
+
+      {/* 管理员代管该用户的 API 密钥 */}
+      <UserApiTokensDialog
+        user={apiTokenUser ? { id: apiTokenUser.id, username: apiTokenUser.username, displayName: apiTokenUser.displayName, role: apiTokenUser.role } : null}
+        open={!!apiTokenUser}
+        onOpenChange={(v) => !v && setApiTokenUser(null)}
+        viewerRole={viewerRole}
+      />
 
       {/* 删除确认 */}
       <ConfirmDialog
