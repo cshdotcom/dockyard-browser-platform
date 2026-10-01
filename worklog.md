@@ -419,3 +419,31 @@ Work Log:
 Stage Summary:
 - 用户"确保完全安全+全策略三级定向"指令完整落地：内网限制/安全位置/域名黑白/端点黑白/IP 黑白/文件限制（下载/上传/file://）/CRX/VNC 时长全部支持【单沙箱>用户>用户组】定向；deny-wins 保证上层封禁不可被下层豁免；沙箱归属强校验防越权串扰
 - 即时生效链路：任何作用域策略变更 → refreshWorkspacePolicyFile 四层重解析 → 策略文件重写 → USR1 浏览器进程 1 秒重启（真实容器形态；本环境模拟模式验证文件生成链路）
+
+---
+Task ID: 17
+Agent: main
+Task: r12 — API 密钥权限级别+功能范围白名单+管理员代管 & 登录"成功却不跳转"根因修复
+
+Work Log:
+- 【登录 Bug 根因】auth.ts:176 secure 挂在 NODE_ENV=production → Docker 生产镜像恒为 Secure；用户经 http://IP:81 明文访问时浏览器丢弃带 Secure 的 Cookie（仅 HTTPS/localhost 可信来源可存）→ signIn 成功+toast「登录成功」但会话未落盘 → /dashboard 被守卫弹回 /login（历史遗留循环重定向注释正是此链路）。本地测试通过的原因：localhost 被浏览器视为可信来源
+- 【修复】sessionCookieSecure 环境驱动：COOKIE_SECURE=1/0 强制开关；未配置时仅 AUTH_PUBLIC_URL/AUTH_URL/NEXTAUTH_URL 为 https:// 才启用（明文 HTTP 部署默认关闭）；README 部署文档补 COOKIE_SECURE 说明
+- 【生产三态实测】standalone 生产构建（NODE_ENV=production，与镜像字节级同链路）：默认 Set-Cookie 无 Secure → 纯净浏览器登录成功跳转 /dashboard（agent-browser 清 cookie 后全流程）；COOKIE_SECURE=1 → HttpOnly; Secure; SameSite=Lax；带会话 /dashboard 200 / 无会话 307→login
+- 【Schema】ApiToken.scopes Json?（功能范围白名单，null/空=不限）+ prisma db push + generate
+- 【纯模块】src/lib/token-scopes.ts（双端安全）：TOKEN_PERM/TOKEN_LEVELS(只读=1/读写=7/管理级=15)/TOKEN_SCOPES 八大功能面(browser/proxy/user/token/recycle/session/crx/resources)/normalizeScopes/checkTokenScope/scopeForMcpCode(精确条目优先)/levelOfMask；api-token-auth.ts 重导出
+- 【网关】authenticateApiToken(req, perm, scope?) 第三参 scope 校验（未命中→403 含中文功能名）；MCP POST 门禁 EXECUTE→READ（只读令牌可调查询工具）
+- 【引擎】runBatchOperation 逐操作双重强制：权限位（只读不能写/执行/管理）+ scope（越权抛错在任务创建前 → 不建任务记录）；mcp 路由 try/catch 转 403（原生+JSON-RPC 双风格）；tools/list 按权限位+scope 过滤（只列有权工具）
+- 【OpenAPI】browser(scope=browser)/resources(scope=resources)/crx(三处 scope=crx) 路由接入；doc 输出 x-token-scopes/x-token-levels/x-mcp-operations.requiredScope
+- 【提权封堵】resolveMask：ADMIN 级别仅 ADMIN/SUPER_ADMIN 角色可授予（自助+管理员代管双通道）；修复历史漏洞：普通用户可自助勾选 admin 位签发 mask=8 令牌（engine 仅校验掩码）→ 通道已封死
+- 【管理员代管】src/server/actions/admin-tokens.ts 5 动作：list（全量配置+调用统计+概览）/create（明文一次返回+createdByUserId=管理员+计入目标配额+管理级仅可授管理员账号）/update/toggle/delete（软删+回收站 deletedByType=ADMIN）；GROUP_ADMIN 仅本组成员 view；TOKEN_ADMIN_* 全程 WARN 审计
+- 【UI】用户管理行菜单「API 密钥」→ UserApiTokensDialog（概览卡/密钥卡片列表/创建表单级别单选+scope 复选/编辑/启停/吊销确认/明文转交弹窗）；自助令牌页升级（级别单选替代四复选+功能范围区块+级别/scope 徽章列；旧自定义掩码编辑时归一化）
+- 【QA 实修 Bug】父组件每渲染重建 user 对象字面量 → effect 依赖 [open,user,reload] 变化 → 创建成功后 setPlain(null) 清掉明文弹窗；修复：依赖改按 userId 字符串
+- 【测试】39 项断言（scripts/test-api-token-scopes.ts：normalize/映射/掩码/DB round-trip/引擎拒绝）+ 10 项 HTTP 断言（scripts/test-api-token-http.ts：MCP 网关双拒绝/tools 过滤/openapi 三路由/文档元数据/数据清理）全过；agent-browser QA：自助创建（只读+browser/resources scope）→明文→徽章；管理员代管全流程（创建→明文→列表→停用(API 即拒)→改只读+scope(即时生效)→吊销(API 40100)+回收站 ADMIN 类型）；审计链 TOKEN_ADMIN_CREATE/UPDATE/TOGGLE/DELETE+TOKEN_CREATE 全落库
+- 【环境排查】dev 服务器(01:35 启动)早于 prisma generate → 旧 Client 读不到 scopes 列恒 undefined（权限位生效而 scope 全放行的假象）→ 重启后恢复；此为环境态非代码缺陷
+- 【推送保护处理】上会话遗留未推送提交 015d625 在 scripts/monitor-ci-r11.sh 硬编码 PAT → GitHub 秘密扫描拒绝推送 → soft reset 至 f893cb0 + 删除该一次性脚本 + 单提交重写（秘密仅存在于本地未推送历史，无远程泄露）
+- git：a08ab04(r12)+9b1bbc8(监控脚本) 推送 main；tag v1.5.1；CI 全绿（Lint✓/主镜像 main+tag✓）；GHCR：1.5.1/1.5/latest/main 均 200；浏览器镜像路径过滤未触发（本轮未改 browser/，latest 仍有效）
+- 交付：download/qa-r12-screenshots.zip（12 张 JPEG 736KB，dev+生产构建双环境）
+
+Stage Summary:
+- 用户三项需求闭环：①API 创建可选权限（只读/读写/管理级）+功能范围控制（8 大功能面 scope 白名单，双重强制）；②管理员在用户管理内代管用户 API 密钥（创建/查看/修改/启停/吊销+明文一次展示+全程审计）；③登录成功不跳转根因修复（Secure Cookie 在 HTTP 部署被浏览器丢弃，环境驱动自动检测+生产构建三态实测）
+- 附带安全加固：封堵普通用户自助签发管理位令牌的提权漏洞
