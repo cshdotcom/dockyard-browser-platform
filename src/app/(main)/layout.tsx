@@ -49,6 +49,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         { key: "security", label: "账号安全", href: "/account/security", icon: <ShieldCheck className="h-4 w-4" /> },
         { key: "sessions", label: "登录设备", href: "/account/sessions", icon: <KeyRound className="h-4 w-4" /> },
         { key: "tokens", label: "我的 API 令牌", href: "/account/tokens", icon: <KeyRound className="h-4 w-4" /> },
+        { key: "my-audit", label: "最近操作审计", href: "/audit", icon: <ScrollText className="h-4 w-4" /> },
       ],
     },
   ]

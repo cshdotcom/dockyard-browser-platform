@@ -28,8 +28,19 @@ const announcementSchema = z.object({
   displayType: zDisplayType.optional(), // 兼容旧调用（单值）
   displayTypes: z.array(zDisplayType).max(3).optional(), // 多选展示方式（可与站内信叠加）
   notifyInbox: z.boolean().optional().default(false), // 站内信通道（可单独发送或与展示方式叠加）
+  startAt: z.string().max(40).optional().or(z.literal("")), // 显示开始时间（datetime-local ISO；空=立即显示）
+  endAt: z.string().max(40).optional().or(z.literal("")), // 结束时间（空=永久；过期后不再展示）
+  persistAfterRead: z.boolean().optional().default(false), // 已读后仍持续显示（弹窗每次刷新仍弹，除非今日不再提醒）
+  allowDismiss: z.boolean().optional().default(true), // 允许用户勾选「今日不再提醒」（管理员可控）
   enabled: z.boolean(),
 })
+
+// datetime-local 字符串 → Date（非法输入按 null 处理，不影响保存）
+function parseDate(v: string | undefined | null): Date | null {
+  if (!v) return null
+  const d = new Date(v)
+  return Number.isNaN(d.getTime()) ? null : d
+}
 
 // ---- 站内信正文摘要：MD/HTML → 纯文本（防语法泄漏到通知铃） ----
 function contentSummary(content: string, maxLen = 160): string {
@@ -127,6 +138,13 @@ export async function upsertAnnouncementAction(input: unknown): Promise<ActionRe
       throw bizError(ErrorCode.PARAM_ERROR, "至少选择一种发布通道：展示方式（弹窗/跑马灯/强制阅读）或站内信")
     }
 
+    // 时效校验：开始时间必须早于结束时间
+    const s = parseDate(p.startAt)
+    const e = parseDate(p.endAt)
+    if (s && e && s.getTime() >= e.getTime()) {
+      throw bizError(ErrorCode.PARAM_ERROR, "显示开始时间必须早于结束时间")
+    }
+
     const data = {
       title: p.title,
       content: p.content,
@@ -136,6 +154,10 @@ export async function upsertAnnouncementAction(input: unknown): Promise<ActionRe
       displayType: displayTypes[0] || "POPUP", // 主展示方式（列表/旧客户端兼容）
       displayTypes: JSON.stringify(displayTypes),
       notifyInbox: !!p.notifyInbox,
+      startAt: s,
+      endAt: e,
+      persistAfterRead: !!p.persistAfterRead,
+      allowDismiss: p.allowDismiss === undefined ? true : !!p.allowDismiss,
       enabled: p.enabled,
     }
 
@@ -156,8 +178,8 @@ export async function upsertAnnouncementAction(input: unknown): Promise<ActionRe
         resourceType: "ANNOUNCEMENT",
         resourceId: ann.id,
         resourceName: ann.title,
-        before: { title: before.title, content: before.content, type: before.type, groupId: before.groupId, userId: before.userId, displayType: before.displayType, displayTypes: before.displayTypes, notifyInbox: before.notifyInbox, enabled: before.enabled },
-        after: { title: p.title, content: p.content, type: p.type, groupId: data.groupId, userId: data.userId, displayType: data.displayType, displayTypes: data.displayTypes, notifyInbox: data.notifyInbox, enabled: p.enabled },
+        before: { title: before.title, content: before.content, type: before.type, groupId: before.groupId, userId: before.userId, displayType: before.displayType, displayTypes: before.displayTypes, notifyInbox: before.notifyInbox, startAt: before.startAt, endAt: before.endAt, persistAfterRead: before.persistAfterRead, allowDismiss: before.allowDismiss, enabled: before.enabled },
+        after: { title: p.title, content: p.content, type: p.type, groupId: data.groupId, userId: data.userId, displayType: data.displayType, displayTypes: data.displayTypes, notifyInbox: data.notifyInbox, startAt: data.startAt, endAt: data.endAt, persistAfterRead: data.persistAfterRead, allowDismiss: data.allowDismiss, enabled: p.enabled },
       })
       return { id: ann.id, inboxDelivered }
     }
@@ -176,7 +198,7 @@ export async function upsertAnnouncementAction(input: unknown): Promise<ActionRe
       resourceType: "ANNOUNCEMENT",
       resourceId: ann.id,
       resourceName: ann.title,
-      after: { title: p.title, content: p.content, type: p.type, groupId: data.groupId, userId: data.userId, displayType: data.displayType, displayTypes: data.displayTypes, notifyInbox: data.notifyInbox, enabled: p.enabled, inboxDelivered },
+      after: { title: p.title, content: p.content, type: p.type, groupId: data.groupId, userId: data.userId, displayType: data.displayType, displayTypes: data.displayTypes, notifyInbox: data.notifyInbox, startAt: data.startAt, endAt: data.endAt, persistAfterRead: data.persistAfterRead, allowDismiss: data.allowDismiss, enabled: p.enabled, inboxDelivered },
     })
     await trackBehavior(ctx.userId, "CREATE").catch(() => {})
     return { id: ann.id, inboxDelivered }

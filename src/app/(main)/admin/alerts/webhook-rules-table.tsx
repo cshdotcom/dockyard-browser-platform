@@ -19,8 +19,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { upsertWebhookRuleAction, deleteWebhookRuleAction, toggleWebhookRuleAction } from "@/server/actions/alerts"
-import { batchToggleWebhookRulesAction, batchDeleteWebhookRulesAction } from "@/server/actions/batch"
-import { Trash2, Loader2 } from "lucide-react"
 
 export interface WebhookRuleRow {
   id: string

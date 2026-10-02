@@ -23,7 +23,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
     notFound()
   }
 
-  const [proxyNode, singbox, owner, creator, shares, scripts, harRecords, runLogs, snap] = await Promise.all([
+  const [proxyNode, singbox, owner, creator, shares, scripts, harRecords, runLogs, snap, shareLinks] = await Promise.all([
     ws.proxyNodeId ? db.proxyNode.findUnique({ where: { id: ws.proxyNodeId } }) : null,
     ws.singboxInstanceId ? db.singboxInstance.findUnique({ where: { id: ws.singboxInstanceId } }) : null,
     db.user.findUnique({ where: { id: ws.userId }, select: { username: true, displayName: true, email: true } }),
@@ -36,6 +36,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
     db.harRecord.findMany({ where: { workspaceId: id, deletedAt: null }, orderBy: { createdAt: "desc" }, take: 5 }),
     db.browserScriptRunLog.findMany({ where: { workspaceId: id }, orderBy: { startedAt: "desc" }, take: 10 }),
     ws.profileSnapshotId ? db.browserProfileSnapshot.findUnique({ where: { id: ws.profileSnapshotId } }) : null,
+    db.workspaceShareLink.findMany({ where: { workspaceId: id }, orderBy: { createdAt: "desc" }, take: 30 }),
   ])
   const shareTargets = shares.length > 0
     ? await db.user.findMany({ where: { id: { in: shares.map((s) => s.targetUserId) } }, select: { id: true, username: true, displayName: true } })
@@ -106,6 +107,18 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
       shares={shares.map((s) => ({
         id: s.id, targetName: shareMap.get(s.targetUserId)?.displayName || shareMap.get(s.targetUserId)?.username || "-",
         permission: s.permission, expireAt: s.expireAt ? fmtDate(s.expireAt) : null, createdAt: fmtDate(s.createdAt),
+      }))}
+      shareLinks={shareLinks.map((l) => ({
+        id: l.id,
+        token: l.token,
+        permission: l.permission,
+        expireAt: l.expireAt ? fmtDate(l.expireAt) : null,
+        revokedAt: l.revokedAt ? fmtDate(l.revokedAt) : null,
+        maxUses: l.maxUses,
+        useCount: l.useCount,
+        lastUsedAt: l.lastUsedAt ? fmtDate(l.lastUsedAt) : null,
+        note: l.note,
+        createdAt: fmtDate(l.createdAt),
       }))}
       scripts={scripts.map((s) => ({ id: s.id, name: s.name, description: s.description ?? "", scope: s.scope }))}
       harRecords={harRecords.map((h) => ({ id: h.id, size: fmtBytes(h.sizeBytes), createdAt: fmtDate(h.createdAt) }))}

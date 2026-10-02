@@ -16,7 +16,8 @@ export default async function AnnouncementsPage() {
   const ctx = await requireAuth()
   const gids = await userGroupIds(ctx.userId)
 
-  const where = {
+  const now = new Date()
+  const base = {
     enabled: true,
     OR: [
       { type: "GLOBAL" },
@@ -24,12 +25,20 @@ export default async function AnnouncementsPage() {
       { type: "USER", userId: ctx.userId },
     ],
   }
+  // 列表/弹窗/跑马灯仅展示时间窗内公告（startAt<=now 且未过期）；统计卡同样按时间窗
+  const timeWindow = {
+    AND: [
+      { OR: [{ startAt: null }, { startAt: { lte: now } }] },
+      { OR: [{ endAt: null }, { endAt: { gt: now } }] },
+    ],
+  }
+  const where = { ...base, ...timeWindow }
 
   const [anns, globalCount, groupCount, userCount] = await Promise.all([
     db.announcement.findMany({ where, orderBy: { createdAt: "desc" } }),
-    db.announcement.count({ where: { type: "GLOBAL", enabled: true } }),
-    db.announcement.count({ where: { type: "GROUP", groupId: { in: gids }, enabled: true } }),
-    db.announcement.count({ where: { type: "USER", userId: ctx.userId, enabled: true } }),
+    db.announcement.count({ where: { ...base, ...timeWindow, type: "GLOBAL" } }),
+    db.announcement.count({ where: { ...base, ...timeWindow, type: "GROUP", groupId: { in: gids } } }),
+    db.announcement.count({ where: { ...base, ...timeWindow, type: "USER", userId: ctx.userId } }),
   ])
 
   const reads = anns.length

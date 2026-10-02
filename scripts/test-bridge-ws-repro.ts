@@ -1,5 +1,5 @@
 // 通过桥（WS）复现 RFB 交互 —— 自签票据（共享密钥与桥一致）
-import { createHmac } from "node:crypto"
+import { createHmac, randomBytes } from "node:crypto"
 import { WebSocket } from "ws"
 
 const BRIDGE = process.argv[2] || "ws://127.0.0.1:3005/"
@@ -18,7 +18,7 @@ const payload = {
   ro: 0,
   dur: 0,
   exp: Math.floor(Date.now() / 1000) + 60,
-  n: require("node:crypto").randomBytes(16).toString("hex"),
+  n: randomBytes(16).toString("hex"),
   tgt: { k: "tcp", h: "127.0.0.1", p: TARGET_PORT },
 }
 const payloadB64 = b64url(Buffer.from(JSON.stringify(payload), "utf8"))

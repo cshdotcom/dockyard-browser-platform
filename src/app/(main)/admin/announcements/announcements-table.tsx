@@ -7,9 +7,10 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { BellRing, Eye, Loader2, Megaphone, Pencil, Plus, Search, Trash2 } from "lucide-react"
+import { BellRing, Clock3, Eye, Loader2, Megaphone, Pencil, Plus, Power, PowerOff, Search, Trash2 } from "lucide-react"
 import { DataTable } from "@/components/shared/data-table"
 import { ConfirmDialog } from "@/components/shared/confirm"
+import { BatchBar, BatchFailuresDialog, BatchConfirmDialog, useBatch } from "@/components/shared/batch-ui"
 import { AnnouncementContent, AnnouncementSummary, contentToPlainText } from "@/components/announcements/announcement-content"
 import { AnnouncementEditor } from "@/components/announcements/announcement-editor"
 import { Badge } from "@/components/ui/badge"
@@ -24,6 +25,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
 import { upsertAnnouncementAction, toggleAnnouncementAction, deleteAnnouncementAction } from "@/server/actions/announcements"
+import { batchToggleAnnouncementsAction, batchDeleteAnnouncementsAction } from "@/server/actions/batch"
 
 export interface AnnouncementRow {
   id: string
@@ -38,6 +40,10 @@ export interface AnnouncementRow {
   displayTypes: string[] // 多选发布通道（含 POPUP/MARQUEE/FORCE_VIEW）
   notifyInbox: boolean // 站内信通道
   notifiedAt: string | null // 站内信已投递时间
+  startAt: string | null // 显示开始时间（空=立即）
+  endAt: string | null // 结束时间（空=永久）
+  persistAfterRead: boolean // 已读后仍持续显示
+  allowDismiss: boolean // 允许「今日不再提醒」
   enabled: boolean
   creatorName: string
   createdAt: string
@@ -70,6 +76,9 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
   const [previewTarget, setPreviewTarget] = React.useState<AnnouncementRow | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<AnnouncementRow | null>(null)
 
+  // ---- 批量操作（勾选 + 批量停用/启用 + 批量删除）----
+  const btch = useBatch(rows, `${keyword || ""}|${JSON.stringify(filters)}`)
+
   // 表单状态
   const [fTitle, setFTitle] = React.useState("")
   const [fContent, setFContent] = React.useState("")
@@ -78,10 +87,23 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
   const [fUserId, setFUserId] = React.useState("")
   const [fDisplays, setFDisplays] = React.useState<string[]>(["POPUP"]) // 多选展示方式
   const [fNotifyInbox, setFNotifyInbox] = React.useState(false) // 站内信通道
+  const [fStartAt, setFStartAt] = React.useState("") // datetime-local
+  const [fEndAt, setFEndAt] = React.useState("") // datetime-local
+  const [fPersist, setFPersist] = React.useState(false) // 已读后仍持续显示
+  const [fAllowDismiss, setFAllowDismiss] = React.useState(true) // 允许今日不再提醒
   const [fEnabled, setFEnabled] = React.useState(true)
   // 用户搜索器
   const [userSearch, setUserSearch] = React.useState("")
   const [pickedUser, setPickedUser] = React.useState<{ id: string; username: string } | null>(null)
+
+  // datetime-local 显示用（分钟精度）
+  const toLocalInput = (iso: string | null): string => {
+    if (!iso) return ""
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return ""
+    const p = (n: number) => String(n).padStart(2, "0")
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+  }
 
   const toggleDisplay = (d: string, on: boolean) => {
     setFDisplays((prev) => (on ? Array.from(new Set([...prev, d])) : prev.filter((x) => x !== d)))
@@ -105,6 +127,10 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
     setFUserId("")
     setFDisplays(["POPUP"])
     setFNotifyInbox(false)
+    setFStartAt("")
+    setFEndAt("")
+    setFPersist(false)
+    setFAllowDismiss(true)
     setFEnabled(true)
     setUserSearch("")
     setPickedUser(null)
@@ -120,6 +146,10 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
     setFUserId(row.userId || "")
     setFDisplays(row.displayTypes?.length ? row.displayTypes : [row.displayType])
     setFNotifyInbox(!!row.notifyInbox)
+    setFStartAt(toLocalInput(row.startAt))
+    setFEndAt(toLocalInput(row.endAt))
+    setFPersist(!!row.persistAfterRead)
+    setFAllowDismiss(row.allowDismiss !== false)
     setFEnabled(row.enabled)
     const u = userOptions.find((x) => x.id === row.userId)
     setPickedUser(u ? { id: u.id, username: u.username } : null)
@@ -148,6 +178,11 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
       toast.error("至少选择一种发布通道：展示方式（弹窗/跑马灯/强制阅读）或站内信")
       return
     }
+    // 时效校验：开始必须早于结束
+    if (fStartAt && fEndAt && new Date(fStartAt).getTime() >= new Date(fEndAt).getTime()) {
+      toast.error("显示开始时间必须早于结束时间")
+      return
+    }
     setBusy("form")
     try {
       const res = await upsertAnnouncementAction({
@@ -159,6 +194,10 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
         userId: fType === "USER" ? fUserId : undefined,
         displayTypes: fDisplays,
         notifyInbox: fNotifyInbox,
+        startAt: fStartAt || undefined,
+        endAt: fEndAt || undefined,
+        persistAfterRead: fPersist,
+        allowDismiss: fAllowDismiss,
         enabled: fEnabled,
       })
       if (res.code === 0) {
@@ -207,16 +246,47 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">删除为物理删除（公告不进回收站），删除前完整快照入审计日志</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-muted-foreground">删除为物理删除（不进回收站）；停用后用户端 ≤30s 内不再显示（全局公告层轮询）</p>
         <Button size="sm" onClick={openCreate}>
           <Plus className="mr-1 h-4 w-4" />
           新建公告
         </Button>
       </div>
 
+      {btch.selected.length > 0 && (
+        <BatchBar count={btch.selected.length} onClear={() => btch.setSelected([])} busy={!!btch.busy} label="条">
+          <Button size="sm" variant="outline" disabled={!!btch.busy} onClick={() => btch.runBatch("批量停用", () => batchToggleAnnouncementsAction({ ids: btch.selected, enabled: false }))}>
+            <PowerOff className="mr-1 h-3.5 w-3.5" /> 批量停用
+          </Button>
+          <Button size="sm" variant="outline" disabled={!!btch.busy} onClick={() => btch.runBatch("批量启用", () => batchToggleAnnouncementsAction({ ids: btch.selected, enabled: true }))}>
+            <Power className="mr-1 h-3.5 w-3.5" /> 批量启用
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="text-red-600 hover:text-red-700 border-red-200 dark:border-red-900"
+            disabled={!!btch.busy}
+            onClick={() => btch.confirmBatch(
+              "批量删除公告",
+              `确认删除选中的 ${btch.selected.length} 条公告？\n公告不进回收站（物理删除）；如仅需用户端不再显示建议优先停用。`,
+              () => btch.runBatch("批量删除", () => batchDeleteAnnouncementsAction({ ids: btch.selected })),
+              "DELETE",
+            )}
+          >
+            <Trash2 className="mr-1 h-3.5 w-3.5" /> 批量删除
+          </Button>
+        </BatchBar>
+      )}
+
+      <BatchFailuresDialog failures={btch.failures} onClose={() => btch.setFailures(null)} />
+      <BatchConfirmDialog action={btch.confirmAction} onClose={() => btch.setConfirmAction(null)} busy={!!btch.busy} />
+
       <DataTable
         rows={rows}
+        selectedIds={btch.selected}
+        onSelectedChange={btch.setSelected}
+        batchToolbar={<span className="text-xs text-muted-foreground">已选 {btch.selected.length} / {rows.length} 条</span>}
         total={total}
         page={page}
         pageSize={pageSize}
@@ -477,10 +547,42 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
                 <p className="text-xs text-muted-foreground">站内信已于 {editing.notifiedAt} 投递过（不会重复发送；范围变更后新增用户不补发）</p>
               )}
             </div>
+            <div className="space-y-1.5">
+              <Label className="flex items-center gap-1.5"><Clock3 className="h-3.5 w-3.5 text-teal-600" />显示时效（定时发布 / 到期自动隐藏）</Label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <Label className="text-xs text-muted-foreground">显示开始时间（空 = 立即显示）</Label>
+                  <Input type="datetime-local" value={fStartAt} onChange={(e) => setFStartAt(e.target.value)} aria-label="显示开始时间" />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs text-muted-foreground">结束时间（空 = 永久有效）</Label>
+                  <Input type="datetime-local" value={fEndAt} onChange={(e) => setFEndAt(e.target.value)} aria-label="结束时间" />
+                </div>
+              </div>
+              <p className="text-[11px] text-muted-foreground">未到开始时间不展示；超过结束时间后用户端不再显示（站内信保留可回看）；管理列表可查全部</p>
+            </div>
+            <div className="space-y-2 rounded-md border p-3">
+              <label className="flex items-center justify-between gap-3 cursor-pointer">
+                <span>
+                  <span className="text-sm font-medium block">已读后仍持续显示</span>
+                  <span className="text-xs text-muted-foreground">弹窗公告被已读后，用户每次刷新页面仍会弹出（除非勾选「今日不再提醒」）</span>
+                </span>
+                <Switch checked={fPersist} onCheckedChange={setFPersist} aria-label="已读后仍持续显示" />
+              </label>
+              <div className="border-t pt-2">
+                <label className="flex items-center justify-between gap-3 cursor-pointer">
+                  <span>
+                    <span className="text-sm font-medium block">允许用户「今日不再提醒」</span>
+                    <span className="text-xs text-muted-foreground">关闭后用户无法跳过弹窗/跑马灯（适用于强制合规通知）</span>
+                  </span>
+                  <Switch checked={fAllowDismiss} onCheckedChange={setFAllowDismiss} aria-label="允许今日不再提醒" />
+                </label>
+              </div>
+            </div>
             <div className="flex items-center justify-between rounded-md border p-3">
               <div>
                 <p className="text-sm font-medium">立即启用</p>
-                <p className="text-xs text-muted-foreground">关闭则保存为草稿，不投放给用户</p>
+                <p className="text-xs text-muted-foreground">关闭则保存为草稿，不投放给用户；停用后用户端 ≤30 秒内不再显示</p>
               </div>
               <Switch checked={fEnabled} onCheckedChange={setFEnabled} aria-label="启用公告" />
             </div>

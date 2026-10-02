@@ -82,7 +82,6 @@ export function AvatarCard({ userId, name, hasAvatar }: { userId: string; name: 
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-5">
           <div className="relative group">
             {hasAvatar ? (
-              // eslint-disable-next-line @next/next/no-img-element
               <img
                 key={ver}
                 src={`/api/avatar?userId=${encodeURIComponent(userId)}${ver ? `&_v=${ver}` : ""}`}

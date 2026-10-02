@@ -18,7 +18,6 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { upsertAlertRuleAction, deleteAlertRuleAction, toggleAlertRuleAction } from "@/server/actions/alerts"
 import { batchToggleAlertRulesAction, batchDeleteAlertRulesAction } from "@/server/actions/batch"
-import { Trash2, Loader2 } from "lucide-react"
 
 export interface AlertRuleRow {
   id: string

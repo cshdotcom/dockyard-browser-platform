@@ -24,6 +24,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { signOut } from "next-auth/react"
+import { GlobalAnnouncer } from "@/components/announcements/global-announcer"
 
 export interface MenuItem {
   key: string
@@ -191,6 +192,9 @@ export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenan
               </DropdownMenu>
             </div>
           </header>
+
+          {/* 全局公告层：跑马灯（多条合并 +N 折叠）+ 弹窗/强制阅读队列 —— 所有页面顶栏正下方 */}
+          <GlobalAnnouncer />
 
           {mobileOpen && (
             <div className="md:hidden border-b bg-card p-3 space-y-3">

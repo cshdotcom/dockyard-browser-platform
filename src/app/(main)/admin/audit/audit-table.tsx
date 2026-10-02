@@ -5,8 +5,9 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { FileDown, Eye } from "lucide-react"
+import { FileDown, Eye, Undo2, Loader2, ShieldCheck } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
+import { rollbackAuditAction } from "@/server/actions/audit-rollback"
 import { UnifiedFilterBar } from "@/components/shared/filter-bar"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -64,6 +65,8 @@ interface AuditTableProps {
   sortField?: string
   sortOrder?: "asc" | "desc"
   filters: Record<string, string>
+  mine?: boolean // 普通用户模式：仅自己的记录（隐藏操作人筛选，提示隔离说明）
+  showRollback?: boolean // 管理员：详情弹窗展示一键回滚按钮
 }
 
 // ---- JSON diff 视图 ----
@@ -147,12 +150,49 @@ function DiffView({ beforeStr, afterStr }: { beforeStr: string | null; afterStr:
   )
 }
 
-export function AuditTable({ tab, auditRows = [], securityRows = [], total, page, pageSize, keyword, sortField, sortOrder, filters }: AuditTableProps) {
+// 可回滚操作类型清单（与 audit-rollback.ts 的 RULES 对应；用于前端判断按钮显隐）
+const ROLLBACKABLE = new Set([
+  "ANNOUNCEMENT_TOGGLE", "ANNOUNCEMENT_BATCH_TOGGLE",
+  "TASK_TOGGLE", "TASK_BATCH_TOGGLE",
+  "TOKEN_TOGGLE", "TOKEN_ADMIN_TOGGLE",
+  "ALERT_RULE_TOGGLE", "ALERT_RULE_BATCH_TOGGLE",
+  "WEBHOOK_TOGGLE", "WEBHOOK_RULE_BATCH_TOGGLE",
+  "CRX_PLUGIN_TOGGLE", "CRX_PLUGIN_BATCH_TOGGLE",
+  "USER_FORCE_2FA", "USER_UPDATE", "USER_BATCH_STATUS",
+  "GROUP_UPDATE",
+])
+
+export function AuditTable({ tab, auditRows = [], securityRows = [], total, page, pageSize, keyword, sortField, sortOrder, filters, mine, showRollback }: AuditTableProps) {
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
   const [detail, setDetail] = React.useState<AuditRow | null>(null)
   const [secDetail, setSecDetail] = React.useState<SecurityRow | null>(null)
+  // 回滚状态：仅管理员 + 可回滚操作类型（布尔态/策略/配额类）
+  const [rolling, setRolling] = React.useState(false)
+  const detailRollable = !!showRollback && !!detail && ROLLBACKABLE.has(detail.operationType) && !!detail.beforeJson
+
+  const doRollback = async () => {
+    if (!detail) return
+    setRolling(true)
+    try {
+      const res = await rollbackAuditAction({ auditId: detail.id })
+      if (res.code === 0) {
+        const n = res.data?.restored?.length ?? 0
+        const skipped = res.data?.skipped?.length ?? 0
+        toast.success(`回滚完成：已恢复 ${n} 个资源${skppedNote(skipped)}`)
+        setDetail(null)
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "回滚失败")
+    } finally {
+      setRolling(false)
+    }
+  }
+  const skppedNote = (n: number) => (n > 0 ? `，${n} 个跳过（详情见 toast/审计）` : "")
 
   const pushQuery = (patch: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString())
@@ -251,24 +291,32 @@ export function AuditTable({ tab, auditRows = [], securityRows = [], total, page
         ]}
       />
 
-      {/* 专项筛选区（字段级精确过滤，配合统一筛选栏） */}
+      {/* 专项筛选区（字段级精确过滤，配合统一筛选栏；普通用户模式隐藏操作人筛选） */}
       <div className="rounded-lg border bg-card p-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {isAudit ? (
           <>
-            <div className="space-y-1">
-              <Label className="text-xs">操作人</Label>
-              <Input
-                defaultValue={filters.operator || ""}
-                placeholder="操作人名称包含..."
-                className="h-8"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") pushQuery({ operator: (e.target as HTMLInputElement).value, page: "1" })
-                }}
-                onBlur={(e) => {
-                  if ((filters.operator || "") !== e.target.value) pushQuery({ operator: e.target.value, page: "1" })
-                }}
-              />
-            </div>
+            {!mine && (
+              <div className="space-y-1">
+                <Label className="text-xs">操作人</Label>
+                <Input
+                  defaultValue={filters.operator || ""}
+                  placeholder="操作人名称包含..."
+                  className="h-8"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") pushQuery({ operator: (e.target as HTMLInputElement).value, page: "1" })
+                  }}
+                  onBlur={(e) => {
+                    if ((filters.operator || "") !== e.target.value) pushQuery({ operator: e.target.value, page: "1" })
+                  }}
+                />
+              </div>
+            )}
+            {mine && (
+              <div className="space-y-1 sm:col-span-2 lg:col-span-4 flex items-center gap-2 rounded-md border border-teal-200 bg-teal-50/60 dark:bg-teal-950/30 dark:border-teal-800 px-3 py-2">
+                <ShieldCheck className="h-4 w-4 text-teal-600 shrink-0" />
+                <p className="text-xs text-teal-700 dark:text-teal-300">仅显示你自己的操作记录：数据面在服务端按账号隔离，任何筛选都无法查看他人记录</p>
+              </div>
+            )}
             <div className="space-y-1">
               <Label className="text-xs">操作类型</Label>
               <Input
@@ -457,6 +505,31 @@ export function AuditTable({ tab, auditRows = [], securityRows = [], total, page
                   {stableStr(parseObj(detail.extraJson))}
                 </pre>
               </ScrollArea>
+            </div>
+          )}
+
+          {/* 一键回滚：把 before 快照写回资源（管理员；布尔态/策略/配额类变更） */}
+          {showRollback && detail && (
+            <div className="rounded-md border border-amber-200 bg-amber-50/70 dark:bg-amber-950/30 dark:border-amber-800 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium flex items-center gap-1.5">
+                    <Undo2 className="h-4 w-4 text-amber-600" />
+                    回滚此变更
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {detailRollable
+                      ? "把上方 before 快照中的启停/策略/配额字段写回资源；回滚动作本身会写入审计（可再次回滚）"
+                      : "该操作类型不支持一键回滚（支持启停/策略/配额类变更；删除类请使用回收站恢复，创建类请直接删除）"}
+                  </p>
+                </div>
+                {detailRollable && (
+                  <Button size="sm" variant="outline" className="border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 shrink-0" onClick={doRollback} disabled={rolling}>
+                    {rolling ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Undo2 className="mr-1 h-3.5 w-3.5" />}
+                    回滚到此操作之前
+                  </Button>
+                )}
+              </div>
             </div>
           )}
         </DialogContent>

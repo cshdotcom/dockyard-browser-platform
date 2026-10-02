@@ -520,6 +520,157 @@ export async function revokeShareAction(input: unknown): Promise<ActionResult> {
   })
 }
 
+// ---- 共享目标用户搜索（精确用户名优先；输入即搜，点选填入，杜绝手输错字） ----
+export async function searchShareTargetUsersAction(input: unknown): Promise<ActionResult<{
+  items: { id: string; username: string; displayName: string | null; shared: boolean }[]
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { workspaceId, q } = zodValidate(z.object({ workspaceId: z.string(), q: z.string().max(64) }), input)
+    const kw = q.trim()
+    const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null }, select: { id: true, userId: true } })
+    if (!ws) throw new Error("工作区不存在")
+
+    // 精确用户名匹配优先：where username = kw 或 displayName 包含 / username 前缀
+    const users = await db.user.findMany({
+      where: {
+        deletedAt: null,
+        id: { not: ws.userId },
+        OR: [
+          { username: { contains: kw } },
+          { displayName: { contains: kw } },
+        ],
+      },
+      select: { id: true, username: true, displayName: true },
+      orderBy: [{ username: "asc" }],
+      take: 10,
+    })
+    // 精确匹配置顶
+    users.sort((a, b) => (a.username === kw ? -1 : 0) - (b.username === kw ? -1 : 0))
+
+    // 已共享标记（避免重复添加提示）
+    const shares = users.length
+      ? await db.workspaceShare.findMany({
+          where: { workspaceId, targetUserId: { in: users.map((u) => u.id) }, revokedAt: null },
+          select: { targetUserId: true },
+        })
+      : []
+    const sharedSet = new Set(shares.map((s) => s.targetUserId))
+    return {
+      items: users.map((u) => ({
+        id: u.id, username: u.username, displayName: u.displayName,
+        shared: sharedSet.has(u.id),
+      })),
+    }
+  })
+}
+
+// ---- 临时分享链接（带有效期 + 权限 + 次数上限；已登录用户访问即自动绑定共享） ----
+export async function createWorkspaceShareLinkAction(input: unknown): Promise<ActionResult<{
+  linkId: string; token: string; url: string; permission: string; expireAt: string | null; maxUses: number
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    await requirePermission(ctx.userId, "blockShareWorkspace", "管理员已禁止分享工作区")
+    const { workspaceId, permission, expireHours, maxUses, note } = zodValidate(
+      z.object({
+        workspaceId: z.string(),
+        permission: z.enum(["VIEW", "OPERATE"]),
+        expireHours: zPrecision("链接有效期", 0, 8760).optional().default(0), // 0=永久
+        maxUses: zPrecision("最大使用次数", 0, 1000).optional().default(0), // 0=不限
+        note: z.string().max(120).optional().or(z.literal("").transform(() => undefined)),
+      }),
+      input
+    )
+    const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN") throw new Error("只有所有者可以创建分享链接")
+
+    const token = randomHex(32)
+    const expireAt = expireHours > 0 ? new Date(Date.now() + expireHours * 3600_000) : null
+    const link = await db.workspaceShareLink.create({
+      data: {
+        workspaceId, token, permission, expireAt, maxUses,
+        note: note || null, createdByUserId: ctx.userId,
+      },
+    })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_SHARE_LINK_CREATE",
+      resourceType: "WORKSPACE", resourceId: workspaceId, resourceName: ws.name,
+      ownerUserId: ws.userId,
+      after: { linkId: link.id, permission, expireHours, maxUses, note: note || null },
+    })
+    return {
+      linkId: link.id, token,
+      url: `/workspaces/shared?token=${token}`,
+      permission, expireAt: expireAt?.toISOString() ?? null, maxUses,
+    }
+  })
+}
+
+export async function revokeWorkspaceShareLinkAction(input: unknown): Promise<ActionResult> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { linkId } = zodValidate(z.object({ linkId: z.string() }), input)
+    const link = await db.workspaceShareLink.findUnique({ where: { id: linkId } })
+    if (!link) throw new Error("分享链接不存在")
+    const ws = await db.browserWorkspace.findUnique({ where: { id: link.workspaceId } })
+    if (ws && ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作")
+    await db.workspaceShareLink.update({ where: { id: linkId }, data: { revokedAt: new Date() } })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_SHARE_LINK_REVOKE",
+      resourceType: "WORKSPACE", resourceId: link.workspaceId,
+      after: { revokedLinkId: linkId },
+    })
+    return null
+  })
+}
+
+// ---- 链接兑换（已登录用户访问分享链接 → 校验 → 自动绑定 WorkspaceShare） ----
+export async function redeemWorkspaceShareLinkAction(input: unknown): Promise<ActionResult<{
+  workspaceId: string; workspaceName: string; permission: string; already: boolean
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { token } = zodValidate(z.object({ token: z.string().min(16).max(128) }), input)
+    const link = await db.workspaceShareLink.findUnique({ where: { token } })
+    if (!link) throw new Error("分享链接不存在（可能已失效或被撤销）")
+    if (link.revokedAt) throw new Error("该分享链接已被撤销")
+    if (link.expireAt && link.expireAt.getTime() < Date.now()) throw new Error("该分享链接已过期")
+    if (link.maxUses > 0 && link.useCount >= link.maxUses) throw new Error("该分享链接使用次数已达上限")
+
+    const ws = await db.browserWorkspace.findFirst({ where: { id: link.workspaceId, deletedAt: null } })
+    if (!ws) throw new Error("链接指向的工作区已不存在")
+    if (ws.userId === ctx.userId) throw new Error("这是你自己的工作区，无需兑换分享链接")
+
+    // 幂等：已有有效共享（同权限刷新；过期/撤销的重新激活）
+    const existing = await db.workspaceShare.findFirst({
+      where: { workspaceId: link.workspaceId, targetUserId: ctx.userId },
+    })
+    const already = !!existing && !existing.revokedAt && (!existing.expireAt || existing.expireAt.getTime() > Date.now())
+
+    await db.workspaceShare.upsert({
+      where: { workspaceId_targetUserId: { workspaceId: link.workspaceId, targetUserId: ctx.userId } },
+      update: { permission: link.permission, revokedAt: null, expireAt: null },
+      create: {
+        workspaceId: link.workspaceId, targetUserId: ctx.userId, permission: link.permission,
+        createdByUserId: link.createdByUserId,
+      },
+    })
+    await db.workspaceShareLink.update({
+      where: { id: link.id },
+      data: { useCount: { increment: 1 }, lastUsedAt: new Date() },
+    })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_SHARE_LINK_REDEEM",
+      resourceType: "WORKSPACE", resourceId: link.workspaceId, resourceName: ws.name,
+      ownerUserId: ws.userId,
+      after: { linkId: link.id, permission: link.permission, already, useCount: link.useCount + 1 },
+    })
+    return { workspaceId: ws.id, workspaceName: ws.name, permission: link.permission, already }
+  })
+}
+
 // ---- 导出工作区配置JSON（重建会话用）----
 export async function exportWorkspaceConfigAction(input: unknown): Promise<ActionResult<{ config: Record<string, unknown> }>> {
   return actionHandler(async () => {

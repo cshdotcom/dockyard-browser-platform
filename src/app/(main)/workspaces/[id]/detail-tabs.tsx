@@ -7,7 +7,7 @@ import { toast } from "sonner"
 import {
   ArrowLeft, Globe, MonitorPlay, Share2, FileJson, Terminal, Clipboard, MousePointer2, Hand,
   RefreshCw, ShieldCheck, Wifi, Loader2, Trash2, Lock, Play, StopCircle, Copy, Anchor,
-  RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon, Network, FileLock2,
+  RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon, Network, FileLock2, Link2, Plus,
 } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -22,6 +22,7 @@ import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import {
   stopWorkspaceAction, startWorkspaceAction, deleteWorkspaceAction, shareWorkspaceAction,
   revokeShareAction, exportWorkspaceConfigAction, exportHarAction, runScriptAction,
+  searchShareTargetUsersAction, createWorkspaceShareLinkAction, revokeWorkspaceShareLinkAction,
   refreshVncKeyAction, updateWorkspaceAction, switchProxyAction, restartBrowserProcessAction,
 } from "@/server/actions/workspaces"
 import { setWorkspacePolicyOverrideAction, refreshWorkspacePolicyAction } from "@/server/actions/rules"
@@ -53,15 +54,20 @@ export interface WorkspaceDetailData {
 }
 
 interface ShareRow { id: string; targetName: string; permission: string; expireAt: string | null; createdAt: string }
+interface ShareLinkRow {
+  id: string; token: string; permission: string; expireAt: string | null; revokedAt: string | null
+  maxUses: number; useCount: number; lastUsedAt: string | null; note: string | null; createdAt: string
+}
 interface ScriptRow { id: string; name: string; description: string; scope: string }
 interface HarRow { id: string; size: string; createdAt: string }
 interface RunLogRow { id: string; status: string; log: string; startedAt: string }
 
 export function WorkspaceDetail({
-  workspace, shares, scripts, harRecords, runLogs, publicCdpEndpoint,
+  workspace, shares, shareLinks, scripts, harRecords, runLogs, publicCdpEndpoint,
 }: {
   workspace: WorkspaceDetailData
   shares: ShareRow[]
+  shareLinks: ShareLinkRow[]
   scripts: ScriptRow[]
   harRecords: HarRow[]
   runLogs: RunLogRow[]
@@ -226,7 +232,7 @@ export function WorkspaceDetail({
           <HarPanel workspace={workspace} harRecords={harRecords} />
         </TabsContent>
         <TabsContent value="shares" className="mt-4">
-          <SharesPanel workspace={workspace} shares={shares} />
+          <SharesPanel workspace={workspace} shares={shares} shareLinks={shareLinks} />
         </TabsContent>
       </Tabs>
 
@@ -832,57 +838,245 @@ function HarPanel({ workspace, harRecords }: { workspace: WorkspaceDetailData; h
 }
 
 // ================= 共享授权面板 =================
-function SharesPanel({ workspace, shares }: { workspace: WorkspaceDetailData; shares: ShareRow[] }) {
+function SharesPanel({ workspace, shares, shareLinks }: { workspace: WorkspaceDetailData; shares: ShareRow[]; shareLinks: ShareLinkRow[] }) {
   const router = useRouter()
   const revoke = async (shareId: string) => {
     const res = await revokeShareAction({ shareId })
     if (res.code === 0) { toast.success("已撤销共享"); router.refresh() } else toast.error(res.msg)
   }
+  const [linkCreateOpen, setLinkCreateOpen] = React.useState(false)
+  // 新建链接后立即展示完整 URL（一次展示，关闭后仅列表可见）
+  const [freshLink, setFreshLink] = React.useState<{ url: string; permission: string; expireAt: string | null; maxUses: number } | null>(null)
+
+  const revokeLink = async (linkId: string) => {
+    const res = await revokeWorkspaceShareLinkAction({ linkId })
+    if (res.code === 0) { toast.success("已撤销分享链接"); router.refresh() } else toast.error(res.msg)
+  }
+
+  const copyLink = async (token: string) => {
+    const url = `${window.location.origin}/workspaces/shared?token=${token}`
+    try {
+      await navigator.clipboard.writeText(url)
+      toast.success("链接已复制到剪贴板")
+    } catch {
+      toast.info(url) // 剪贴板不可用时展示完整链接供手动复制
+    }
+  }
+
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base">共享授权列表</CardTitle>
-        <CardDescription>被授权用户可访问此工作区；只读权限仅可查看，可操作权限允许完整交互（NoVNC 含键鼠与剪贴板）</CardDescription>
-      </CardHeader>
-      <CardContent>
-        {shares.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground border border-dashed rounded-lg">暂未共享给其他用户</p>
-        ) : (
-          <div className="rounded-md border divide-y">
-            {shares.map((s) => (
-              <div key={s.id} className="flex items-center justify-between p-3 text-sm">
-                <div>
-                  <span className="font-medium">{s.targetName}</span>
-                  <Badge variant={s.permission === "OPERATE" ? "default" : "outline"} className={cn("ml-2 text-[10px]", s.permission === "OPERATE" && "bg-teal-600 hover:bg-teal-600")}>
-                    {s.permission === "OPERATE" ? "可操作" : "只读"}
-                  </Badge>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    创建 {s.createdAt}{s.expireAt ? ` · 过期 ${s.expireAt}` : " · 永久有效"}
-                  </p>
+    <div className="space-y-4">
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">共享授权列表（按用户）</CardTitle>
+          <CardDescription>按用户名精确搜索并添加；只读权限仅可查看，可操作权限允许完整交互（NoVNC 含键鼠与剪贴板）</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {shares.length === 0 ? (
+            <p className="py-6 text-center text-sm text-muted-foreground border border-dashed rounded-lg">暂未共享给其他用户</p>
+          ) : (
+            <div className="rounded-md border divide-y">
+              {shares.map((s) => (
+                <div key={s.id} className="flex items-center justify-between p-3 text-sm">
+                  <div>
+                    <span className="font-medium">{s.targetName}</span>
+                    <Badge variant={s.permission === "OPERATE" ? "default" : "outline"} className={cn("ml-2 text-[10px]", s.permission === "OPERATE" && "bg-teal-600 hover:bg-teal-600")}>
+                      {s.permission === "OPERATE" ? "可操作" : "只读"}
+                    </Badge>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      创建 {s.createdAt}{s.expireAt ? ` · 过期 ${s.expireAt}` : " · 永久有效"}
+                    </p>
+                  </div>
+                  {workspace.isOwner && (
+                    <Button variant="ghost" size="sm" className="text-red-500" onClick={() => revoke(s.id)}>撤销</Button>
+                  )}
                 </div>
-                {workspace.isOwner && (
-                  <Button variant="ghost" size="sm" className="text-red-500" onClick={() => revoke(s.id)}>撤销</Button>
-                )}
-              </div>
-            ))}
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ---- 临时分享链接（带有效期 + 权限 + 次数上限；已登录用户访问链接即自动绑定） ---- */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <CardTitle className="text-base flex items-center gap-1.5"><Link2 className="h-4 w-4 text-violet-500" />临时分享链接</CardTitle>
+              <CardDescription>发给同事即可接入（需登录）；访问链接自动按权限绑定共享，可设有效期与次数上限</CardDescription>
+            </div>
+            {workspace.isOwner && (
+              <Button size="sm" variant="outline" onClick={() => { setFreshLink(null); setLinkCreateOpen(true) }}>
+                <Plus className="mr-1 h-4 w-4" />创建链接
+              </Button>
+            )}
           </div>
-        )}
-      </CardContent>
-    </Card>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {freshLink && (
+            <div className="rounded-md border border-violet-200 bg-violet-50/70 dark:bg-violet-950/30 dark:border-violet-800 p-3 space-y-2">
+              <p className="text-xs text-muted-foreground">链接已创建（完整地址仅此一次展示，可随时在列表中复制）：</p>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 min-w-0 truncate rounded bg-muted px-2 py-1.5 text-xs font-mono">{freshLink.url}</code>
+                <Button size="sm" variant="outline" onClick={() => void navigator.clipboard.writeText(`${window.location.origin}${freshLink.url}`).then(() => toast.success("已复制")).catch(() => toast.info(`${window.location.origin}${freshLink.url}`))}>
+                  <Copy className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                权限 {freshLink.permission === "OPERATE" ? "可操作" : "只读"} · {freshLink.expireAt ? `有效期至 ${freshLink.expireAt}` : "永久有效"} · 次数 {freshLink.maxUses > 0 ? `限 ${freshLink.maxUses} 次` : "不限"}
+              </p>
+            </div>
+          )}
+          {shareLinks.length === 0 && !freshLink ? (
+            <p className="py-6 text-center text-sm text-muted-foreground border border-dashed rounded-lg">暂无分享链接</p>
+          ) : (
+            <div className="rounded-md border divide-y max-h-72 overflow-y-auto">
+              {shareLinks.map((l) => {
+                const dead = !!l.revokedAt || (l.expireAt ? new Date(l.expireAt).getTime() < Date.now() : false) || (l.maxUses > 0 && l.useCount >= l.maxUses)
+                return (
+                  <div key={l.id} className="flex items-center justify-between gap-3 p-3 text-sm">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <code className="font-mono text-xs px-1.5 py-0.5 rounded bg-muted truncate max-w-40" title={l.token}>{l.token.slice(0, 12)}…</code>
+                        <Badge variant={l.permission === "OPERATE" ? "default" : "outline"} className={cn("text-[10px]", l.permission === "OPERATE" && "bg-teal-600 hover:bg-teal-600")}>
+                          {l.permission === "OPERATE" ? "可操作" : "只读"}
+                        </Badge>
+                        {l.revokedAt ? (
+                          <Badge variant="secondary" className="text-[10px] text-red-600">已撤销</Badge>
+                        ) : dead ? (
+                          <Badge variant="secondary" className="text-[10px] text-amber-600">已失效</Badge>
+                        ) : (
+                          <Badge variant="secondary" className="text-[10px] text-teal-600">生效中</Badge>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {l.expireAt ? `过期 ${l.expireAt}` : "永久"}
+                        {` · 已用 ${l.useCount}${l.maxUses > 0 ? `/${l.maxUses}` : ""} 次`}
+                        {l.lastUsedAt ? ` · 最近使用 ${l.lastUsedAt}` : ""}
+                      </p>
+                      {l.note && <p className="text-xs text-muted-foreground/80 mt-0.5 truncate" title={l.note}>备注：{l.note}</p>}
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {!l.revokedAt && (
+                        <>
+                          <Button variant="ghost" size="sm" onClick={() => void copyLink(l.token)} aria-label="复制链接">
+                            <Copy className="h-4 w-4" />
+                          </Button>
+                          {workspace.isOwner && (
+                            <Button variant="ghost" size="sm" className="text-red-500" onClick={() => void revokeLink(l.id)} disabled={dead} aria-label="撤销链接">
+                              撤销
+                            </Button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 创建链接弹窗 */}
+      <ShareLinkCreateDialog workspace={workspace} open={linkCreateOpen} onOpenChange={(v) => { setLinkCreateOpen(v); if (!v) setFreshLink(null) }} onCreated={(r) => { setFreshLink(r); router.refresh() }} />
+    </div>
   )
 }
 
-// ---- 共享弹窗 ----
+// ---- 创建分享链接弹窗 ----
+function ShareLinkCreateDialog({ workspace, open, onOpenChange, onCreated }: {
+  workspace: WorkspaceDetailData
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  onCreated: (r: { url: string; permission: string; expireAt: string | null; maxUses: number }) => void
+}) {
+  const [permission, setPermission] = React.useState("VIEW")
+  const [hours, setHours] = React.useState(72)
+  const [maxUses, setMaxUses] = React.useState(0)
+  const [note, setNote] = React.useState("")
+  const [busy, setBusy] = React.useState(false)
+  const submit = async () => {
+    setBusy(true)
+    try {
+      const res = await createWorkspaceShareLinkAction({ workspaceId: workspace.id, permission, expireHours: hours, maxUses, note })
+      if (res.code === 0 && res.data) {
+        toast.success("分享链接已创建")
+        onCreated({ url: res.data.url, permission: res.data.permission, expireAt: res.data.expireAt, maxUses: res.data.maxUses })
+        onOpenChange(false)
+      } else toast.error(res.msg)
+    } finally { setBusy(false) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader><DialogTitle className="flex items-center gap-2"><Link2 className="h-4 w-4 text-violet-500" />创建临时分享链接</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label>链接权限</Label>
+            <Select value={permission} onValueChange={setPermission}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="VIEW">只读（仅查看画面/数据）</SelectItem>
+                <SelectItem value="OPERATE">可操作（键鼠/剪贴板/CDP）</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label>链接有效期（小时，0=永久）</Label>
+            <PrecisionInput value={hours} onChange={setHours} min={0} max={8760} suffix="h" />
+          </div>
+          <div className="space-y-1.5">
+            <Label>最大使用次数（0=不限；每次访问绑定记 1 次）</Label>
+            <PrecisionInput value={maxUses} onChange={setMaxUses} min={0} max={1000} suffix="次" />
+          </div>
+          <div className="space-y-1.5">
+            <Label>备注（可选，仅自己可见）</Label>
+            <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="如：发给同事张三临时排查" maxLength={120} />
+          </div>
+          <p className="text-xs text-muted-foreground">已登录用户打开链接后自动按上述权限绑定共享；到期/超次/撤销后立即失效</p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button onClick={submit} disabled={busy}>{busy && <Loader2 className="mr-1 h-4 w-4 animate-spin" />} 创建链接</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ---- 共享弹窗（用户名搜索建议：精确匹配优先置顶，点选填入，杜绝手输错字） ----
 function ShareDialog({ workspace, open, onOpenChange, onDone }: { workspace: WorkspaceDetailData; open: boolean; onOpenChange: (v: boolean) => void; onDone: () => void }) {
   const [username, setUsername] = React.useState("")
   const [permission, setPermission] = React.useState("VIEW")
   const [hours, setHours] = React.useState(24)
   const [busy, setBusy] = React.useState(false)
+  // 用户搜索建议（输入 ≥1 字符触发；服务端精确用户名优先 + 昵称/用户名包含）
+  const [suggests, setSuggests] = React.useState<{ id: string; username: string; displayName: string | null; shared: boolean }[]>([])
+  const [suggestBusy, setSuggestBusy] = React.useState(false)
+
+  React.useEffect(() => {
+    if (!open) return
+    const kw = username.trim()
+    if (!kw) { setSuggests([]); return }
+    let alive = true
+    setSuggestBusy(true)
+    const t = setTimeout(async () => {
+      try {
+        const res = await searchShareTargetUsersAction({ workspaceId: workspace.id, q: kw })
+        if (alive && res.code === 0) setSuggests(res.data?.items || [])
+        else if (alive) setSuggests([])
+      } catch { if (alive) setSuggests([]) } finally { if (alive) setSuggestBusy(false) }
+    }, 300)
+    return () => { alive = false; clearTimeout(t); setSuggestBusy(false) }
+  }, [username, open, workspace.id])
+
+  const exact = suggests.find((s) => s.username === username.trim())
+
   const submit = async () => {
     setBusy(true)
     try {
       const res = await shareWorkspaceAction({ workspaceId: workspace.id, targetUsername: username.trim(), permission, expireHours: hours })
-      if (res.code === 0) { toast.success("共享授权已创建"); onOpenChange(false); setUsername(""); onDone() }
+      if (res.code === 0) { toast.success("共享授权已创建"); onOpenChange(false); setUsername(""); setSuggests([]); onDone() }
       else toast.error(res.msg)
     } finally { setBusy(false) }
   }
@@ -892,8 +1086,40 @@ function ShareDialog({ workspace, open, onOpenChange, onDone }: { workspace: Wor
         <DialogHeader><DialogTitle>共享工作区</DialogTitle></DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <Label>目标用户名</Label>
-            <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="输入要共享的用户名" />
+            <Label>目标用户名（输入即搜索，点选自动填入）</Label>
+            <div className="relative">
+              <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="输入精确用户名" autoComplete="off" />
+              {suggestBusy && <Loader2 className="absolute right-2.5 top-2.5 h-4 w-4 animate-spin text-muted-foreground" />}
+            </div>
+            {/* 搜索建议：精确匹配置顶 + 已共享标记 */}
+            {suggests.length > 0 && (
+              <div className="rounded-md border divide-y max-h-44 overflow-y-auto">
+                {suggests.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className={cn(
+                      "flex w-full items-center justify-between gap-2 px-3 py-2 text-sm text-left hover:bg-muted/70 transition",
+                      s.username === username.trim() && "bg-teal-50/70 dark:bg-teal-950/30",
+                    )}
+                    onClick={() => setUsername(s.username)}
+                  >
+                    <span className="min-w-0 truncate">
+                      <span className="font-medium font-mono text-[13px]">{s.username}</span>
+                      {s.username === username.trim() && <Badge className="ml-1.5 bg-teal-600 hover:bg-teal-600 text-[9px]">精确匹配</Badge>}
+                      {s.displayName && <span className="ml-1.5 text-xs text-muted-foreground truncate">{s.displayName}</span>}
+                    </span>
+                    {s.shared && <Badge variant="secondary" className="text-[10px] shrink-0">已共享</Badge>}
+                  </button>
+                ))}
+              </div>
+            )}
+            {username.trim() && !suggestBusy && suggests.length === 0 && (
+              <p className="text-xs text-red-600">未找到匹配用户（共享按精确用户名匹配，请检查拼写）</p>
+            )}
+            {exact?.shared && (
+              <p className="text-xs text-amber-600">该用户已有有效共享；提交将更新其权限与有效期</p>
+            )}
           </div>
           <div className="space-y-1.5">
             <Label>权限</Label>

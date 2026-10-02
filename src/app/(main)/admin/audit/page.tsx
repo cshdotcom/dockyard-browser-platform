@@ -139,7 +139,7 @@ export default async function AdminAuditPage({
         <StatCard title="WARN 级记录" value={warnCount} sub="全量警告级" icon={<TriangleAlert className="h-4 w-4" />} tone="warning" />
         <StatCard title="CRITICAL 级记录" value={criticalCount} sub="全量严重级" icon={<ShieldAlert className="h-4 w-4" />} tone={criticalCount > 0 ? "danger" : "default"} />
       </div>
-      <AuditTable tab="audit" auditRows={list} total={total} page={q.page} pageSize={q.pageSize} keyword={q.keyword} sortField={q.sortField} sortOrder={q.sortOrder} filters={f} />
+      <AuditTable tab="audit" auditRows={list} total={total} page={q.page} pageSize={q.pageSize} keyword={q.keyword} sortField={q.sortField} sortOrder={q.sortOrder} filters={f} showRollback />
     </div>
   )
 }
