@@ -331,6 +331,8 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
     if (!ws) throw new Error("工作区不存在")
     if (ctx.userId !== ws.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作该工作区")
     if (ws.status === "RUNNING") throw new Error("工作区已在运行中")
+    // r24-h：离线冻结封存期间禁止启动（安全事件调查取证）
+    if (ws.status === "FROZEN") throw new Error(`工作区已被管理员离线冻结封存${ws.freezeReason ? `（${ws.freezeReason}）` : ""}，冻结期间浏览器不可启动；请联系管理员解冻`)
 
     const proxyInfo = await buildProxyUrl(ws.proxyNodeId)
     if (ws.mode === "cdp_light") {
@@ -1119,6 +1121,7 @@ export async function getVncTicketAction(input: unknown): Promise<ActionResult<{
 
     const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
     if (!ws || ws.mode !== "novnc_full") throw new Error("NoVNC 会话不存在")
+    if (ws.status === "FROZEN") throw new Error(`工作区已被管理员离线冻结封存${ws.freezeReason ? `（${ws.freezeReason}）` : ""}，冻结期间禁止远程桌面接入`)
     if (!ws.novncSessionId) throw new Error("会话未运行")
     if (ws.status !== "RUNNING" && ws.status !== "IDLE") throw new Error(`会话当前不可连接（${ws.status}）`)
 

@@ -130,6 +130,7 @@ async function main() {
     { code: "novnc_health", name: "NoVNC会话健康探测与闲置回收", cron: "*/2 * * * *", timeout: 120 },
     { code: "policy_deployment_activation", name: "定时策略下发到点激活", cron: "* * * * *", timeout: 120 },
     { code: "crx_install_poll", name: "CRX插件安装状态轮询（源探测+CDP检测+降级告警）", cron: "* * * * *", timeout: 180 },
+    { code: "frozen_expire_check", name: "冻结沙箱到期自动解冻（离线封存恢复）", cron: "*/5 * * * *", timeout: 60 },
     { code: "crx_gray_rollout", name: "CRX灰度策略滚动下发", cron: "* * * * *", timeout: 120 },
   ]
   for (const t of tasks) {

@@ -651,6 +651,30 @@ export const TASKS: Record<string, (log: (m: string) => void, params?: unknown) 
     return crxGrayRollout(log)
   },
 
+  // 21. r24-h：冻结到期自动解冻（离线冻结封存 → expireAt 到点 → STOPPED 可重新启动）
+  async frozen_expire_check(log) {
+    const due = await db.browserWorkspace.findMany({
+      where: { status: "FROZEN", deletedAt: null, expireAt: { lte: new Date() } },
+      take: 200,
+    })
+    let n = 0
+    for (const ws of due) {
+      await db.browserWorkspace.update({ where: { id: ws.id }, data: { status: "STOPPED", freezeReason: null, expireAt: null } })
+      await writeAudit({
+        operationType: "WORKSPACE_UNFREEZE", resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
+        ownerUserId: ws.userId, severity: "INFO", before: { status: "FROZEN", expireAt: ws.expireAt }, after: { status: "STOPPED", auto: true },
+      })
+      await raiseAlert({
+        title: "冻结工作区已到期自动解冻", level: "INFO",
+        content: `工作区 ${ws.name}（${ws.uuid}）离线冻结封存到期，已自动恢复为 STOPPED（所有者可重新启动）`,
+        resourceType: "WORKSPACE", resourceId: ws.id, ownerUserId: ws.userId, dedupeKey: `ws-unfreeze-auto-${ws.id}`,
+      }).catch(() => null)
+      log(`自动解冻 ${ws.name}（${ws.uuid}）`)
+      n++
+    }
+    return { itemsProcessed: n, summary: `到期自动解冻${n}个冻结沙箱` }
+  },
+
   // ---- r24-a：参数化自定义执行体（执行内容完全放开；paramsJson 携带参数）----
   // 注：custom_shell 顶层调用由 runTask 直连（携带任务自身 timeoutSec）；
   // 此注册表项用于类型清单展示 + 任务链步骤内调用（步骤超时兜底 300s）

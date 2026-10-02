@@ -450,6 +450,7 @@ async function resolveControlledWorkspace(workspaceIdOrUuid: string, ctx: Browse
   if (!ws) throw new Error("工作区不存在")
   // 归属强制：本人资源 或 ADMIN 权限位
   if (ws.userId !== ctx.userId && !ctx.isAdmin) throw new Error("无权控制该工作区（仅资源所有者或管理员）")
+  if (ws.status === "FROZEN") throw new Error("工作区已被管理员离线冻结封存，冻结期间禁止浏览器控制")
   if (ws.status !== "RUNNING" && ws.status !== "IDLE") throw new Error(`工作区当前不可控制（${ws.status}）`)
   if (ws.mode !== "cdp_light") throw new Error("仅 CDP 轻量会话支持浏览器控制 API（NoVNC 会话请使用远程桌面）")
   return ws

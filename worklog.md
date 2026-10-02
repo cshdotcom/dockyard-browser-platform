@@ -800,3 +800,36 @@ Work Log:
 Stage Summary:
 - r24-a/b/c/d(部分) 全部落地并真实测试：自定义任务执行内容三类执行体+可视化构建器（27项冒烟全过）、Steel零残留（24文件+DB迁移数据保留）、IME每沙箱独立fcitx5+VNC控制端切换按钮+偏好持久化（22项测试全过）、剪贴板VNC透传策略开关+跨沙箱隔离实证
 - dev服务器重启恢复（@prisma/client-postgres被db push清空后重新generate恢复）；bunx tsc改动文件零新增错误；eslint新模块0 error
+
+---
+Task ID: 24-d/e/f/g(阶段)
+Agent: main
+Task: r24-d 剪贴板隔离加固 + r24-e 每沙箱专属 Linux 用户（UID 台账持久化） + r24-f 持久化挂载方案 + 浏览器端到端 QA + 质量门
+
+Work Log:
+- 【r24-d 剪贴板】workspace.clipboardVncSync 配置键（默认开）：关闭 → 沙箱 x11vnc 以 -nosel -noclipboard 启动（X 剪贴板/选区不向 VNC 端透传）；跨沙箱隔离 = 每沙箱独立 Xvfb/X server（CLIPBOARD/PRIMARY 物理隔离，smoke-r24c【4】实证独立 socket + 每调用独立 -display 作用域）；平台中转通道既有逐连接隔离（vnc-bridge remoteClipboard 实例字段）+ 归属校验
+- 【r24-e 专属用户】embedded-sandbox.ts 重写用户体系：每沙箱独立 Linux 账户 dyu-<工作区UUID前8>-<所有者用户名前6>（同一用户的不同沙箱也是不同账户 → Profile/下载/家目录 700 同容器完全隔离；仅 root 后台可全访问）；UID 台账 storage/system/sandbox-users.json（20000-60000 池、原子写 0600、进程内互斥队列串行化）：容器重建按台账原 UID useradd -u 复活（存储卷属主零冲突）；台账丢失以 passwd 为权威反写收养；passwd 冲突换新 UID + 启动 chown 兜底；re-adopt 时复活 state.linuxUser；旧命名（每平台用户）兼容回退；sandboxUserLedgerInfo() 导出台账查询
+- 【r24-e 接线】EmbeddedSandboxSpec/NovncProvisionParams + workspaceUuid/ownerUsername；workspaces.ts 三处调用注入（创建流程预生成 wsUuid 与 db.browserWorkspace.create uuid 同源；start/switch 用 ws.uuid + 所有者用户名回查）；DY_WORKSPACE_UUID/DY_OWNER_USERNAME 环境标识
+- 【r24-e 测试】smoke-r24e-sandbox-users.ts 20/20 pass：命名规则（大小写/非法字符/短uuid填充/≤32字符集/同用户不同沙箱=不同账户/同沙箱不同用户=不同账户）、UID 台账读写排序/坏台账回退、非 root 降级语义
+- 【r24-f 持久化】docker/start.sh 启动自检补 storage/system（UID 台账）+ storage/profiles 目录 + 台账存在性检查日志；Dockerfile 构建层同步；README 新增「四B、单容器多用户沙箱架构与数据持久化」专章（挂载点/持久性表、UID 台账零冲突机制、docker run 卷挂载示例、剪贴板/输入法作用域说明）
+- 【QA 浏览器实测 agent-browser --session qa24（admin/Admin@2026）】①/admin/tasks：创建 custom_shell 任务（可视化构建器：脚本 textarea/解释器/cwd/env KV 编辑器全部渲染）→ 立即执行 → SUCCESS「exit=0 · 2行输出」→ 执行日志详情弹窗「执行输出」区显示完整 stdout（QA24_SHELL_OK 42 / PWD=…）②custom_chain 任务：编排 2 步（alert_state_check+proxy_health_probe，步骤上移下移/备注/失败继续开关渲染）→ 执行 →「任务链全部完成（2/2 步）」③/admin/network?tab=browser：浏览器节点表渲染（node-default http://browser-node:3000）、页面零 steel 文案残留、?tab=steel 旧链接兼容映射 ④NoVNC 工作区 VNC 工具栏「输入法」按钮渲染 → Popover 打开（引擎页签禁用+降级说明「容器未安装 fcitx5」、布局页签 20 项可用、「保存为偏好」开关、作用域=本沙箱徽章）；7 张截图 download/qa-24/
+- 【QA 清理】scripts/qa-cleanup-24.ts（幂等）：QA24 工作区×2 + 自定义任务×2（含执行日志）+ 审计 6 条 → 终态归零 CLEANUP PASS
+- 【质量门】bunx tsc：全部改动文件零新增错误（novnc.ts 2 处/detail-tabs 1 处为基线既有，stash 对照证实）；eslint 18 个改动文件 0 error 0 warning；bun run build 全绿（60 路由 38.7s 编译成功）；sh -n 两个 shell 脚本语法通过；dev 服务器重启恢复 200/307
+- 【提交】git commit「feat(r24): 自定义任务执行内容完全放开 + Steel声明零残留 + 每沙箱独立IME/剪贴板/专属用户隔离」
+
+Stage Summary:
+- r24 全部六个子项完成：自定义任务执行内容三类执行体（shell/chain/webhook）全链路真实跑通并含可视化构建器；Steel 在源码/DB/前端/文档/seed 零残留（数据保留迁移）；每沙箱独立 fcitx5 输入法（VNC 工具栏实时切换+偏好持久化+独立 X 显示作用域）；剪贴板跨沙箱物理隔离+VNC 透传策略开关；每沙箱专属 Linux 用户（UUID+用户名命名+UID 台账容器重建零冲突）；存储卷持久化布局与部署文档
+- 三份冒烟测试 69 项断言全过（custom-exec 27 + ime 22 + sandbox-users 20）；浏览器端到端 4 条链路实测通过；QA 数据清理归零
+
+---
+Task ID: 24-h
+Agent: main
+Task: r24-h 沙箱离线冻结封存（FROZEN）真实现 —— 此前仅状态枚举无实现，本次补全闭环
+
+Work Log:
+- 【Actions】admin-workspaces.ts 新增 freezeWorkspaceAction（原因≥4字符必填 + 可选自动解冻时间 ISO 校验≥1分钟：进程立即停止=销毁底层会话+断开全部VNC客户端；status=FROZEN+freezeReason+expireAt；会话/CDP句柄清空；Profile/CRX策略/审计完整封存；WORKSPACE_FREEZE 审计+WARN告警）/ unfreezeWorkspaceAction（FROZEN→STOPPED 手动解冻+审计）
+- 【入口 guard 全覆盖】workspaces.ts startWorkspaceAction（冻结期间浏览器不可启动）+ getNovnovTicket VNC 取票（禁止远程桌面接入，含冻结原因透出）；cdp-control.ts resolveControlledWorkspace（禁止浏览器控制）；/api/vnc-proxy/clipboard（剪贴板通道关闭）——四处全部拦截并带冻结原因提示
+- 【自动解冻】engine.ts 新增 frozen_expire_check 任务（*/5：FROZEN 且 expireAt 到点 → STOPPED + WORKSPACE_UNFREEZE{auto:true} 审计 + INFO 告警）；seed/seed-postgres 注册 + 活库种入；闲置回收/僵尸回收任务作用域已天然排除 FROZEN（不会误回收冻结沙箱）
+- 【UI】管理端工作区表：行菜单「离线冻结封存」（Snowflake 蓝色，弹窗=原因 textarea+自动解冻开关+datetime-local）/「解除冻结」（Sunrise 青色，仅 FROZEN 行显示）；冻结弹窗含调查取证语义说明
+- 【QA 浏览器实测】创建工作区→管理端冻结（原因填写+提交）→DB 断言 FROZEN/原因落库/底层会话销毁（destroyedSessions 审计）/WARN 告警→冻结期间工作区详情页无任何启动入口→设置 expireAt 过去+POST /api/cron 触发 frozen_expire_check →「到期自动解冻1个冻结沙箱」→DB 断言 STOPPED/原因清空/自动解冻审计/INFO 告警→解冻后列表 STOPPED 徽章；截图 08；QA 数据清理归零（工作区+审计3+告警2+任务日志）
+- 【质量门】tsc 全库 75 错误=基线持平（零新增）；eslint 0/0；bun run build 全绿（39.8s）

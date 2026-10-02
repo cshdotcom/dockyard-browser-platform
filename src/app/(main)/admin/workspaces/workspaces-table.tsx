@@ -13,12 +13,13 @@ import { toast } from "sonner"
 import {
   Loader2, MoreHorizontal, Square, RotateCw, Trash2, Flame, Unplug, Timer, UserRoundCog, Anchor,
   AlertTriangle, X, Columns3, ShieldCheck, ShieldX, Container, History, ArrowRightLeft, Share2,
-  UsersRound, Search,
+  UsersRound, Search, Snowflake, Sunrise,
 } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -29,6 +30,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import {
   forceStopWorkspaceAction, forceRestartWorkspaceAction, forceRecycleWorkspaceAction, forcePurgeWorkspaceAction,
   forceDisconnectVncAction, forceUpdateTtlAction, transferWorkspaceAction, batchWorkspaceAction, setWorkspaceVncLimitAction,
+  freezeWorkspaceAction, unfreezeWorkspaceAction,
 } from "@/server/actions/admin-workspaces"
 import { adminForceUpdateWorkspaceTimersAction } from "@/server/actions/workspaces"
 
@@ -203,6 +205,49 @@ export function WorkspacesTable(props: Props) {
     callAction(`stop-${row.id}`, () => forceStopWorkspaceAction({ id: row.id }))
   const restart = (row: AdminWorkspaceRow) =>
     callAction(`restart-${row.id}`, () => forceRestartWorkspaceAction({ id: row.id }))
+  const unfreeze = (row: AdminWorkspaceRow) =>
+    callAction(`unfreeze-${row.id}`, () => unfreezeWorkspaceAction({ id: row.id }))
+
+  // ---- r24-h：冻结弹窗状态 ----
+  const [freezeTarget, setFreezeTarget] = React.useState<AdminWorkspaceRow | null>(null)
+  const [freezeForm, setFreezeForm] = React.useState({ reason: "", autoUnfreeze: false, expireLocal: "" })
+  const [freezing, setFreezing] = React.useState(false)
+  const submitFreeze = async () => {
+    if (!freezeTarget) return
+    if (freezeForm.reason.trim().length < 4) {
+      toast.error("冻结原因至少 4 个字符（用于审计与告警留痕）")
+      return
+    }
+    // datetime-local → ISO（含时区偏移，服务端 zod datetime(offset=true) 校验）
+    let expireIso: string | null = null
+    if (freezeForm.autoUnfreeze) {
+      if (!freezeForm.expireLocal) {
+        toast.error("请填写自动解冻时间")
+        return
+      }
+      const d = new Date(freezeForm.expireLocal)
+      if (!Number.isFinite(d.getTime()) || d.getTime() <= Date.now() + 60_000) {
+        toast.error("自动解冻时间必须晚于当前时间至少 1 分钟")
+        return
+      }
+      expireIso = d.toISOString()
+    }
+    setFreezing(true)
+    try {
+      const res = await freezeWorkspaceAction({ id: freezeTarget.id, reason: freezeForm.reason.trim(), expireAt: expireIso })
+      if (res.code === 0) {
+        toast.success(`已冻结封存：${freezeTarget.name}${expireIso ? "（到期自动解冻）" : "（无限期，需手动解冻）"}`)
+        setFreezeTarget(null)
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "冻结失败")
+    } finally {
+      setFreezing(false)
+    }
+  }
 
   // ---- 单行确认弹窗状态 ----
   const [recycleTarget, setRecycleTarget] = React.useState<AdminWorkspaceRow | null>(null)
@@ -720,6 +765,15 @@ export function WorkspacesTable(props: Props) {
                   <DropdownMenuItem onClick={() => stop(row)}>
                     <Square className="h-4 w-4 mr-2" /> 强制停止
                   </DropdownMenuItem>
+                  {row.status !== "FROZEN" ? (
+                    <DropdownMenuItem className="text-blue-600" onClick={() => { setFreezeTarget(row); setFreezeForm({ reason: "", autoUnfreeze: false, expireLocal: "" }) }}>
+                      <Snowflake className="h-4 w-4 mr-2" /> 离线冻结封存
+                    </DropdownMenuItem>
+                  ) : (
+                    <DropdownMenuItem className="text-teal-600" onClick={() => unfreeze(row)}>
+                      <Sunrise className="h-4 w-4 mr-2" /> 解除冻结（恢复为已停止）
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuItem onClick={() => restart(row)}>
                     <RotateCw className="h-4 w-4 mr-2" /> 强制重启
                   </DropdownMenuItem>
@@ -789,6 +843,67 @@ export function WorkspacesTable(props: Props) {
           )
         }
       />
+
+      {/* ---- r24-h：单行离线冻结封存弹窗 ---- */}
+      <Dialog open={!!freezeTarget} onOpenChange={(v) => !freezing && setFreezeTarget(v ? freezeTarget : null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Snowflake className="h-4 w-4 text-blue-500" /> 离线冻结封存
+            </DialogTitle>
+            <DialogDescription>
+              工作区「{freezeTarget?.name}（{freezeTarget?.uuid?.slice(0, 10)}…）」将立即停止全部进程并封存：
+              底层会话销毁、VNC 连接断开；冻结期间禁止启动 / VNC 接入 / 浏览器控制 / 剪贴板中转；
+              Profile、CRX 策略与审计数据完整保留（调查取证语义）。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="fz-reason">冻结原因（≥4 字符，写入审计与告警）</Label>
+              <Textarea
+                id="fz-reason"
+                value={freezeForm.reason}
+                onChange={(e) => setFreezeForm({ ...freezeForm, reason: e.target.value })}
+                placeholder="如：疑似账号被盗用，安全调查取证"
+                rows={2}
+                maxLength={300}
+              />
+            </div>
+            <div className="space-y-2 rounded-md border p-3">
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={freezeForm.autoUnfreeze}
+                  onChange={(e) => setFreezeForm({ ...freezeForm, autoUnfreeze: e.target.checked })}
+                  className="h-4 w-4"
+                />
+                设置自动解冻时间（到期由定时任务自动恢复为「已停止」）
+              </label>
+              {freezeForm.autoUnfreeze && (
+                <div className="space-y-1">
+                  <Label htmlFor="fz-expire">自动解冻时间（至少 1 分钟后）</Label>
+                  <Input
+                    id="fz-expire"
+                    type="datetime-local"
+                    value={freezeForm.expireLocal}
+                    onChange={(e) => setFreezeForm({ ...freezeForm, expireLocal: e.target.value })}
+                  />
+                  <p className="text-xs text-muted-foreground">不勾选 = 无限期封存，仅管理员手动解冻</p>
+                </div>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setFreezeTarget(null)} disabled={freezing}>
+              取消
+            </Button>
+            <Button className="bg-blue-600 hover:bg-blue-500 text-white" onClick={submitFreeze} disabled={freezing}>
+              {freezing && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+              <Snowflake className="mr-1 h-4 w-4" /> 确认冻结封存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ---- 单行：移入回收站确认 ---- */}
       <ConfirmDialog

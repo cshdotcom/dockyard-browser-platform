@@ -21,6 +21,10 @@ export async function POST(req: NextRequest) {
   if (!ws || ws.mode !== "novnc_full") {
     return NextResponse.json({ code: 40400, msg: "NoVNC 会话不存在", traceId })
   }
+  // r24-h：离线冻结封存期间剪贴板中转禁用
+  if (ws.status === "FROZEN") {
+    return NextResponse.json({ code: 40300, msg: "工作区已被管理员离线冻结封存，冻结期间剪贴板通道关闭", traceId })
+  }
   const isAdmin = ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN"
   const share = await db.workspaceShare.findFirst({
     where: { workspaceId: ws.id, targetUserId: ctx.userId, permission: "OPERATE", revokedAt: null, OR: [{ expireAt: null }, { expireAt: { gt: new Date() } }] },

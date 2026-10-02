@@ -34,6 +34,7 @@ type Workspace = {
   idleTimeoutMinutes: number
   novncConnCount: number
   expireAt: Date | null
+  freezeReason: string | null
   startedAt: Date | null
   runtimeAccumSec: number
 }
@@ -579,5 +580,115 @@ export async function adminSetWorkspaceShareDisabledAction(input: unknown): Prom
       before: { shareDisabled: ws.shareDisabled }, after: { shareDisabled }, severity: "WARN",
     })
     return { id: ws.id, shareDisabled }
+  })
+}
+
+// ============================================================
+// r24-h：沙箱离线冻结封存（FROZEN）
+// 语义（安全事件调查取证）：
+//   · 进程立即停止（销毁底层会话 + 断开全部 VNC 连接）
+//   · 冻结期间禁止 VNC 接入 / 浏览器启动 / CDP 控制 / 剪贴板中转（各入口 guard 拦截）
+//   · Profile、CRX 策略、审计数据完整封存（不做任何清理）
+//   · 可选自动解冻时间（expireAt）：到期由 frozen_expire_check 定时任务自动恢复为 STOPPED
+//   · 管理员手动解冻随时可用
+// ============================================================
+
+const freezeSchema = z.object({
+  id: zId,
+  reason: z.string().min(4, "冻结原因至少 4 个字符").max(300),
+  expireAt: z.string().datetime({ offset: true, message: "自动解冻时间必须为 ISO 时间" }).nullable().optional(), // null/缺省=无限期（仅手动解冻）
+})
+
+export async function freezeWorkspaceAction(input: unknown): Promise<ActionResult<{ id: string; status: string; frozenAt: string; expireAt: string | null }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAdmin()
+    const p = zodValidate(freezeSchema, input)
+    const ws = await getWorkspace(p.id)
+
+    if (ws.status === "FROZEN") throw new Error("工作区已处于冻结状态")
+    if (ws.status === "DESTROYED") throw new Error("工作区已销毁，无法冻结")
+    if (ws.status === "CREATING") throw new Error("工作区创建中，请稍后或先停止再冻结")
+
+    const expire = p.expireAt ? new Date(p.expireAt) : null
+    if (expire && expire.getTime() <= Date.now() + 60_000) {
+      throw new Error("自动解冻时间必须晚于当前时间至少 1 分钟")
+    }
+
+    // 1. 进程立即停止：销毁底层会话 + 断开全部 VNC 客户端（尽力而为，失败不阻断冻结落库）
+    const destroyed = await destroyUnderlying(ws).catch(() => [] as string[])
+    if (ws.novncSessionId) await disconnectNovncClients(ws.id).catch(() => null)
+
+    const runtimeDelta = ws.startedAt ? Math.max(0, Math.floor((Date.now() - ws.startedAt.getTime()) / 1000)) : 0
+    const updated = await db.browserWorkspace.update({
+      where: { id: ws.id },
+      data: {
+        status: "FROZEN",
+        freezeReason: p.reason,
+        expireAt: expire,
+        // 会话/CDP 句柄清空（禁止接入与启动的关键字段位）；Profile/CRX 策略/审计全部保留
+        browserSessionId: null,
+        cdpUrl: null,
+        novncSessionId: null,
+        novncConnCount: 0,
+        startedAt: null,
+        runtimeAccumSec: { increment: runtimeDelta },
+        lastActiveAt: new Date(),
+      },
+    })
+
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "WORKSPACE_FREEZE",
+      resourceType: "WORKSPACE",
+      resourceId: ws.id,
+      resourceName: ws.name,
+      ownerUserId: ws.userId,
+      createdByUserId: ws.createdByUserId,
+      severity: "WARN",
+      before: { status: ws.status, mode: ws.mode },
+      after: { status: "FROZEN", reason: p.reason, expireAt: expire?.toISOString() ?? null, destroyedSessions: destroyed },
+    })
+    await raiseAlert({
+      title: "工作区被管理员离线冻结",
+      level: "WARN",
+      content: `工作区 ${ws.name}（${ws.uuid}）被管理员 ${ctx.username} 冻结封存：${p.reason}${expire ? `；将于 ${expire.toISOString()} 自动解冻` : "（无限期，需手动解冻）"}`,
+      resourceType: "WORKSPACE",
+      resourceId: ws.id,
+      ownerUserId: ws.userId,
+      dedupeKey: `ws-freeze-${ws.id}`,
+    })
+    return { id: ws.id, status: updated.status, frozenAt: updated.updatedAt.toISOString(), expireAt: expire?.toISOString() ?? null }
+  })
+}
+
+export async function unfreezeWorkspaceAction(input: unknown): Promise<ActionResult<{ id: string; status: string }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAdmin()
+    const { id } = zodValidate(z.object({ id: zId }), input)
+    const ws = await getWorkspace(id)
+    if (ws.status !== "FROZEN") throw new Error("工作区不在冻结状态")
+
+    // 解冻后进入 STOPPED：所有者可随时重新启动（浏览器重新拉起）；封存数据原样保留
+    const updated = await db.browserWorkspace.update({
+      where: { id: ws.id },
+      data: { status: "STOPPED", freezeReason: null, expireAt: null },
+    })
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "WORKSPACE_UNFREEZE",
+      resourceType: "WORKSPACE",
+      resourceId: ws.id,
+      resourceName: ws.name,
+      ownerUserId: ws.userId,
+      createdByUserId: ws.createdByUserId,
+      severity: "INFO",
+      before: { status: "FROZEN", freezeReason: ws.freezeReason, expireAt: ws.expireAt },
+      after: { status: "STOPPED", manual: true },
+    })
+    return { id: ws.id, status: updated.status }
   })
 }
