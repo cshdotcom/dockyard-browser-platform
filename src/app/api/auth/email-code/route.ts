@@ -70,6 +70,11 @@ export async function POST(req: NextRequest) {
     const result = await sendMail(emailLower, `【Dockyard】您的验证码：${code}`, emailCodeTemplate(code, purpose))
     await writeSecurityEvent({ eventType: "EMAIL_CODE_SENT", detail: `${purpose} 验证码已发送`, ip, userAgent: req.headers.get("user-agent") || "" })
 
+    // 模拟模式：验证码打印到 stdout（docker logs / dev.log 直接可查，便于开发联调与无 SMTP 环境登录）
+    if (result.simulated) {
+      console.log(`[email-code][simulated] purpose=${purpose} email=${emailLower} code=${code} expires=${expireSec}s（SMTP 未配置，进入控制台模拟模式）`)
+    }
+
     // 统一返回语，不暴露账号是否存在
     return respond({
       code: 0,

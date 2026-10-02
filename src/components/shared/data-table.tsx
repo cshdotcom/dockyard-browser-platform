@@ -46,6 +46,10 @@ interface DataTableProps<T extends { id: string }> {
   emptyText?: string
   batchToolbar?: React.ReactNode
   dense?: boolean
+  // 行数超过该值时表体启用纵向滚动容器（默认 5；防止长列表撑爆页面/页面被顶住无法滚动）
+  scrollThreshold?: number
+  // 滚动容器最大高度（默认 460px ≈ 10 行）
+  scrollMaxHeight?: number
 }
 
 export function DataTable<T extends { id: string }>({
@@ -65,6 +69,8 @@ export function DataTable<T extends { id: string }>({
   emptyText = "暂无数据",
   batchToolbar,
   dense,
+  scrollThreshold = 5,
+  scrollMaxHeight = 460,
 }: DataTableProps<T>) {
   const [kw, setKw] = React.useState(keyword || "")
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
@@ -138,22 +144,27 @@ export function DataTable<T extends { id: string }>({
         </div>
       )}
 
-      <div className="rounded-lg border bg-card">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              {selectEnabled && (
-                <TableHead className="w-10">
-                  <Checkbox
-                    checked={allChecked}
-                    onCheckedChange={(v) => {
-                      if (!onSelectedChange) return
-                      if (v) onSelectedChange([...new Set([...(selectedIds || []), ...rows.map((r) => r.id)])])
-                      else onSelectedChange((selectedIds || []).filter((id) => !rows.some((r) => r.id === id)))
-                    }}
-                  />
-                </TableHead>
-              )}
+      {rows.length > scrollThreshold ? (
+        // 长列表（> scrollThreshold 行）：表体纵向滚动容器 + 粘性表头 —— 防止列表撑爆页面/页面被顶住无法滚动
+        <div
+          className="rounded-lg border bg-card overflow-y-auto overscroll-contain"
+          style={{ maxHeight: scrollMaxHeight }}
+        >
+          <Table>
+            <TableHeader className="sticky top-0 z-10">
+              <TableRow className="hover:bg-transparent [&_th]:bg-card">
+                {selectEnabled && (
+                  <TableHead className="w-10">
+                    <Checkbox
+                      checked={allChecked}
+                      onCheckedChange={(v) => {
+                        if (!onSelectedChange) return
+                        if (v) onSelectedChange([...new Set([...(selectedIds || []), ...rows.map((r) => r.id)])])
+                        else onSelectedChange((selectedIds || []).filter((id) => !rows.some((r) => r.id === id)))
+                      }}
+                    />
+                  </TableHead>
+                )}
               {columns.map((c) => (
                 <TableHead key={c.key} className={cn(c.className, c.width)} style={c.width ? { width: c.width } : undefined}>
                   {c.sortable && onQueryChange ? (
@@ -205,7 +216,77 @@ export function DataTable<T extends { id: string }>({
             ))}
           </TableBody>
         </Table>
-      </div>
+        </div>
+      ) : (
+        <div className="rounded-lg border bg-card">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                {selectEnabled && (
+                  <TableHead className="w-10">
+                    <Checkbox
+                      checked={allChecked}
+                      onCheckedChange={(v) => {
+                        if (!onSelectedChange) return
+                        if (v) onSelectedChange([...new Set([...(selectedIds || []), ...rows.map((r) => r.id)])])
+                        else onSelectedChange((selectedIds || []).filter((id) => !rows.some((r) => r.id === id)))
+                      }}
+                    />
+                  </TableHead>
+                )}
+                {columns.map((c) => (
+                  <TableHead key={c.key} className={cn(c.className, c.width)} style={c.width ? { width: c.width } : undefined}>
+                    {c.sortable && onQueryChange ? (
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 hover:text-foreground"
+                        onClick={() => toggleSort(c.key)}
+                      >
+                        {c.title}
+                        {sortField === c.key ? (
+                          sortOrder === "asc" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />
+                        ) : (
+                          <ChevronsUpDown className="h-3 w-3 opacity-40" />
+                        )}
+                      </button>
+                    ) : (
+                      c.title
+                    )}
+                  </TableHead>
+                ))}
+                {rowActions && <TableHead className="w-32 text-right">操作</TableHead>}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={columns.length + (rowActions ? 1 : 0) + (selectEnabled ? 1 : 0)} className="h-28 text-center text-muted-foreground">
+                    <div className="flex flex-col items-center gap-2">
+                      <Inbox className="h-8 w-8 opacity-30" />
+                      {emptyText}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              )}
+              {rows.map((row) => (
+                <TableRow key={row.id} className={dense ? "py-1" : undefined}>
+                  {selectEnabled && (
+                    <TableCell>
+                      <Checkbox checked={!!selectedIds?.includes(row.id)} onCheckedChange={() => toggleRow(row.id)} />
+                    </TableCell>
+                  )}
+                  {columns.map((c) => (
+                    <TableCell key={c.key} className={cn(dense && "py-2", c.className)}>
+                      {c.render ? c.render(row) : ((row as Record<string, unknown>)[c.key] as React.ReactNode) ?? "-"}
+                    </TableCell>
+                  ))}
+                  {rowActions && <TableCell className="text-right">{rowActions(row)}</TableCell>}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
 
       {totalPages > 1 && (
         <div className="flex items-center justify-end gap-2">

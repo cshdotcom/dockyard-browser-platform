@@ -5,14 +5,16 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { CheckCircle2, Eye, Loader2 } from "lucide-react"
+import { CheckCircle2, Eye, Loader2, Trash2 } from "lucide-react"
 import { DataTable } from "@/components/shared/data-table"
 import { ConfirmDialog } from "@/components/shared/confirm"
+import { BatchFailuresDialog } from "@/components/shared/batch-ui"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import { handleAlertAction } from "@/server/actions/alerts"
+import { batchHandleAlertsAction, batchDeleteAlertsAction } from "@/server/actions/batch"
 
 export interface AlertRow {
   id: string
@@ -62,6 +64,30 @@ export function AlertsTable({ rows, total, page, pageSize, keyword, sortField, s
   const [detail, setDetail] = React.useState<AlertRow | null>(null)
   const [handleTarget, setHandleTarget] = React.useState<AlertRow | null>(null)
 
+  // ---- 批量操作（多选框：批量已处理 / 批量删除） ----
+  const [sel, setSel] = React.useState<string[]>([])
+  React.useEffect(() => setSel([]), [page, keyword, filters.level, filters.handleStatus])
+  const [batchBusy, setBatchBusy] = React.useState("")
+  const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false)
+
+  const runBatch = async (label: string, fn: () => Promise<{ code: number; msg: string; data?: { affected: number } | null }>, okText: (n: number) => string) => {
+    setBatchBusy(label)
+    try {
+      const res = await fn()
+      if (res.code === 0) {
+        toast.success(okText(res.data?.affected ?? 0))
+        setSel([])
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "批量操作失败")
+    } finally {
+      setBatchBusy("")
+    }
+  }
+
   const pushQuery = (patch: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString())
     for (const [k, v] of Object.entries(patch)) {
@@ -93,6 +119,31 @@ export function AlertsTable({ rows, total, page, pageSize, keyword, sortField, s
   return (
     <div className="space-y-3">
       <DataTable
+        selectedIds={sel}
+        onSelectedChange={setSel}
+        batchToolbar={
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!!batchBusy}
+              onClick={() => runBatch("handle", () => batchHandleAlertsAction({ ids: sel }), (n) => `已批量处理 ${n} 条告警`)}
+            >
+              {batchBusy === "handle" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="mr-1 h-3.5 w-3.5" />}
+              批量已处理
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/40 border-red-200 dark:border-red-900"
+              disabled={!!batchBusy}
+              onClick={() => setBatchDeleteOpen(true)}
+            >
+              {batchBusy === "delete" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Trash2 className="mr-1 h-3.5 w-3.5" />}
+              批量删除
+            </Button>
+          </div>
+        }
         rows={rows}
         total={total}
         page={page}
@@ -257,6 +308,19 @@ export function AlertsTable({ rows, total, page, pageSize, keyword, sortField, s
         confirmText="确认处理"
         loading={busy === "handle"}
         onConfirm={markHandled}
+      />
+
+      {/* 批量删除确认 */}
+      <ConfirmDialog
+        open={batchDeleteOpen}
+        onOpenChange={(v) => !v && setBatchDeleteOpen(v)}
+        title={`批量删除 ${sel.length} 条告警`}
+        description={`将永久删除选中的 ${sel.length} 条告警记录：\n· 删除前快照已写入审计日志（可追溯）\n· 已处理与待处理记录均可删除`}
+        requirePhrase="DELETE"
+        destructive
+        loading={batchBusy === "delete"}
+        confirmText="确认批量删除"
+        onConfirm={() => runBatch("delete", () => batchDeleteAlertsAction({ ids: sel }), (n) => `已批量删除 ${n} 条告警`)}
       />
       {busy === "handle" && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">

@@ -5,7 +5,7 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound } from "lucide-react"
+import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2 } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { UserAvatar } from "@/components/shared/user-avatar"
@@ -30,6 +30,8 @@ import {
   setUserNetworkPolicyAction,
   type CsvImportReport,
 } from "@/server/actions/users"
+import { batchDeleteUsersAction } from "@/server/actions/batch"
+import { BatchFailuresDialog } from "@/components/shared/batch-ui"
 import { UserFormDialog, type GroupOption } from "./user-form"
 import { UserApiTokensDialog } from "./user-api-tokens"
 
@@ -147,6 +149,9 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
   const [bqDisk, setBqDisk] = React.useState(2048)
 
   const [deleteUser, setDeleteUser] = React.useState<AdminUserRow | null>(null)
+  const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false)
+  const [batchDeleteBusy, setBatchDeleteBusy] = React.useState(false)
+  const [batchFailures, setBatchFailures] = React.useState<{ id: string; reason: string }[] | null>(null)
   const [tempPassword, setTempPassword] = React.useState<{ username: string; password: string } | null>(null)
   const [backupCodes, setBackupCodes] = React.useState<{ username: string; codes: string[] } | null>(null)
   const [busyAction, setBusyAction] = React.useState("")
@@ -173,6 +178,33 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
   const exportCsv = (ids?: string[]) => {
     const url = ids && ids.length > 0 ? `/api/export/users?ids=${encodeURIComponent(ids.join(","))}` : "/api/export/users"
     window.open(url, "_blank")
+  }
+
+  // ---- 批量删除（软删入回收站语义：禁用 + 会话下线 + 令牌作废；逐条失败隔离）----
+  const runBatchDelete = async () => {
+    setBatchDeleteBusy(true)
+    try {
+      const res = await batchDeleteUsersAction({ ids: sel })
+      if (res.code === 0) {
+        const n = res.data?.affected ?? 0
+        const failed = res.data?.failed ?? []
+        if (failed.length > 0) {
+          setBatchFailures(failed)
+          toast.warning(`批量删除完成：成功 ${n} 条，失败 ${failed.length} 条（点击查看原因）`)
+        } else {
+          toast.success(`已删除 ${n} 个用户（软删除，可在审计与数据层面追溯）`)
+        }
+        setSel([])
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "批量删除失败")
+    } finally {
+      setBatchDeleteBusy(false)
+      setBatchDeleteOpen(false)
+    }
   }
 
   // ---- CSV 导入 ----
@@ -451,6 +483,16 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
       <Button size="sm" variant="secondary" onClick={() => exportCsv(sel)}>
         <FileDown className="mr-1 h-3.5 w-3.5" /> 导出选中
       </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/40 border-red-200 dark:border-red-900"
+        disabled={!!busyAction || batchDeleteBusy}
+        onClick={() => setBatchDeleteOpen(true)}
+      >
+        {batchDeleteBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Trash2 className="mr-1 h-3.5 w-3.5" />}
+        批量删除
+      </Button>
       {busyAction === "batch" && <Loader2 className="h-4 w-4 animate-spin" />}
     </div>
   )
@@ -561,6 +603,22 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
           setDeleteUser(null)
         }}
       />
+
+      {/* 批量删除确认（逐条失败隔离：运行中会话等场景不阻断整批） */}
+      <ConfirmDialog
+        open={batchDeleteOpen}
+        onOpenChange={(v) => !v && !batchDeleteBusy && setBatchDeleteOpen(v)}
+        title={`批量删除 ${sel.length} 个用户`}
+        description={`将软删除选中的 ${sel.length} 个用户：\n· 存在运行中浏览器会话的用户会跳过并在结果中列明原因\n· 删除后账号禁用冻结，全部会话与API令牌作废\n· 不能删除当前登录的管理员自己`}
+        requirePhrase="DELETE"
+        destructive
+        loading={batchDeleteBusy}
+        confirmText="确认批量删除"
+        onConfirm={runBatchDelete}
+      />
+
+      {/* 批量删除失败清单 */}
+      <BatchFailuresDialog failures={batchFailures} onClose={() => setBatchFailures(null)} />
 
       {/* 临时密码展示 */}
       <Dialog open={!!tempPassword} onOpenChange={(v) => !v && setTempPassword(null)}>

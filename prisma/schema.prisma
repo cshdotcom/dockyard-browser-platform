@@ -712,6 +712,26 @@ model WorkspaceShare {
   @@unique([workspaceId, targetUserId])
 }
 
+// 沙箱共享临时链接（带有效期 + 权限控制）：
+// 已登录用户访问 /workspaces/shared?token=xxx → 校验通过后自动绑定为目标共享（WorkspaceShare），
+// 之后与普通共享完全一致（VNC 观看/操作、HAR 下载等按 permission 生效）
+model WorkspaceShareLink {
+  id             String    @id @default(cuid())
+  workspaceId    String
+  token          String    @unique // 32 字节随机 hex（不可猜测）
+  permission     String    @default("VIEW") // VIEW | OPERATE
+  expireAt       DateTime? // null=永久有效
+  revokedAt      DateTime? // 撤销后立即失效
+  maxUses        Int       @default(0) // 最大使用次数（0=不限；每次访问绑定记 1 次）
+  useCount       Int       @default(0)
+  lastUsedAt     DateTime?
+  note           String?   // 备注说明（分享给谁/什么用途）
+  createdByUserId String?
+  createdAt      DateTime  @default(now())
+
+  @@index([workspaceId])
+}
+
 model SteelNode {
   id            String   @id @default(cuid())
   name          String
@@ -1098,12 +1118,28 @@ model Announcement {
   displayTypes   String?  // 多选展示方式（JSON 数组，如 ["POPUP","MARQUEE"]；空数组=仅站内信）
   notifyInbox    Boolean  @default(false) // 站内信通道（发送到用户通知铃/站内信）
   notifiedAt     DateTime? // 站内信已投递时间（幂等防重发：投递一次后永不重发）
+  startAt        DateTime? // 显示开始时间（null=立即显示；未到开始时间不展示）
+  endAt          DateTime? // 结束时间（null=永久；过期后不再展示，站内信保留可回看）
+  persistAfterRead Boolean @default(false) // 已读后持续显示（弹窗每次刷新仍弹出，除非勾选今日不再提醒）
+  allowDismiss   Boolean  @default(true) // 允许用户勾选「今日不再提醒」（管理员可控；跑马灯的今日不显示同样受控）
   enabled        Boolean  @default(true)
   createdByUserId String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
   @@index([type, enabled])
+  @@index([enabled, endAt])
+}
+
+model AnnouncementDismiss {
+  id             String   @id @default(cuid())
+  announcementId String
+  userId         String
+  dismissDate    String   // 今日不再提醒：yyyy-MM-DD（本地时区日）
+  dismissedAt    DateTime @default(now())
+
+  @@unique([announcementId, userId, dismissDate])
+  @@index([userId, dismissDate])
 }
 
 model AnnouncementRead {

@@ -12,6 +12,7 @@ import { zodValidate, zId, zEmail, zUsername, validatePasswordPolicy, checkPassw
 import { hashPassword, maskSensitive, randomHex } from "@/lib/crypto"
 import { regenerateBackupCodes } from "@/lib/totp"
 import { getConfigBool } from "@/lib/config"
+import { countRunningWorkspaces, kickAllSessions, invalidateApiTokensIfConfigured } from "./users-helpers"
 
 // ---- 公共 schema ----
 
@@ -24,45 +25,8 @@ const zQuota = z.object({
 
 const zRole = z.enum(["SUPER_ADMIN", "ADMIN", "GROUP_ADMIN", "USER"])
 
-// 运行中浏览器会话检查（删除前置条件）
-async function countRunningWorkspaces(userId: string): Promise<number> {
-  return db.browserWorkspace.count({
-    where: {
-      userId,
-      deletedAt: null,
-      status: { in: ["RUNNING", "CREATING", "IDLE"] },
-    },
-  })
-}
 
-// 撤销用户全部登录会话 + 刷新令牌（强制下线）
-async function kickAllSessions(userId: string, reason: string) {
-  const now = new Date()
-  const sessions = await db.loginSession.findMany({
-    where: { userId, revokedAt: null },
-    select: { id: true },
-  })
-  await db.loginSession.updateMany({
-    where: { userId, revokedAt: null },
-    data: { revokedAt: now, revokedReason: reason },
-  })
-  await db.refreshToken.updateMany({
-    where: { userId, revokedAt: null },
-    data: { revokedAt: now },
-  })
-  return sessions.length
-}
 
-// 安全变更联动：按配置批量软删 ApiToken
-async function invalidateApiTokensIfConfigured(userId: string): Promise<number> {
-  const enabled = await getConfigBool("security.autoInvalidateTokensOnSecurityChange", false)
-  if (!enabled) return 0
-  const r = await db.apiToken.updateMany({
-    where: { userId, deletedAt: null },
-    data: { deletedAt: new Date(), enabled: false },
-  })
-  return r.count
-}
 
 function userBrief(u: { id: string; username: string; email?: string | null; role: string; enabled: boolean; frozen: boolean; displayName?: string | null; quota?: unknown }) {
   return {

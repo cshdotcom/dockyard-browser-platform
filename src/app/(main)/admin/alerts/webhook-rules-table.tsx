@@ -19,6 +19,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { upsertWebhookRuleAction, deleteWebhookRuleAction, toggleWebhookRuleAction } from "@/server/actions/alerts"
+import { batchToggleWebhookRulesAction, batchDeleteWebhookRulesAction } from "@/server/actions/batch"
+import { Trash2, Loader2 } from "lucide-react"
 
 export interface WebhookRuleRow {
   id: string
@@ -73,6 +75,25 @@ export function WebhookRulesTable({ rows, total, page, pageSize, keyword, sortFi
   const searchParams = useSearchParams()
 
   const [busy, setBusy] = React.useState("")
+  const [sel, setSel] = React.useState<string[]>([])
+  const [batchBusy, setBatchBusy] = React.useState("")
+  const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false)
+
+  const runWbBatch = async (label: string, fn: () => Promise<{ code: number; msg: string; data?: { affected: number } | null }>, okText: string) => {
+    setBatchBusy(label)
+    try {
+      const res = await fn()
+      if (res.code === 0) {
+        toast.success(okText.replace("{n}", String(res.data?.affected ?? 0)))
+        setSel([])
+        router.refresh()
+      } else toast.error(res.msg)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "批量操作失败")
+    } finally {
+      setBatchBusy("")
+    }
+  }
   const [formOpen, setFormOpen] = React.useState(false)
   const [editing, setEditing] = React.useState<WebhookRuleRow | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<WebhookRuleRow | null>(null)
@@ -185,6 +206,22 @@ export function WebhookRulesTable({ rows, total, page, pageSize, keyword, sortFi
         </div>
 
         <DataTable
+        selectedIds={sel}
+        onSelectedChange={setSel}
+        batchToolbar={
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button size="sm" variant="outline" disabled={!!batchBusy} onClick={() => runWbBatch("on", () => batchToggleWebhookRulesAction({ ids: sel, enabled: true }), "已批量启用 {n} 条 Webhook 规则")}>
+              批量启用
+            </Button>
+            <Button size="sm" variant="outline" disabled={!!batchBusy} onClick={() => runWbBatch("off", () => batchToggleWebhookRulesAction({ ids: sel, enabled: false }), "已批量停用 {n} 条 Webhook 规则")}>
+              批量停用
+            </Button>
+            <Button size="sm" variant="outline" className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/40 border-red-200 dark:border-red-900" disabled={!!batchBusy} onClick={() => setBatchDeleteOpen(true)}>
+              {batchBusy === "delete" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Trash2 className="mr-1 h-3.5 w-3.5" />}
+              批量删除
+            </Button>
+          </div>
+        }
           rows={rows}
           total={total}
           page={page}
@@ -408,6 +445,19 @@ export function WebhookRulesTable({ rows, total, page, pageSize, keyword, sortFi
           if (deleteTarget) await callAction("delete", () => deleteWebhookRuleAction({ id: deleteTarget.id }))
           setDeleteTarget(null)
         }}
+      />
+
+      {/* 批量删除确认 */}
+      <ConfirmDialog
+        open={batchDeleteOpen}
+        onOpenChange={(v) => !v && setBatchDeleteOpen(v)}
+        title={`批量删除 ${sel.length} 条 Webhook 规则`}
+        description={`将软删除选中的 ${sel.length} 条投递规则：\n· 历史投递记录保留可查\n· 恢复需管理员在数据库层面处理`}
+        requirePhrase="DELETE"
+        destructive
+        loading={batchBusy === "delete"}
+        confirmText="确认批量删除"
+        onConfirm={() => runWbBatch("delete", () => batchDeleteWebhookRulesAction({ ids: sel }), "已批量删除 {n} 条规则")}
       />
     </div>
   )

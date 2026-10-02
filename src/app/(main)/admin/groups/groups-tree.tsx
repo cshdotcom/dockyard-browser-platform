@@ -5,14 +5,17 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { ChevronDown, ChevronRight, FileDown, FileUp, MoreHorizontal, Plus } from "lucide-react"
+import { ChevronDown, ChevronRight, FileDown, FileUp, MoreHorizontal, Plus, Trash2, X, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { ConfirmDialog } from "@/components/shared/confirm"
 import { deleteGroupAction } from "@/server/actions/groups"
+import { batchDeleteGroupsAction } from "@/server/actions/batch"
+import { BatchFailuresDialog } from "@/components/shared/batch-ui"
 import { GroupFormDialog } from "./group-form"
 import {
   MembersDialog, AdminsDialog, ProxiesDialog, LocksDialog, CopyGroupDialog, ImportGroupsDialog,
@@ -69,6 +72,39 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
   const [deleteGroup, setDeleteGroup] = React.useState<AdminGroupNode | null>(null)
   const [importOpen, setImportOpen] = React.useState(false)
 
+  // ---- 批量选择与批量删除（多选框 + 逐条失败隔离） ----
+  const [selGroups, setSelGroups] = React.useState<string[]>([])
+  const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false)
+  const [batchDeleteBusy, setBatchDeleteBusy] = React.useState(false)
+  const [batchFailures, setBatchFailures] = React.useState<{ id: string; reason: string }[] | null>(null)
+  const toggleSelGroup = (id: string) => setSelGroups((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]))
+
+  const runBatchDeleteGroups = async () => {
+    setBatchDeleteBusy(true)
+    try {
+      const res = await batchDeleteGroupsAction({ ids: selGroups })
+      if (res.code === 0) {
+        const n = res.data?.affected ?? 0
+        const failed = res.data?.failed ?? []
+        if (failed.length > 0) {
+          setBatchFailures(failed)
+          toast.warning(`批量删除完成：成功 ${n} 个组，失败 ${failed.length} 个（查看原因）`)
+        } else {
+          toast.success(`已删除 ${n} 个用户组（软删入回收站）`)
+        }
+        setSelGroups([])
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "批量删除失败")
+    } finally {
+      setBatchDeleteBusy(false)
+      setBatchDeleteOpen(false)
+    }
+  }
+
   const toggleExpand = (id: string) => {
     setExpanded((prev) => {
       const next = new Set(prev)
@@ -111,6 +147,12 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
           className="group flex items-center gap-2 rounded-lg border bg-card px-3 py-2.5 hover:bg-muted/50 transition-colors"
           style={{ marginLeft: depth * 24 }}
         >
+          <Checkbox
+            checked={selGroups.includes(node.id)}
+            onCheckedChange={() => toggleSelGroup(node.id)}
+            className="shrink-0"
+            aria-label={`选择 ${node.name}`}
+          />
           <button
             type="button"
             className="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-muted"
@@ -233,6 +275,34 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
         </div>
       </div>
 
+      {/* 批量操作条（勾选后出现） */}
+      {selGroups.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-teal-200 bg-teal-50/60 dark:bg-teal-950/30 dark:border-teal-800 px-2 py-1.5">
+          <Badge className="bg-teal-600 hover:bg-teal-600 text-[10px]">已选 {selGroups.length} 个组</Badge>
+          <Button
+            size="sm"
+            variant="outline"
+            className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/40 border-red-200 dark:border-red-900"
+            disabled={batchDeleteBusy}
+            onClick={() => setBatchDeleteOpen(true)}
+          >
+            {batchDeleteBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Trash2 className="mr-1 h-3.5 w-3.5" />}
+            批量删除
+          </Button>
+          <Button size="sm" variant="secondary" onClick={() => window.open(`/api/export/groups?ids=${encodeURIComponent(selGroups.join(","))}`, "_blank")}>
+            <FileDown className="mr-1 h-3.5 w-3.5" /> 导出选中
+          </Button>
+          <button
+            type="button"
+            className="ml-1 p-1 rounded hover:bg-muted text-muted-foreground"
+            onClick={() => setSelGroups([])}
+            aria-label="清空选择"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* 树 */}
       <div className="space-y-1.5">
         {allNodes.length === 0 && (
@@ -311,6 +381,20 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
 
       {/* 导入JSON */}
       <ImportGroupsDialog open={importOpen} onOpenChange={setImportOpen} />
+
+      {/* 批量删除确认 + 失败清单 */}
+      <ConfirmDialog
+        open={batchDeleteOpen}
+        onOpenChange={(v) => !v && !batchDeleteBusy && setBatchDeleteOpen(v)}
+        title={`批量删除 ${selGroups.length} 个用户组`}
+        description={`将软删除选中的 ${selGroups.length} 个用户组：\n· 有未删除子组 / 有成员的组会跳过并在结果中列明原因\n· 通过校验的组进入回收站，可追溯恢复`}
+        requirePhrase="DELETE"
+        destructive
+        loading={batchDeleteBusy}
+        confirmText="确认批量删除"
+        onConfirm={runBatchDeleteGroups}
+      />
+      <BatchFailuresDialog failures={batchFailures} onClose={() => setBatchFailures(null)} />
     </div>
   )
 }

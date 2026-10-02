@@ -12,6 +12,22 @@ DB_PATH="/app/db/custom.db"
 
 log() { echo "[dockyard-start] $1"; }
 
+# ---- 0. 日志转发：全部服务日志同步到容器 stdout（docker logs 直接可看）----
+# 服务进程本身写各自日志文件（崩溃报告/持久留档），forward_log 用 tail -F 把
+# 追加内容实时回显到 stdout —— docker logs 与文件双通道，互不影响 PID 语义。
+forward_log() {
+  # $1 = 日志文件路径；启动前 touch 保证 tail 立即可读；-F 容忍轮转重建
+  mkdir -p "$(dirname "$1")" 2>/dev/null || true
+  touch "$1" 2>/dev/null || true
+  tail -n 0 -F "$1" 2>/dev/null &
+}
+LOG_PIDS=""
+for LF in /app/storage/server.log /app/storage/ws-hub.log /app/storage/vnc-bridge.log /app/storage/cron-ping.log; do
+  forward_log "$LF"
+  LOG_PIDS="$LOG_PIDS $!"
+done
+log "日志双通道已启用：server/ws-hub/vnc-bridge/cron 输出同步至 docker logs"
+
 # ---- 1. 启动自检（端口 / 数据库 / 权限 / 目录完整性）----
 log "自检开始..."
 if [ ! -d "$APP_DIR/.next" ]; then
@@ -136,6 +152,7 @@ term_handler() {
   if [ -n "$MAIN_PID" ]; then kill "$MAIN_PID" 2>/dev/null || true; fi
   kill $WS_PID $BRIDGE_PID 2>/dev/null || true
   if [ -n "$CRON_PID" ]; then kill "$CRON_PID" 2>/dev/null || true; fi
+  for LP in $LOG_PIDS; do kill "$LP" 2>/dev/null || true; done
   if [ -n "$MAIN_PID" ]; then wait "$MAIN_PID" 2>/dev/null || true; fi
   exit 0
 }

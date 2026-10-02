@@ -17,6 +17,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { upsertAlertRuleAction, deleteAlertRuleAction, toggleAlertRuleAction } from "@/server/actions/alerts"
+import { batchToggleAlertRulesAction, batchDeleteAlertRulesAction } from "@/server/actions/batch"
+import { Trash2, Loader2 } from "lucide-react"
 
 export interface AlertRuleRow {
   id: string
@@ -57,6 +59,25 @@ export function AlertRulesTable({ rows, total, page, pageSize, keyword, sortFiel
   const searchParams = useSearchParams()
 
   const [busy, setBusy] = React.useState("")
+  const [sel, setSel] = React.useState<string[]>([])
+  const [batchBusy, setBatchBusy] = React.useState("")
+  const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false)
+
+  const runBatch = async (label: string, fn: () => Promise<{ code: number; msg: string; data?: { affected: number } | null }>, okText: string) => {
+    setBatchBusy(label)
+    try {
+      const res = await fn()
+      if (res.code === 0) {
+        toast.success(okText.replace("{n}", String(res.data?.affected ?? 0)))
+        setSel([])
+        router.refresh()
+      } else toast.error(res.msg)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "批量操作失败")
+    } finally {
+      setBatchBusy("")
+    }
+  }
   const [formOpen, setFormOpen] = React.useState(false)
   const [editing, setEditing] = React.useState<AlertRuleRow | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<AlertRowSafe | null>(null)
@@ -166,6 +187,22 @@ export function AlertRulesTable({ rows, total, page, pageSize, keyword, sortFiel
       </div>
 
       <DataTable
+        selectedIds={sel}
+        onSelectedChange={setSel}
+        batchToolbar={
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button size="sm" variant="outline" disabled={!!batchBusy} onClick={() => runBatch("on", () => batchToggleAlertRulesAction({ ids: sel, enabled: true }), "已批量启用 {n} 条规则")}>
+              批量启用
+            </Button>
+            <Button size="sm" variant="outline" disabled={!!batchBusy} onClick={() => runBatch("off", () => batchToggleAlertRulesAction({ ids: sel, enabled: false }), "已批量停用 {n} 条规则")}>
+              批量停用
+            </Button>
+            <Button size="sm" variant="outline" className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/40 border-red-200 dark:border-red-900" disabled={!!batchBusy} onClick={() => setBatchDeleteOpen(true)}>
+              {batchBusy === "delete" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Trash2 className="mr-1 h-3.5 w-3.5" />}
+              批量删除
+            </Button>
+          </div>
+        }
         rows={rows}
         total={total}
         page={page}
@@ -330,6 +367,19 @@ export function AlertRulesTable({ rows, total, page, pageSize, keyword, sortFiel
           if (deleteTarget) await callAction("delete", () => deleteAlertRuleAction({ id: deleteTarget.id }))
           setDeleteTarget(null)
         }}
+      />
+
+      {/* 批量删除确认 */}
+      <ConfirmDialog
+        open={batchDeleteOpen}
+        onOpenChange={(v) => !v && setBatchDeleteOpen(v)}
+        title={`批量删除 ${sel.length} 条告警规则`}
+        description={`将物理删除选中的 ${sel.length} 条规则：\n· 删除前完整规则快照写入审计日志\n· 关联的历史告警记录保留不受影响`}
+        requirePhrase="DELETE"
+        destructive
+        loading={batchBusy === "delete"}
+        confirmText="确认批量删除"
+        onConfirm={() => runBatch("delete", () => batchDeleteAlertRulesAction({ ids: sel }), "已批量删除 {n} 条规则")}
       />
     </div>
   )

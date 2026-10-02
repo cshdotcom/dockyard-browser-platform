@@ -80,6 +80,17 @@ export function ConfigPanel({
   const [busyKey, setBusyKey] = React.useState<string>("")
   const [rollbackTarget, setRollbackTarget] = React.useState<ConfigVersionRow | null>(null)
   const [rollbackBusy, setRollbackBusy] = React.useState(false)
+  // SMTP 当前生效值（回显：保存前可见当前库内配置，避免空表单误保存/无法保存）
+  const smtpInitial = React.useMemo(() => ({
+    enabled: items.find((i) => i.key === "smtp.enabled")?.value === true,
+    host: String(items.find((i) => i.key === "smtp.host")?.value ?? ""),
+    port: Number(items.find((i) => i.key === "smtp.port")?.value ?? 465) || 465,
+    secure: items.find((i) => i.key === "smtp.secure")?.value !== false,
+    user: String(items.find((i) => i.key === "smtp.user")?.value ?? ""),
+    from: String(items.find((i) => i.key === "smtp.from")?.value ?? ""),
+    senderName: String(items.find((i) => i.key === "smtp.senderName")?.value ?? "Dockyard 平台"),
+    hasPass: !!String(items.find((i) => i.key === "smtp.pass")?.value ?? ""),
+  }), [items])
 
   React.useEffect(() => {
     setValues(Object.fromEntries(items.map((i) => [i.key, i.value])))
@@ -375,7 +386,7 @@ export function ConfigPanel({
                 )}
               </div>
               <div className="grid gap-3 grid-cols-1 lg:grid-cols-2">
-                {c === "MAIL" && <SmtpCard canEdit={canEdit} />}
+                {c === "MAIL" && <SmtpCard canEdit={canEdit} initial={smtpInitial} />}
                 {list.map(renderItemRow)}
               </div>
             </TabsContent>
@@ -478,20 +489,43 @@ export function ConfigPanel({
 // SMTP 邮箱服务器专属卡片：后台可改 + 密码加密落库 + 真实连接测试 + 测试邮件发送
 // 保存后 30 秒内热生效（邮件传输器缓存按配置指纹失效重建）
 // ============================================================
-function SmtpCard({ canEdit }: { canEdit: boolean }) {
+interface SmtpInitial {
+  enabled: boolean
+  host: string
+  port: number
+  secure: boolean
+  user: string
+  from: string
+  senderName: string
+  hasPass: boolean
+}
+
+function SmtpCard({ canEdit, initial }: { canEdit: boolean; initial: SmtpInitial }) {
   const router = useRouter()
-  const [enabled, setEnabled] = React.useState(false)
-  const [host, setHost] = React.useState("")
-  const [port, setPort] = React.useState(465)
-  const [secure, setSecure] = React.useState(true)
-  const [user, setUser] = React.useState("")
+  const [enabled, setEnabled] = React.useState(initial.enabled)
+  const [host, setHost] = React.useState(initial.host)
+  const [port, setPort] = React.useState(initial.port)
+  const [secure, setSecure] = React.useState(initial.secure)
+  const [user, setUser] = React.useState(initial.user)
   const [pass, setPass] = React.useState("")
-  const [from, setFrom] = React.useState("")
-  const [senderName, setSenderName] = React.useState("Dockyard 平台")
+  const [from, setFrom] = React.useState(initial.from)
+  const [senderName, setSenderName] = React.useState(initial.senderName)
   const [testTo, setTestTo] = React.useState("")
   const [saving, setSaving] = React.useState(false)
   const [testing, setTesting] = React.useState(false)
   const [testResult, setTestResult] = React.useState<{ ok: boolean; message: string } | null>(null)
+
+  // 服务器端配置刷新（保存/回滚后 router.refresh 触发 items 变化）→ 表单同步当前生效值
+  React.useEffect(() => {
+    setEnabled(initial.enabled)
+    setHost(initial.host)
+    setPort(initial.port)
+    setSecure(initial.secure)
+    setUser(initial.user)
+    setFrom(initial.from)
+    setSenderName(initial.senderName)
+    setPass("")
+  }, [initial])
 
   const doSave = async () => {
     setSaving(true)
@@ -538,6 +572,7 @@ function SmtpCard({ canEdit }: { canEdit: boolean }) {
       </div>
       <p className="text-xs text-muted-foreground">
         验证码 / 激活 / 告警邮件的发送服务器。修改后立即生效（30 秒内），连接测试执行真实 SMTP 握手；密码 AES 加密落库、界面永不回显。
+        {initial.hasPass && <span className="ml-1 text-emerald-600">（密码已配置，留空保存则不修改）</span>}
       </p>
       <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <div className="space-y-1">
@@ -560,7 +595,7 @@ function SmtpCard({ canEdit }: { canEdit: boolean }) {
           <Input value={user} onChange={(e) => setUser(e.target.value)} placeholder="noreply@example.com" disabled={!canEdit} />
         </div>
         <div className="space-y-1">
-          <Label className="text-xs text-muted-foreground">认证密码（留空 = 不修改）</Label>
+          <Label className="text-xs text-muted-foreground">认证密码（留空 = 不修改{initial.hasPass ? "，当前已配置" : "，尚未配置"}）</Label>
           <Input type="password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder="••••••••" disabled={!canEdit} autoComplete="new-password" />
         </div>
         <div className="space-y-1">
