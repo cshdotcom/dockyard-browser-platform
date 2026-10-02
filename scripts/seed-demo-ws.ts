@@ -16,7 +16,7 @@ async function main() {
   // 1. admin 的 CDP 工作区 · 运行 3.2 小时 · 活跃 2 分钟前
   await db.browserWorkspace.create({ data: mk({
     name: "CDP 采集-新闻监控", mode: "cdp_light", status: "RUNNING", userId: admin.id, createdByUserId: admin.id,
-    proxyNodeId: proxy?.id || null, steelSessionId: "sim-steel-1", cdpUrl: "ws://sim/1",
+    proxyNodeId: proxy?.id || null, browserSessionId: "sim-browser-1", cdpUrl: "ws://sim/1",
     startedAt: new Date(now - 3.2 * 3600_000), runtimeAccumSec: 5 * 3600, lastActiveAt: new Date(now - 2 * 60_000),
     ttlMinutes: 0, idleTimeoutMinutes: 120, cdpCallCount: 142, createdAt: new Date(now - 26 * 3600_000),
   }) })

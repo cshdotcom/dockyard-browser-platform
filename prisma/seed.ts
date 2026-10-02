@@ -1,4 +1,4 @@
-// 种子数据：超管账号（支持 ADMIN_* 环境变量引导，幂等可重复执行）/ 默认配置 / 内置定时任务 / 默认Steel节点与宿主机
+// 种子数据：超管账号（支持 ADMIN_* 环境变量引导，幂等可重复执行）/ 默认配置 / 内置定时任务 / 默认浏览器节点与宿主机
 // 执行：bunx tsx prisma/seed.ts （或 bun prisma/seed.ts）
 // 管理员引导：
 //   ADMIN_USERNAME / ADMIN_EMAIL / ADMIN_PASSWORD —— 首次启动自动创建超管（已有则不覆盖，可用 ADMIN_PASSWORD_FORCE=1 强制同步密码）
@@ -136,13 +136,13 @@ async function main() {
   }
   console.log(`[seed] 定时任务 ${tasks.length} 项已注册`)
 
-  // ---- 默认 Steel 节点 + 宿主机 ----
-  const steelCount = await db.steelNode.count()
-  if (steelCount === 0) {
-    await db.steelNode.create({
+  // ---- 默认 浏览器节点 + 宿主机 ----
+  const browserNodeCount = await db.browserNode.count()
+  if (browserNodeCount === 0) {
+    await db.browserNode.create({
       data: {
-        name: "steel-default",
-        baseUrl: process.env.STEEL_BROWSER_URL || "http://steel-internal:3000",
+        name: "node-default",
+        baseUrl: "http://browser-node:3000",
         labels: ["default"],
         weight: 1,
         status: "ONLINE",

@@ -112,7 +112,7 @@ export function SnapshotsTable({ rows, total, page, pageSize, keyword, sortField
         toast.error(res.msg)
         return
       }
-      toast.success(`快照「${fName.trim()}」创建成功（已调用 Steel profile 导出）`)
+      toast.success(`快照「${fName.trim()}」创建成功（浏览器 Profile 已打包导出）`)
       setCreateOpen(false)
       router.refresh()
     } finally {
@@ -319,7 +319,7 @@ export function SnapshotsTable({ rows, total, page, pageSize, keyword, sortField
               <Camera className="h-5 w-5 text-teal-600" /> 创建配置快照
             </DialogTitle>
             <DialogDescription>
-              从运行中的 CDP 轻量工作区导出浏览器 profile（Steel 归档），可用于新工作区还原
+              从运行中的 CDP 轻量工作区导出浏览器 Profile 归档（tar.gz），可用于新工作区还原
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">

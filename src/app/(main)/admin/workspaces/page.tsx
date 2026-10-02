@@ -228,7 +228,7 @@ export default async function AdminWorkspacesPage({
       db.proxyNode.findMany({ where: { deletedAt: null }, select: { id: true, name: true }, orderBy: { name: "asc" }, take: 100 }),
     ])
 
-  // ---- 内存 join：所有者/创建人/组/代理节点（含出口地址）/SingBox/Steel ----
+  // ---- 内存 join：所有者/创建人/组/代理节点（含出口地址）/SingBox/浏览器节点 ----
   const userIds = [...new Set(rowsRaw.flatMap((r) => [r.userId, r.createdByUserId].filter(Boolean) as string[]))]
   const users = userIds.length ? await db.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } }) : []
   const usernameById = new Map(users.map((u) => [u.id, u.username]))
@@ -257,9 +257,9 @@ export default async function AdminWorkspacesPage({
     }),
   )
 
-  const steelIds = [...new Set(rowsRaw.map((r) => r.steelNodeId).filter(Boolean) as string[])]
-  const steels = steelIds.length ? await db.steelNode.findMany({ where: { id: { in: steelIds } }, select: { id: true, name: true } }) : []
-  const steelNameById = new Map(steels.map((s) => [s.id, s.name]))
+  const browserNodeIds = [...new Set(rowsRaw.map((r) => r.browserNodeId).filter(Boolean) as string[])]
+  const browserNodes = browserNodeIds.length ? await db.browserNode.findMany({ where: { id: { in: browserNodeIds } }, select: { id: true, name: true } }) : []
+  const browserNodeNameById = new Map(browserNodes.map((s) => [s.id, s.name]))
 
   // ---- 回收站删除记录（软删视图：删除人/来源/原因/时间） ----
   const wsIds = rowsRaw.map((r) => r.id)
@@ -303,7 +303,7 @@ export default async function AdminWorkspacesPage({
       proxyType: proxy?.type || "",
       proxyExit: proxy?.exit || "",
       singboxName: proxy?.sbiName || "-",
-      steelNodeName: r.steelNodeId ? steelNameById.get(r.steelNodeId) || "-" : "-",
+      browserNodeName: r.browserNodeId ? browserNodeNameById.get(r.browserNodeId) || "-" : "-",
       ttlMinutes: r.ttlMinutes,
       vncSessionMaxMinutes: r.vncSessionMaxMinutes ?? null,
       idleTimeoutMinutes: r.idleTimeoutMinutes,

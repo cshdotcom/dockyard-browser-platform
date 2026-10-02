@@ -1,6 +1,6 @@
 "use server"
 
-// 网络与节点管理：代理节点 / Steel节点 / 宿主机（管理员）
+// 网络与节点管理：代理节点 / 浏览器节点 / 宿主机（管理员）
 // 全部真实实现：CRUD + 健康探测 + 批量启停 + 水位告警 + 审计 + 回收站
 
 import { Prisma } from "@prisma/client"
@@ -14,7 +14,7 @@ import { raiseAlert } from "@/lib/alerts"
 import { encrypt } from "@/lib/crypto"
 import { moveToRecycle } from "@/lib/recycle"
 import { testConnectivity } from "@/lib/singbox"
-import { nodeLoad } from "@/lib/external/steel"
+import { nodeLoad } from "@/lib/external/browser-session"
 import { hostInfo } from "@/lib/external/docker"
 
 // ============================================================
@@ -229,10 +229,10 @@ export async function batchProxyStatusAction(input: unknown): Promise<ActionResu
 }
 
 // ============================================================
-// Steel 节点 SteelNode
+// 浏览器节点 BrowserNode
 // ============================================================
 
-const steelInputSchema = z.object({
+const browserNodeInputSchema = z.object({
   id: zId.optional(),
   name: z.string().min(1, "名称不能为空").max(64),
   baseUrl: z.string().min(1, "baseUrl 不能为空").max(300),
@@ -242,11 +242,11 @@ const steelInputSchema = z.object({
   enabled: z.boolean(),
 })
 
-export async function createSteelNodeAction(input: unknown): Promise<ActionResult<{ id: string }>> {
+export async function createBrowserNodeAction(input: unknown): Promise<ActionResult<{ id: string }>> {
   return actionHandler(async () => {
     const ctx = await requireAdmin()
-    const p = zodValidate(steelInputSchema, input)
-    const node = await db.steelNode.create({
+    const p = zodValidate(browserNodeInputSchema, input)
+    const node = await db.browserNode.create({
       data: {
         name: p.name,
         baseUrl: p.baseUrl,
@@ -260,8 +260,8 @@ export async function createSteelNodeAction(input: unknown): Promise<ActionResul
     await writeAudit({
       operatorUserId: ctx.userId,
       operatorName: ctx.username,
-      operationType: "STEEL_NODE_CREATE",
-      resourceType: "STEEL_NODE",
+      operationType: "BROWSER_NODE_CREATE",
+      resourceType: "BROWSER_NODE",
       resourceId: node.id,
       resourceName: node.name,
       after: { name: node.name, baseUrl: node.baseUrl, grayGroup: node.grayGroup, weight: node.weight, enabled: node.enabled },
@@ -270,14 +270,14 @@ export async function createSteelNodeAction(input: unknown): Promise<ActionResul
   })
 }
 
-export async function updateSteelNodeAction(input: unknown): Promise<ActionResult<{ id: string }>> {
+export async function updateBrowserNodeAction(input: unknown): Promise<ActionResult<{ id: string }>> {
   return actionHandler(async () => {
     const ctx = await requireAdmin()
-    const p = zodValidate(steelInputSchema, input)
+    const p = zodValidate(browserNodeInputSchema, input)
     if (!p.id) throw new Error("缺少节点ID")
-    const existing = await db.steelNode.findUnique({ where: { id: p.id } })
-    if (!existing || existing.deletedAt) throw new Error("Steel 节点不存在")
-    const node = await db.steelNode.update({
+    const existing = await db.browserNode.findUnique({ where: { id: p.id } })
+    if (!existing || existing.deletedAt) throw new Error("浏览器节点不存在")
+    const node = await db.browserNode.update({
       where: { id: p.id },
       data: {
         name: p.name,
@@ -292,8 +292,8 @@ export async function updateSteelNodeAction(input: unknown): Promise<ActionResul
     await writeAudit({
       operatorUserId: ctx.userId,
       operatorName: ctx.username,
-      operationType: "STEEL_NODE_UPDATE",
-      resourceType: "STEEL_NODE",
+      operationType: "BROWSER_NODE_UPDATE",
+      resourceType: "BROWSER_NODE",
       resourceId: node.id,
       resourceName: node.name,
       before: { name: existing.name, baseUrl: existing.baseUrl, grayGroup: existing.grayGroup, weight: existing.weight, enabled: existing.enabled },
@@ -304,18 +304,18 @@ export async function updateSteelNodeAction(input: unknown): Promise<ActionResul
 }
 
 // 灰度分组快速切换
-export async function setSteelGrayGroupAction(input: unknown): Promise<ActionResult<{ id: string; grayGroup: string }>> {
+export async function setBrowserNodeGrayGroupAction(input: unknown): Promise<ActionResult<{ id: string; grayGroup: string }>> {
   return actionHandler(async () => {
     const ctx = await requireAdmin()
     const { id, grayGroup } = zodValidate(z.object({ id: zId, grayGroup: z.enum(["PROD", "TEST"]) }), input)
-    const existing = await db.steelNode.findUnique({ where: { id } })
-    if (!existing || existing.deletedAt) throw new Error("Steel 节点不存在")
-    const node = await db.steelNode.update({ where: { id }, data: { grayGroup } })
+    const existing = await db.browserNode.findUnique({ where: { id } })
+    if (!existing || existing.deletedAt) throw new Error("浏览器节点不存在")
+    const node = await db.browserNode.update({ where: { id }, data: { grayGroup } })
     await writeAudit({
       operatorUserId: ctx.userId,
       operatorName: ctx.username,
-      operationType: "STEEL_NODE_UPDATE",
-      resourceType: "STEEL_NODE",
+      operationType: "BROWSER_NODE_UPDATE",
+      resourceType: "BROWSER_NODE",
       resourceId: id,
       resourceName: node.name,
       before: { grayGroup: existing.grayGroup },
@@ -326,35 +326,35 @@ export async function setSteelGrayGroupAction(input: unknown): Promise<ActionRes
   })
 }
 
-export async function deleteSteelNodeAction(input: unknown): Promise<ActionResult<{ id: string }>> {
+export async function deleteBrowserNodeAction(input: unknown): Promise<ActionResult<{ id: string }>> {
   return actionHandler(async () => {
     const ctx = await requireAdmin()
     const { id } = zodValidate(z.object({ id: zId }), input)
-    const existing = await db.steelNode.findUnique({ where: { id } })
-    if (!existing || existing.deletedAt) throw new Error("Steel 节点不存在")
-    const binding = await db.browserWorkspace.count({ where: { steelNodeId: id, deletedAt: null, status: { in: ["CREATING", "RUNNING", "IDLE"] } } })
+    const existing = await db.browserNode.findUnique({ where: { id } })
+    if (!existing || existing.deletedAt) throw new Error("浏览器节点不存在")
+    const binding = await db.browserWorkspace.count({ where: { browserNodeId: id, deletedAt: null, status: { in: ["CREATING", "RUNNING", "IDLE"] } } })
     if (binding > 0) throw new Error(`仍有 ${binding} 个运行中工作区调度在该节点，请先迁移`)
-    await db.steelNode.update({ where: { id }, data: { deletedAt: new Date(), status: "OFFLINE" } })
+    await db.browserNode.update({ where: { id }, data: { deletedAt: new Date(), status: "OFFLINE" } })
     await moveToRecycle({
-      resourceType: "STEEL_NODE",
+      resourceType: "BROWSER_NODE",
       resourceId: id,
       resourceName: existing.name,
       deletedByUserId: ctx.userId,
       deletedByType: "ADMIN",
-      reason: `管理员删除 Steel 节点 ${existing.name}`,
+      reason: `管理员删除 浏览器节点 ${existing.name}`,
       operatorName: ctx.username,
     })
     return { id }
   })
 }
 
-// Steel 节点探测：nodeLoad 成功→ONLINE+负载/会话更新；失败→probeFailCount+1，连续3次→ISOLATED+告警
-export async function probeSteelNodeAction(input: unknown): Promise<ActionResult<{ id: string; ok: boolean; status: string; loadScore: number; activeSessions: number; probeFailCount: number }>> {
+// 浏览器节点探测：nodeLoad 成功→ONLINE+负载/会话更新；失败→probeFailCount+1，连续3次→ISOLATED+告警
+export async function probeBrowserNodeAction(input: unknown): Promise<ActionResult<{ id: string; ok: boolean; status: string; loadScore: number; activeSessions: number; probeFailCount: number }>> {
   return actionHandler(async () => {
     const ctx = await requireAdmin()
     const { id } = zodValidate(z.object({ id: zId }), input)
-    const node = await db.steelNode.findUnique({ where: { id } })
-    if (!node || node.deletedAt) throw new Error("Steel 节点不存在")
+    const node = await db.browserNode.findUnique({ where: { id } })
+    if (!node || node.deletedAt) throw new Error("浏览器节点不存在")
 
     const load = await nodeLoad()
     let status = node.status
@@ -370,12 +370,12 @@ export async function probeSteelNodeAction(input: unknown): Promise<ActionResult
       probeFailCount = node.probeFailCount + 1
       status = probeFailCount >= 3 ? "ISOLATED" : node.status
     }
-    const updated = await db.steelNode.update({ where: { id }, data: { status, probeFailCount, loadScore, activeSessions, enabled: node.enabled } })
+    const updated = await db.browserNode.update({ where: { id }, data: { status, probeFailCount, loadScore, activeSessions, enabled: node.enabled } })
     await writeAudit({
       operatorUserId: ctx.userId,
       operatorName: ctx.username,
-      operationType: "STEEL_NODE_PROBE",
-      resourceType: "STEEL_NODE",
+      operationType: "BROWSER_NODE_PROBE",
+      resourceType: "BROWSER_NODE",
       resourceId: id,
       resourceName: node.name,
       severity: load ? "INFO" : probeFailCount >= 3 ? "WARN" : "INFO",
@@ -383,12 +383,12 @@ export async function probeSteelNodeAction(input: unknown): Promise<ActionResult
     })
     if (!load && status === "ISOLATED") {
       await raiseAlert({
-        title: "Steel 节点已被隔离",
+        title: "浏览器节点已被隔离",
         level: "WARN",
-        content: `Steel 节点 ${node.name}（${node.baseUrl}）连续 ${probeFailCount} 次探测失败，已自动隔离（ISOLATED），新会话将不再调度至该节点`,
-        resourceType: "STEEL_NODE",
+        content: `浏览器节点 ${node.name}（${node.baseUrl}）连续 ${probeFailCount} 次探测失败，已自动隔离（ISOLATED），新会话将不再调度至该节点`,
+        resourceType: "BROWSER_NODE",
         resourceId: id,
-        dedupeKey: `steel-probe-fail-${id}`,
+        dedupeKey: `browser-probe-fail-${id}`,
       })
     }
     return { id, ok: !!load, status: updated.status, loadScore: updated.loadScore, activeSessions: updated.activeSessions, probeFailCount: updated.probeFailCount }

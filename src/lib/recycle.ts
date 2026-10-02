@@ -31,7 +31,7 @@ export async function moveToRecycle(params: RecyclableResource & {
     SCRIPT: "browserScriptTemplate",
     FILE: "fileMeta",
     PROXY_NODE: "proxyNode",
-    STEEL_NODE: "steelNode",
+    BROWSER_NODE: "browserNode",
     HOST_NODE: "hostNode",
     GROUP: "group",
   }
@@ -112,7 +112,7 @@ export async function restoreFromRecycle(recycleId: string, operator: { userId: 
     SCRIPT: "browserScriptTemplate",
     FILE: "fileMeta",
     PROXY_NODE: "proxyNode",
-    STEEL_NODE: "steelNode",
+    BROWSER_NODE: "browserNode",
     HOST_NODE: "hostNode",
     GROUP: "group",
   }
@@ -169,7 +169,7 @@ export async function purgeFromRecycle(recycleId: string, operator: { userId: st
     SCRIPT: "browserScriptTemplate",
     FILE: "fileMeta",
     PROXY_NODE: "proxyNode",
-    STEEL_NODE: "steelNode",
+    BROWSER_NODE: "browserNode",
     HOST_NODE: "hostNode",
     GROUP: "group",
   }

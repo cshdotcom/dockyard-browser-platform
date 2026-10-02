@@ -46,7 +46,7 @@ export interface AdminWorkspaceRow {
   proxyType: string
   proxyExit: string
   singboxName: string
-  steelNodeName: string
+  browserNodeName: string
   vncSessionMaxMinutes: number | null // 沙箱级 VNC 连接总时长上限（null=继承，0=不限）
   ttlMinutes: number
   idleTimeoutMinutes: number
@@ -309,7 +309,7 @@ export function WorkspacesTable(props: Props) {
       return row.mode === "novnc_full" ? (
         <span className="text-xs text-muted-foreground">池化/无容器</span>
       ) : (
-        <span className="text-xs text-muted-foreground">Steel 托管</span>
+        <span className="text-xs text-muted-foreground">平台托管</span>
       )
     }
     if (!row.containerState) {
@@ -810,7 +810,7 @@ export function WorkspacesTable(props: Props) {
         open={!!purgeTarget}
         onOpenChange={(v) => !busy && setPurgeTarget(v ? purgeTarget : null)}
         title="彻底物理删除工作区"
-        description={`工作区「${purgeTarget?.name}（${purgeTarget?.uuid}）」将被硬删除：底层 Steel/NoVNC 会话销毁、共享授权清除、数据库记录删除，操作不可恢复。`}
+        description={`工作区「${purgeTarget?.name}（${purgeTarget?.uuid}）」将被硬删除：底层浏览器/NoVNC 会话销毁、共享授权清除、数据库记录删除，操作不可恢复。`}
         requirePhrase="DESTROY"
         destructive
         confirmText="确认销毁"

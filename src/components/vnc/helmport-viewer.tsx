@@ -21,6 +21,7 @@ import {
   Languages, Timer, GripVertical, Send, PanelRightClose, PanelRightOpen, Lock, ChevronsUp,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { ImeSwitcher } from "./ime-switcher"
 import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
 import {
@@ -872,6 +873,8 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
             <Button size="sm" variant="outline" className="h-8" onClick={screenshot} title="截图（含归属水印签名条）">
               <Camera className="h-3.5 w-3.5" />
             </Button>
+            {/* r24-c：输入法切换（作用域=本沙箱 X 显示；只读镜像禁用） */}
+            <ImeSwitcher workspaceId={workspace.id} disabled={readonly || (phase !== "live" && phase !== "connecting")} />
             <Button size="sm" variant="outline" className="h-8" onClick={toggleFullscreen} title="全屏">
               {fullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Expand className="h-3.5 w-3.5" />}
             </Button>

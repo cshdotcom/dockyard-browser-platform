@@ -74,7 +74,7 @@ export async function GET() {
     },
   }
 
-  // —— 浏览器全量控制端点（Steel-Browser 全功能复制；与 MCP browser.* 同层）——
+  // —— 浏览器全量控制端点（自研会话引擎 CDP 通道；与 MCP browser.* 同层）——
   for (const def of BROWSER_ACTIONS) {
     paths[`/api/openapi/browser/${def.action}`] = {
       post: {

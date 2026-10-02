@@ -1,6 +1,6 @@
 // ============================================================
 // 浏览器全量控制层（Browser Control Layer）
-// Steel-Browser 全功能复制：MCP 与 OpenAPI 共用同一注册表 BROWSER_ACTIONS
+// 自研浏览器控制动作注册表：MCP 与 OpenAPI 共用同一事实源 BROWSER_ACTIONS
 //   会话：status / debug_info / back / forward / reload
 //   页面：navigate / screenshot / scrape / evaluate / get_url / dom_snapshot / wait_for
 //   输入：click / type / press_key / scroll / hover
@@ -9,7 +9,7 @@
 //   指纹：set_user_agent / set_viewport / set_geolocation
 //   数据：get_cookies / set_cookies / get_logs
 // 双形态执行：
-//   · 真实 CDP：WebSocket 直连会话容器/Steel CDP 端点（Target.attach + 各 CDP 域命令）
+//   · 真实 CDP：WebSocket 直连会话容器/浏览器 CDP 端点（Target.attach + 各 CDP 域命令）
 //   · 模拟引擎：无集群环境全链路可验证（虚拟 DOM / 虚拟标签页 / PNG 截图 / 日志缓冲）
 // 安全：归属强制（本人工作区或 ADMIN 权限位）+ 独立限流 + 全量审计 + 行为追踪
 // ============================================================
@@ -456,7 +456,7 @@ async function resolveControlledWorkspace(workspaceIdOrUuid: string, ctx: Browse
 }
 
 function isSimulated(ws: BrowserWorkspace): boolean {
-  return !externalAvailable.steel && (!ws.cdpUrl || ws.cdpUrl.includes("steel-internal"))
+  return !externalAvailable.browser && (!ws.cdpUrl || ws.cdpUrl.includes("browser-internal"))
 }
 
 // ============================================================

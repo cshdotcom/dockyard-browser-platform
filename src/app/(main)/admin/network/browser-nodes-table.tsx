@@ -1,6 +1,6 @@
 "use client"
 
-// Steel 节点交互表格：CRUD / 探测 / 灰度分组切换 / 启停
+// 浏览器节点交互表格：CRUD / 探测 / 灰度分组切换 / 启停
 
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
@@ -19,10 +19,10 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Progress } from "@/components/ui/progress"
 import {
-  createSteelNodeAction, updateSteelNodeAction, deleteSteelNodeAction, probeSteelNodeAction, setSteelGrayGroupAction,
+  createBrowserNodeAction, updateBrowserNodeAction, deleteBrowserNodeAction, probeBrowserNodeAction, setBrowserNodeGrayGroupAction,
 } from "@/server/actions/network"
 
-export interface SteelNodeRow {
+export interface BrowserNodeRow {
   id: string
   name: string
   baseUrl: string
@@ -38,7 +38,7 @@ export interface SteelNodeRow {
 }
 
 interface Props {
-  rows: SteelNodeRow[]
+  rows: BrowserNodeRow[]
   total: number
   page: number
   pageSize: number
@@ -48,7 +48,7 @@ interface Props {
   filters: Record<string, string>
 }
 
-export function SteelNodesTable(props: Props) {
+export function BrowserNodesTable(props: Props) {
   const { rows, total, page, pageSize, keyword, sortField, sortOrder, filters } = props
   const router = useRouter()
   const pathname = usePathname()
@@ -57,7 +57,7 @@ export function SteelNodesTable(props: Props) {
   const [sel, setSel] = React.useState<string[]>([])
   React.useEffect(() => setSel([]), [rows])
   const [busy, setBusy] = React.useState("")
-  const [deleting, setDeleting] = React.useState<SteelNodeRow | null>(null)
+  const [deleting, setDeleting] = React.useState<BrowserNodeRow | null>(null)
 
   const pushQuery = (patch: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString())
@@ -88,7 +88,7 @@ export function SteelNodesTable(props: Props) {
 
   // ---- 表单 ----
   const [formOpen, setFormOpen] = React.useState(false)
-  const [editing, setEditing] = React.useState<SteelNodeRow | null>(null)
+  const [editing, setEditing] = React.useState<BrowserNodeRow | null>(null)
   const [form, setForm] = React.useState({ name: "", baseUrl: "", labels: "", weight: 1, grayGroup: "PROD", enabled: true })
   const [formBusy, setFormBusy] = React.useState(false)
 
@@ -97,7 +97,7 @@ export function SteelNodesTable(props: Props) {
     setForm({ name: "", baseUrl: "http://", labels: "", weight: 1, grayGroup: "PROD", enabled: true })
     setFormOpen(true)
   }
-  const openEdit = (row: SteelNodeRow) => {
+  const openEdit = (row: BrowserNodeRow) => {
     setEditing(row)
     setForm({ name: row.name, baseUrl: row.baseUrl, labels: row.labels.join(", "), weight: row.weight, grayGroup: row.grayGroup, enabled: row.enabled })
     setFormOpen(true)
@@ -117,7 +117,7 @@ export function SteelNodesTable(props: Props) {
         grayGroup: form.grayGroup,
         enabled: form.enabled,
       }
-      const res = editing ? await updateSteelNodeAction(payload) : await createSteelNodeAction(payload)
+      const res = editing ? await updateBrowserNodeAction(payload) : await createBrowserNodeAction(payload)
       if (res.code === 0) {
         toast.success(editing ? "节点已更新" : "节点已创建")
         setFormOpen(false)
@@ -130,9 +130,9 @@ export function SteelNodesTable(props: Props) {
     }
   }
 
-  const probe = (row: SteelNodeRow) => {
+  const probe = (row: BrowserNodeRow) => {
     callAction(`probe-${row.id}`, async () => {
-      const res = await probeSteelNodeAction({ id: row.id })
+      const res = await probeBrowserNodeAction({ id: row.id })
       if (res.code === 0 && res.data) {
         const d = res.data as { ok: boolean; status: string; loadScore: number; activeSessions: number; probeFailCount: number }
         if (d.ok) {
@@ -147,9 +147,9 @@ export function SteelNodesTable(props: Props) {
     })
   }
 
-  const switchGray = (row: SteelNodeRow) => {
+  const switchGray = (row: BrowserNodeRow) => {
     const target = row.grayGroup === "PROD" ? "TEST" : "PROD"
-    callAction(`gray-${row.id}`, () => setSteelGrayGroupAction({ id: row.id, grayGroup: target }))
+    callAction(`gray-${row.id}`, () => setBrowserNodeGrayGroupAction({ id: row.id, grayGroup: target }))
   }
 
   const columns = [
@@ -157,7 +157,7 @@ export function SteelNodesTable(props: Props) {
       key: "name",
       title: "名称",
       sortable: true,
-      render: (row: SteelNodeRow) => (
+      render: (row: BrowserNodeRow) => (
         <div className="min-w-0">
           <p className="font-medium truncate">{row.name}</p>
           <p className="text-xs text-muted-foreground font-mono truncate">{row.baseUrl}</p>
@@ -167,7 +167,7 @@ export function SteelNodesTable(props: Props) {
     {
       key: "labels",
       title: "标签",
-      render: (row: SteelNodeRow) =>
+      render: (row: BrowserNodeRow) =>
         row.labels.length > 0 ? (
           <div className="flex flex-wrap gap-1">
             {row.labels.slice(0, 3).map((l) => (
@@ -178,23 +178,23 @@ export function SteelNodesTable(props: Props) {
           <span className="text-muted-foreground">-</span>
         ),
     },
-    { key: "weight", title: "权重", sortable: true, render: (row: SteelNodeRow) => <span className="tabular-nums">{row.weight}</span> },
-    { key: "status", title: "状态", render: (row: SteelNodeRow) => <StatusBadge status={row.status} /> },
+    { key: "weight", title: "权重", sortable: true, render: (row: BrowserNodeRow) => <span className="tabular-nums">{row.weight}</span> },
+    { key: "status", title: "状态", render: (row: BrowserNodeRow) => <StatusBadge status={row.status} /> },
     {
       key: "grayGroup",
       title: "灰度组",
-      render: (row: SteelNodeRow) => (
+      render: (row: BrowserNodeRow) => (
         <Badge variant={row.grayGroup === "PROD" ? "default" : "secondary"} className={row.grayGroup === "PROD" ? "bg-teal-600 hover:bg-teal-600" : ""}>
           {row.grayGroup}
         </Badge>
       ),
     },
-    { key: "activeSessions", title: "活跃会话", sortable: true, render: (row: SteelNodeRow) => <span className="tabular-nums">{row.activeSessions}</span> },
+    { key: "activeSessions", title: "活跃会话", sortable: true, render: (row: BrowserNodeRow) => <span className="tabular-nums">{row.activeSessions}</span> },
     {
       key: "loadScore",
       title: "负载分数",
       sortable: true,
-      render: (row: SteelNodeRow) => (
+      render: (row: BrowserNodeRow) => (
         <div className="min-w-28">
           <p className="text-xs tabular-nums mb-1">{(row.loadScore * 100).toFixed(1)}%</p>
           <Progress value={row.loadScore * 100} className="h-1.5" />
@@ -205,28 +205,28 @@ export function SteelNodesTable(props: Props) {
       key: "probeFailCount",
       title: "连续失败",
       sortable: true,
-      render: (row: SteelNodeRow) => (
+      render: (row: BrowserNodeRow) => (
         <span className={`tabular-nums ${row.probeFailCount > 0 ? "text-red-600 font-medium" : ""}`}>{row.probeFailCount}</span>
       ),
     },
     {
       key: "enabled",
       title: "启用",
-      render: (row: SteelNodeRow) => (
+      render: (row: BrowserNodeRow) => (
         <Badge variant={row.enabled ? "default" : "outline"} className={row.enabled ? "bg-emerald-600 hover:bg-emerald-600" : ""}>
           {row.enabled ? "启用" : "停用"}
         </Badge>
       ),
     },
-    { key: "createdAt", title: "创建时间", sortable: true, render: (row: SteelNodeRow) => <span className="text-xs text-muted-foreground">{row.createdAt}</span> },
+    { key: "createdAt", title: "创建时间", sortable: true, render: (row: BrowserNodeRow) => <span className="text-xs text-muted-foreground">{row.createdAt}</span> },
   ]
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">Steel 浏览器执行集群：负载分数用于最小负载调度，灰度组支持 PROD/TEST 平滑发布</p>
+        <p className="text-sm text-muted-foreground">自研浏览器执行集群：负载分数用于最小负载调度，灰度组支持 PROD/TEST 平滑发布</p>
         <Button size="sm" className="bg-teal-600 hover:bg-teal-700" onClick={openCreate}>
-          <Plus className="h-4 w-4 mr-1" /> 新建 Steel 节点
+          <Plus className="h-4 w-4 mr-1" /> 新建浏览器节点
         </Button>
       </div>
 
@@ -273,16 +273,16 @@ export function SteelNodesTable(props: Props) {
       <Dialog open={formOpen} onOpenChange={(v) => !formBusy && setFormOpen(v)}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>{editing ? "编辑 Steel 节点" : "新建 Steel 节点"}</DialogTitle>
+            <DialogTitle>{editing ? "编辑浏览器节点" : "新建浏览器节点"}</DialogTitle>
           </DialogHeader>
           <div className="grid gap-4 py-2">
             <div className="space-y-1.5">
               <Label>名称</Label>
-              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="如 steel-node-hk-01" />
+              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="如 browser-node-hk-01" />
             </div>
             <div className="space-y-1.5">
               <Label>baseUrl（内网地址）</Label>
-              <Input value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder="http://steel-internal:3000" />
+              <Input value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder="http://browser-node:3000" />
             </div>
             <div className="space-y-1.5">
               <Label>标签（逗号分隔）</Label>
@@ -325,14 +325,14 @@ export function SteelNodesTable(props: Props) {
       <ConfirmDialog
         open={!!deleting}
         onOpenChange={(v) => !busy && setDeleting(v ? deleting : null)}
-        title="删除 Steel 节点"
+        title="删除浏览器节点"
         description={`节点「${deleting?.name}」将软删除并移入回收站；运行中工作区会先被检查。`}
         destructive
         confirmText="移入回收站"
         loading={busy === "delete"}
         onConfirm={async () => {
           if (!deleting) return
-          await callAction("delete", () => deleteSteelNodeAction({ id: deleting.id }))
+          await callAction("delete", () => deleteBrowserNodeAction({ id: deleting.id }))
         }}
       />
     </div>

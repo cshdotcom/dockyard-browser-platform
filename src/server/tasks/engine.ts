@@ -8,7 +8,7 @@ import { raiseAlert } from "@/lib/alerts"
 import { cleanIdempotencyRecords } from "@/lib/idempotency"
 import { detectConfigDrift } from "@/lib/config"
 import { inspectContainer, containerStats, hostInfo, hostRealMetrics } from "@/lib/external/docker"
-import { sessionStatus, destroySession } from "@/lib/external/steel"
+import { sessionStatus, destroySession } from "@/lib/external/browser-session"
 import { novncHealth, destroyNovncSession } from "@/lib/external/novnc"
 import { testConnectivity } from "@/lib/singbox"
 import { resolveNetworkPolicy } from "@/lib/network-policy"
@@ -17,6 +17,7 @@ import { resolveEndpointPolicyForUser } from "@/lib/endpoint-policy"
 import { activateDueScheduledDeployments } from "@/lib/policy-engine"
 import { crxInstallPoll, crxGrayRollout } from "./crx-engine"
 import { nextCronRun } from "@/lib/cron-next"
+import { runShellExecutor, runChainExecutor, runWebhookExecutor, CUSTOM_EXEC_TASK_TYPES } from "./custom-exec"
 
 const g = globalThis as unknown as {
   __dyTaskLocks?: Map<string, { lockedAt: number; heartbeat: number }>
@@ -59,10 +60,14 @@ const HEARTBEAT_MS = 5_000
 export interface TaskResult {
   itemsProcessed: number
   summary: string
+  /** r24-a：参数化执行体可用——true=业务失败（记 FAILED 日志，不抛异常以保留 output） */
+  failed?: boolean
+  /** r24-a：完整执行输出（脚本 stdout/响应体；存 ScheduleTaskLog.outputJson，上限 64KB） */
+  output?: string
 }
 
-// ---- 任务注册表（全部内置任务）----
-export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskResult>> = {
+// ---- 任务注册表（全部内置任务；r24-a：签名扩展第二参数 params（来自 paramsJson））----
+export const TASKS: Record<string, (log: (m: string) => void, params?: unknown) => Promise<TaskResult>> = {
   // 1. 会话闲置回收与TTL清理
   async session_idle_reclaim(log) {
     const active = await db.browserWorkspace.findMany({
@@ -83,12 +88,12 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
       if (idleExpired || ttlExpired) {
         const reason = ttlExpired ? "TTL到期" : "闲置超时"
         log(`回收 ${ws.name}（${reason}）`)
-        if (ws.mode === "cdp_light" && ws.steelSessionId) await destroySession(ws.steelSessionId).catch(() => {})
+        if (ws.mode === "cdp_light" && ws.browserSessionId) await destroySession(ws.browserSessionId).catch(() => {})
         if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId, ws.containerRef).catch(() => {})
         const runtimeDelta = ws.startedAt ? Math.max(0, Math.floor((Date.now() - ws.startedAt.getTime()) / 1000)) : 0
         await db.browserWorkspace.update({
           where: { id: ws.id },
-          data: { status: "DESTROYED", crashCategory: reason, steelSessionId: null, novncSessionId: null, startedAt: null, runtimeAccumSec: { increment: runtimeDelta } },
+          data: { status: "DESTROYED", crashCategory: reason, browserSessionId: null, novncSessionId: null, startedAt: null, runtimeAccumSec: { increment: runtimeDelta } },
         })
         if (ws.proxyNodeId) await db.proxyNode.update({ where: { id: ws.proxyNodeId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
         if (ws.singboxInstanceId) await db.singboxInstance.update({ where: { id: ws.singboxInstanceId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
@@ -290,14 +295,14 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
 
   // 8. 僵死资源回收
   async zombie_reclaim(log) {
-    const running = await db.browserWorkspace.findMany({ where: { mode: "cdp_light", status: { in: ["RUNNING", "IDLE"] }, deletedAt: null, steelSessionId: { not: null } }, take: 300 })
+    const running = await db.browserWorkspace.findMany({ where: { mode: "cdp_light", status: { in: ["RUNNING", "IDLE"] }, deletedAt: null, browserSessionId: { not: null } }, take: 300 })
     let n = 0
     for (const ws of running) {
-      if (!ws.steelSessionId) continue
-      const st = await sessionStatus(ws.steelSessionId).catch(() => null)
+      if (!ws.browserSessionId) continue
+      const st = await sessionStatus(ws.browserSessionId).catch(() => null)
       if (!st || st.status === "GONE" || st.status === "CRASHED") {
         log(`僵死会话回收 ${ws.name}`)
-        await destroySession(ws.steelSessionId).catch(() => {})
+        await destroySession(ws.browserSessionId).catch(() => {})
         await db.browserWorkspace.update({
           where: { id: ws.id },
           data: { status: st?.status === "CRASHED" ? "ERROR" : "DESTROYED", crashCategory: st?.status === "CRASHED" ? "Chrome崩溃" : "会话僵死无响应" },
@@ -394,11 +399,11 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
   // 12. 脏数据自动清洗自愈
   async dirty_data_clean(log) {
     let n = 0
-    const staleSessions = await db.browserWorkspace.findMany({ where: { status: { in: ["RUNNING", "IDLE"] }, deletedAt: null, steelSessionId: { not: null } }, take: 200 })
+    const staleSessions = await db.browserWorkspace.findMany({ where: { status: { in: ["RUNNING", "IDLE"] }, deletedAt: null, browserSessionId: { not: null } }, take: 200 })
     for (const ws of staleSessions) {
-      const st = await sessionStatus(ws.steelSessionId!).catch(() => null)
+      const st = await sessionStatus(ws.browserSessionId!).catch(() => null)
       if (st === null) {
-        await db.browserWorkspace.update({ where: { id: ws.id }, data: { status: "DESTROYED", steelSessionId: null } })
+        await db.browserWorkspace.update({ where: { id: ws.id }, data: { status: "DESTROYED", browserSessionId: null } })
         n++
       }
     }
@@ -645,6 +650,24 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
   async crx_gray_rollout(log) {
     return crxGrayRollout(log)
   },
+
+  // ---- r24-a：参数化自定义执行体（执行内容完全放开；paramsJson 携带参数）----
+  // 注：custom_shell 顶层调用由 runTask 直连（携带任务自身 timeoutSec）；
+  // 此注册表项用于类型清单展示 + 任务链步骤内调用（步骤超时兜底 300s）
+  async custom_shell(log, params) {
+    return runShellExecutor(params, log, 300)
+  },
+  async custom_chain(log, params) {
+    return runChainExecutor(params, log, (t) => TASKS[t])
+  },
+  async custom_webhook(log, params) {
+    return runWebhookExecutor(params, log)
+  },
+}
+
+// 供 listCustomTaskTypesAction：参数化类型标记（前端据此渲染专属参数编辑器）
+export function customExecMeta(taskType: string): { kind: string; name: string; description: string } | null {
+  return CUSTOM_EXEC_TASK_TYPES[taskType] ?? null
 }
 
 // 崩溃会话连续失败计数（内存态，进程级；任务由内存锁保证单实例执行）
@@ -670,6 +693,16 @@ export async function runTask(code: string, trigger: "CRON" | "MANUAL"): Promise
   if (!task) return { ok: false, message: `未知任务：${execCode}${record?.isCustom ? "（自定义任务指向的任务类型不存在，可能已被引擎移除）" : ""}` }
   const timeoutSec = record?.timeoutSec || 300
 
+  // r24-a：参数化执行体——paramsJson 解析（损坏时直接失败，不静默丢参数执行）
+  let taskParams: unknown = undefined
+  if (record?.isCustom && record.paramsJson) {
+    try {
+      taskParams = JSON.parse(record.paramsJson)
+    } catch {
+      return { ok: false, message: `自定义任务参数解析失败（paramsJson 非法 JSON）：${code}` }
+    }
+  }
+
   const lockOk = await acquireLock(code, timeoutSec)
   if (!lockOk) return { ok: false, message: `任务 ${code} 正在执行中（内存锁生效，防并发重入）` }
   const logLines: string[] = []
@@ -684,31 +717,46 @@ export async function runTask(code: string, trigger: "CRON" | "MANUAL"): Promise
   ;(heartbeat as unknown as { unref?: () => void }).unref?.()
 
   try {
-    const result = await Promise.race([
-      task(log),
-      new Promise<TaskResult>((_, reject) =>
-        setTimeout(() => reject(new Error(`任务执行超时（${timeoutSec}s）`)), timeoutSec * 1000)
-      ),
-    ])
+    // r24-a：custom_shell 顶层调用直连执行体（携带任务自身 timeoutSec，自管超时击杀）
+    const execFn: Promise<TaskResult> =
+      record?.isCustom && execCode === "custom_shell"
+        ? runShellExecutor(taskParams, log, timeoutSec)
+        : Promise.race([
+            Promise.resolve(task(log, taskParams)),
+            new Promise<TaskResult>((_, reject) =>
+              setTimeout(() => reject(new Error(`任务执行超时（${timeoutSec}s）`)), timeoutSec * 1000)
+            ),
+          ])
+    const result = await execFn
     const durationMs = Date.now() - startAt.getTime()
     // r23：按 cron 表达式重算下次到期（到期调度依据；解析失败保持空 → 兼容旧固频触发）
     const next = record ? nextCronRun(record.cronExpr, new Date()) : null
+    // r24-a：业务失败（failed=true，如脚本 exit≠0 / HTTP 不符合预期）记 FAILED 但保留完整输出
+    const bizFailed = result.failed === true
     await db.scheduleTaskLog.update({
       where: { id: logRow.id },
-      data: { status: "SUCCESS", endAt: new Date(), durationMs, itemsProcessed: result.itemsProcessed, summary: result.summary + (logLines.length > 0 ? `；${logLines.slice(0, 5).join("；")}` : "") },
+      data: {
+        status: bizFailed ? "FAILED" : "SUCCESS",
+        endAt: new Date(),
+        durationMs,
+        itemsProcessed: result.itemsProcessed,
+        summary: result.summary + (logLines.length > 0 ? `；${logLines.slice(0, record?.isCustom ? 40 : 5).join("；")}` : ""),
+        ...(result.output ? { outputJson: result.output.slice(0, 65536) } : {}),
+        ...(bizFailed ? { errorStack: result.summary.slice(0, 2000) } : {}),
+      },
     })
     await db.scheduleTask.update({
       where: { code },
-      data: { lastExecuteAt: new Date(), lastResult: `SUCCESS ${result.summary}`, consecutiveFails: 0, avgDurationMs: Math.round(durationMs), ...(next ? { nextRunAt: next } : {}) },
+      data: { lastExecuteAt: new Date(), lastResult: `${bizFailed ? "FAILED" : "SUCCESS"} ${result.summary}`, consecutiveFails: bizFailed ? (record?.consecutiveFails || 0) + 1 : 0, avgDurationMs: Math.round(durationMs), ...(next ? { nextRunAt: next } : {}) },
     })
-    return { ok: true, message: result.summary }
+    return { ok: !bizFailed, message: result.summary }
   } catch (e) {
     const durationMs = Date.now() - startAt.getTime()
     const msg = e instanceof Error ? e.message : String(e)
     const stack = e instanceof Error ? e.stack || "" : ""
     await db.scheduleTaskLog.update({
       where: { id: logRow.id },
-      data: { status: msg.includes("超时") ? "TIMEOUT" : "FAILED", endAt: new Date(), durationMs, errorStack: stack.slice(0, 2000) || msg },
+      data: { status: msg.includes("超时") ? "TIMEOUT" : "FAILED", endAt: new Date(), durationMs, errorStack: stack.slice(0, 2000) || msg, ...(logLines.length > 0 ? { outputJson: logLines.join("\n").slice(0, 65536) } : {}) },
     })
     const fails = (record?.consecutiveFails || 0) + 1
     const next = record ? nextCronRun(record.cronExpr, new Date()) : null

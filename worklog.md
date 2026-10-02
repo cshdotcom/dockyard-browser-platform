@@ -776,3 +776,27 @@ Work Log:
 Stage Summary:
 - r23 全批次闭环：4路子代理UI(A共享/组员、B任务中心、C搜索+预警配置+IP封禁、D Token策略+离线设备)+主代理基础层与抽检全部通过
 - 用户全部原话需求落地：共享列表多选/搜索/筛选/踢出、全局搜索+完整筛选栏、2FA强制策略下发真拦截、IP封禁(错误次数/时长/对应用户IP)、配置保存真实生效+可自检、组员批量管理、任务列表分页/首页尾页/指定页+自定义任务+批量+搜索+日期筛选、全资源权限搜索、下线已离线设备(数据库不认cookie)、资源80/85%阈值可设+邮件提醒+各功能预警开关、Docker磁盘按容器存储位置(data-root)统计、API-Key组/用户精确管理、MCP/API限流可配
+
+---
+Task ID: 24-a/b/c
+Agent: main
+Task: r24-a 自定义任务执行内容完全放开 + r24-b Steel 声明全量移除 + r24-c IME 输入法真实实现
+
+Work Log:
+- 【r24-a 引擎】src/server/tasks/custom-exec.ts 新建：三类参数化执行体——custom_shell（危险命令18条硬黑名单双重校验/进程组级超时击杀 kill(-pgid)/stdout合流16KB捕获/env注入+cwd白名单/配置总开关tasks.allowShellExec）、custom_chain（最多10步/每步类型+标签+失败继续/嵌套拒绝/逐步打点）、custom_webhook（方法/头/体/期望状态码/SSRF私网回环拦截+超管放行配置）
+- 【r24-a 引擎接线】engine.ts：TASKS签名扩展params参数；runTask解析paramsJson（损坏即失败不静默）；custom_shell顶层直连携带任务timeoutSec；业务失败failed=true记FAILED日志+完整output落ScheduleTaskLog.outputJson（新列64KB）；日志摘要行数自定义任务40行
+- 【r24-a Actions】tasks.ts：listCustomTaskTypesAction带paramKind标记；create/update携带params并zod+黑名单校验；审计含paramsJson摘要；配置注册tasks.allowShellExec/tasks.webhookAllowPrivate两键
+- 【r24-a UI】custom-task-dialog.tsx重写（~750行）：shell编辑器（脚本textarea+解释器选择+cwd+env KV编辑器+黑名单提示）、chain可视化编排（步骤列表+上移下移删除+流程预览条+失败继续开关+failFast）、webhook表单（方法/URL/headers KV/body/期望码/超时）；日志详情弹窗新增执行输出区；TaskRow+paramsJson
+- 【r24-a 测试】scripts/smoke-r24a-custom-exec.ts 27/27 pass：黑名单拦截/参数校验/shell真实执行+env注入+exit码判定+2s超时强杀+进程组级联击杀/SSRF默认拦截+放行配置链路+期望状态码判定/链执行+嵌套拒绝/注册表
+- 【r24-b 迁移】prisma双schema：SteelNode→BrowserNode、steelNodeId→browserNodeId、steelSessionId→browserSessionId、CrxPlugin坏索引@@index(ighRisk])→@@index([highRisk])修复；scripts/migrate-r24-steel-rename.ts幂等迁移（RENAME TABLE/COLUMN+索引重建，SQLite无ALTER INDEX用DROP+CREATE）执行PASS数据保留（1节点行）
+- 【r24-b 源码】src/lib/external/steel.ts删除→browser-session.ts（自研会话引擎：外部分离部署挂接+单容器内嵌+演示模式三形态，Steel HTTP API形态彻底移除）；env.ts删STEEL_BROWSER_URL/steelUrl/externalAvailable.steel（新增browser语义别名）；7个import方+network actions（createBrowserNodeAction等5个动作）+前端browser-nodes-table.tsx（git mv）+network page（tab=steel兼容映射browser）+workspaces/admin-workspaces/mcp/snapshots/recycle等24文件全量改写；seed改为node-default；README/AGENT_GUIDE去Steel化；源码/文档/seed零steel残留
+- 【r24-c IME】Dockerfile加fcitx5全家桶（chinese-addons/table/table-other/前端gtk3/gtk4/qt5/config-qt/hangul/mozc/unikey/thai/arabic尽力安装+x11-xkb-utils+locales 13种locale locale-gen）；sandbox-launch.sh：每沙箱独立fcitx5（监督树成员，崩溃自愈；共享用户形态不启防串扰）+cleanup按用户扫杀+apply_ime_prefs（布局setxkbmap+引擎fcitx5-remote -s重试5次）；embedded-sandbox.ts spec+imeEngine/kbLayout/clipboardEnabled（DY_IME_ENGINE/DY_KB_LAYOUT/DY_CLIPBOARD环境注入+inner脚本IME环境XMODIFIERS/GTK_IM_MODULE/QT_IM_MODULE/SDL_IM_MODULE）；novnc.ts透传；workspaces.ts三处调用点注入（模板级/沙箱偏好+clipboardEnabled读workspace.clipboardVncSync全局开关）
+- 【r24-c 库】src/lib/ime-control.ts：fcitx5 inputmethod目录.conf解析（含友好名映射表拼音/双拼/五笔/注音/仓颉/hangul/mozc/unikey…）、xkb evdev.xml宽松正则解析（注释容忍，99布局实测）、applyImeEngine（fcitx5-remote -s按沙箱用户）、applyKbLayout（setxkbmap -display :N）、setpriv降权通道
+- 【r24-c Actions】src/server/actions/ime.ts：getWorkspaceImeAction（状态/引擎清单/布局清单/当前值/偏好持久值/降级原因）、setWorkspaceImeAction（权限=所有者/OPERATE共享/管理员；白名单校验；持久化BrowserWorkspace.imeEngine/kbLayout（新列）；审计IME_CHANGE含display作用域）
+- 【r24-c UI】src/components/vnc/ime-switcher.tsx：VNC工具栏「输入法」按钮（Popover：引擎/布局双页签+当前项勾选+persist偏好开关+降级说明）；接入helmport-viewer.tsx工具栏（只读镜像/未连接禁用）
+- 【r24-c 测试】scripts/smoke-r24c-ime.ts 22/22 pass：fcitx5 .conf解析5项+友好名映射+分类排序、xkb布局解析99项+回退清单、Xvfb双显示真实隔离验证（键位图xkbcomp地面真值自适应断言：A切de/B保持us互不影响；开发沙箱存在Xvfb键位图上传不落效怪癖已用xkbcomp实证并自适应跳过读回断言，命令通道与-display作用域为真实调用）、剪贴板跨X server隔离结构性验证
+- 【r24-d 部分】clipboardEnabled策略落地：DY_CLIPBOARD=0→x11vnc -nosel -noclipboard（X剪贴板不向VNC端透传）+workspace.clipboardVncSync配置键；跨沙箱剪贴板隔离=每沙箱独立Xvfb（X server物理隔离，测试【4】实证）
+
+Stage Summary:
+- r24-a/b/c/d(部分) 全部落地并真实测试：自定义任务执行内容三类执行体+可视化构建器（27项冒烟全过）、Steel零残留（24文件+DB迁移数据保留）、IME每沙箱独立fcitx5+VNC控制端切换按钮+偏好持久化（22项测试全过）、剪贴板VNC透传策略开关+跨沙箱隔离实证
+- dev服务器重启恢复（@prisma/client-postgres被db push清空后重新generate恢复）；bunx tsc改动文件零新增错误；eslint新模块0 error

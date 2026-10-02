@@ -199,31 +199,167 @@ async function allocatePort(base: number, span = PORT_SPAN): Promise<number> {
 }
 
 // ============================================================
-// Linux 沙箱用户（root 环境自动创建；非 root 环境以当前用户降级运行）
+// Linux 沙箱用户（r24-e：每沙箱一个独立用户 dyu-<uuid8>-<uname6>）
+//
+// 架构（自研单容器多用户模型）：
+//   · 后台（平台进程）以 root 运行；每个沙箱浏览器进程树以【沙箱专属用户】运行
+//     —— 名字 = dyu-<工作区UUID前8位>-<所有者用户名前6位>，同一用户的不同沙箱
+//     也是不同 Linux 账户 → Profile/下载/家目录 700 互不可读（即使同容器）；
+//     仅 root（管理后台）可访问全部目录。
+//   · UID 台账（storage/system/sandbox-users.json，随存储卷持久化）：
+//     容器重建（/etc/passwd 重置但存储卷保留）时按台账原 UID 复活用户，
+//     存储卷上既有文件属主零冲突；台账丢失时收养 passwd 现有 UID 反写台账。
+//   · 非 root 环境（开发）：降级为同用户模式（隔离语义降级，进程链路不变）。
 // ============================================================
 
+// 兼容旧命名（每平台用户一个）：r24 之前的已收养沙箱仍以此名存在
 function linuxUserFor(userId: string): string {
   return "dyu-" + Buffer.from(userId).toString("hex").slice(0, 8)
 }
 
-async function ensureLinuxUser(userId: string): Promise<string | null> {
-  const name = linuxUserFor(userId)
-  const uid = process.getuid?.() ?? 0
-  if (uid !== 0) return null // 非 root（开发环境）：同用户模式，隔离降级（真实进程链路不受影响）
+// r24-e：沙箱用户名（工作区 UUID + 所有者用户名 → Linux 账户名）
+export function sandboxLinuxUserName(workspaceUuid: string, ownerUsername: string): string {
+  const u8 = workspaceUuid.replace(/[^a-z0-9]/gi, "").toLowerCase().slice(0, 8).padEnd(8, "0")
+  const uname = (ownerUsername || "u").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 6) || "u"
+  return `dyu-${u8}-${uname}` // ≤19 字符，Linux 用户名 32 上限内
+}
+
+// ---- UID 台账（持久化：容器重建后按原 UID 复活用户，属主零冲突）----
+interface SandboxUserLedger {
+  users: Record<string, { uid: number; workspaceUuid?: string; owner?: string; createdAt: number }>
+  nextUid: number
+}
+const UID_MIN = 20000
+const UID_MAX = 60000
+
+function ledgerPath(): string {
+  return join(ENV.storageLocalPath.replace(/\/$/, ""), "system", "sandbox-users.json")
+}
+
+const gLedger = globalThis as unknown as { __dySandboxUserLedgerOp?: Promise<unknown> }
+
+function ledgerMutex<T>(op: () => Promise<T>): Promise<T> {
+  const prev = gLedger.__dySandboxUserLedgerOp ?? Promise.resolve()
+  const next = prev.then(op, op)
+  gLedger.__dySandboxUserLedgerOp = next.catch(() => null)
+  return next
+}
+
+async function loadLedger(): Promise<SandboxUserLedger> {
+  try {
+    const raw = await readFile(ledgerPath(), "utf8")
+    const l = JSON.parse(raw) as SandboxUserLedger
+    if (!l.users || typeof l.nextUid !== "number") throw new Error("bad ledger")
+    if (l.nextUid < UID_MIN) l.nextUid = UID_MIN
+    return l
+  } catch {
+    return { users: {}, nextUid: UID_MIN }
+  }
+}
+
+async function saveLedger(l: SandboxUserLedger): Promise<void> {
+  await mkdir(dirname(ledgerPath()), { recursive: true })
+  // 0600 + 原子写（临时文件 + rename）：台账含用户映射，防半写损坏
+  const tmp = `${ledgerPath()}.tmp-${process.pid}`
+  await writeFile(tmp, JSON.stringify(l, null, 1), { mode: 0o600 })
+  await fs.promises.rename(tmp, ledgerPath())
+}
+
+// passwd 现有 UID 查询（不存在返回 null）
+function passwdUidOf(name: string): number | null {
   try {
     const s = fs.readFileSync("/etc/passwd", "utf8")
-    if (s.split("\n").some((l) => l.startsWith(`${name}:`))) return name
-    const home = join(ENV.storageLocalPath.replace(/\/$/, ""), "homes", name)
-    await mkdir(dirname(home), { recursive: true })
-    // -M：home 目录由存储卷统一管理；同步创建后校验结果
-    const r = spawnSync("useradd", ["-M", "-d", home, "-s", "/bin/sh", name], { timeout: 10_000 })
-    if (r.status !== 0) {
-      return null
-    }
-    return name
+    const line = s.split("\n").find((l) => l.startsWith(`${name}:`))
+    if (!line) return null
+    const uid = Number(line.split(":")[2])
+    return Number.isFinite(uid) && uid >= 1000 ? uid : null
   } catch {
     return null
   }
+}
+
+// 通用：按名确保用户存在（台账 UID 复活 / 新分配）；返回 null=不可用（非 root）
+async function ensureUserByName(name: string, homeDir: string, meta?: { workspaceUuid?: string; owner?: string }): Promise<string | null> {
+  const uid = process.getuid?.() ?? 0
+  if (uid !== 0) return null // 非 root（开发环境）：同用户模式，隔离降级（真实进程链路不受影响）
+  return ledgerMutex(async () => {
+    try {
+      const l = await loadLedger()
+      const existing = passwdUidOf(name)
+      if (existing != null) {
+        // 用户已在（passwd 为权威）：台账缺失 → 收养反写；台账不一致 → 以 passwd 为准（文件属主既成事实）
+        if (!l.users[name] || l.users[name].uid !== existing) {
+          l.users[name] = { ...l.users[name], uid: existing, ...(meta || {}), createdAt: l.users[name]?.createdAt ?? Date.now() }
+          await saveLedger(l)
+        }
+        return name
+      }
+      // 用户不在 passwd：
+      //   a) 台账有 → 容器重建场景：按原 UID 复活（存储卷属主一致零冲突）
+      //   b) 台账无 → 分配新 UID
+      let targetUid = l.users[name]?.uid
+      if (targetUid == null) {
+        if (l.nextUid > UID_MAX) throw new Error("沙箱用户 UID 池耗尽（20000-60000）")
+        targetUid = l.nextUid
+        l.nextUid += 1
+      }
+      await mkdir(dirname(homeDir), { recursive: true })
+      // -M：home 目录由存储卷统一管理（启动脚本按需创建归属）；-u 固定 UID
+      let r = spawnSync("useradd", ["-M", "-d", homeDir, "-s", "/bin/sh", "-u", String(targetUid), name], { timeout: 10_000 })
+      if (r.status !== 0) {
+        // UID 被占用（台账与 passwd 脱同步的边角）：换新 UID 重试并记台账（属主修正由启动 chown 兜底）
+        const alt = l.nextUid
+        if (alt > UID_MAX) throw new Error("沙箱用户 UID 池耗尽（20000-60000）")
+        r = spawnSync("useradd", ["-M", "-d", homeDir, "-s", "/bin/sh", "-u", String(alt), name], { timeout: 10_000 })
+        if (r.status !== 0) return null
+        targetUid = alt
+        l.nextUid = alt + 1
+      } else if (!l.users[name]) {
+        l.nextUid = Math.max(l.nextUid, targetUid + 1)
+      }
+      l.users[name] = { uid: targetUid, ...(meta || {}), createdAt: l.users[name]?.createdAt ?? Date.now() }
+      await saveLedger(l)
+      return name
+    } catch {
+      return null
+    }
+  })
+}
+
+// r24-e：确保沙箱专属用户（工作区 UUID + 所有者用户名命名）
+export async function ensureSandboxLinuxUser(workspaceUuid: string, ownerUsername: string): Promise<string | null> {
+  const name = sandboxLinuxUserName(workspaceUuid, ownerUsername)
+  const home = join(ENV.storageLocalPath.replace(/\/$/, ""), "homes", name)
+  return ensureUserByName(name, home, { workspaceUuid, owner: ownerUsername })
+}
+
+// 兼容：每平台用户一个的旧方案（无 workspaceUuid 场景 / 旧沙箱收养）
+async function ensureLinuxUser(userId: string): Promise<string | null> {
+  const name = linuxUserFor(userId)
+  const home = join(ENV.storageLocalPath.replace(/\/$/, ""), "homes", name)
+  return ensureUserByName(name, home)
+}
+
+// 收养路径：按 state.json 的 linuxUser 复活用户（容器重建后；UID 台账优先）
+async function ensureAdoptedUser(name: string, homeDir: string): Promise<string | null> {
+  if (!name) return null
+  return ensureUserByName(name, homeDir || join(ENV.storageLocalPath.replace(/\/$/, ""), "homes", name))
+}
+
+// ---- 账户信息查询（管理端展示：沙箱 ↔ Linux 账户 ↔ UID 映射）----
+export function sandboxUserLedgerInfo(): Promise<{ users: { name: string; uid: number; workspaceUuid?: string; owner?: string; alive: boolean }[]; nextUid: number }> {
+  return ledgerMutex(async () => {
+    const l = await loadLedger()
+    const users = Object.entries(l.users).map(([name, v]) => ({
+      name,
+      uid: v.uid,
+      workspaceUuid: v.workspaceUuid,
+      owner: v.owner,
+      alive: passwdUidOf(name) != null,
+    }))
+    users.sort((a, b) => a.uid - b.uid)
+    return { users, nextUid: l.nextUid }
+  })
 }
 
 // ============================================================
@@ -288,6 +424,12 @@ export async function adoptEmbeddedSandboxes(): Promise<number> {
       const st = JSON.parse(raw) as Partial<EmbeddedSandboxEntry> & { status?: string }
       if (st.status === "stopped") continue
       if (!procAlive(st.supervisorPid)) continue
+      // r24-e：容器重建场景——passwd 已重置但监督树仍在（存储卷持久）→
+      // 按台账原 UID 复活沙箱专用用户（属主零冲突；监督进程仍以原 uid 运行不受影响）
+      if (st.linuxUser && passwdUidOf(st.linuxUser) == null) {
+        const home = join(ENV.storageLocalPath.replace(/\/$/, ""), "homes", st.linuxUser)
+        await ensureAdoptedUser(st.linuxUser, home).catch(() => null)
+      }
       registry().set(d, {
         id: d,
         userId: st.userId || "",
@@ -329,6 +471,11 @@ export interface EmbeddedSandboxSpec {
   pidsLimit?: number
   policyFile?: string | null
   lang?: string
+  imeEngine?: string | null // r24-c：启动即应用偏好输入法（fcitx5 引擎名，如 pinyin）
+  kbLayout?: string | null // r24-c：启动即应用键盘布局（xkb 布局名，如 us/cn）
+  clipboardEnabled?: boolean // r24-d：剪贴板策略（false=x11vnc -nosel -noclipboard，X 剪贴板不透传 VNC 端）
+  workspaceUuid?: string | null // r24-e：工作区 UUID（沙箱专属 Linux 用户命名）
+  ownerUsername?: string | null // r24-e：所有者用户名（沙箱专属 Linux 用户命名）
 }
 
 export interface EmbeddedSandboxHandle {
@@ -428,7 +575,10 @@ export async function createEmbeddedSandbox(spec: EmbeddedSandboxSpec): Promise<
   )
 
   const [display, rfbPort, cdpPort] = await Promise.all([allocateDisplay(), allocatePort(RFB_PORT_BASE), allocatePort(CDP_PORT_BASE)])
-  const linuxUser = await ensureLinuxUser(spec.userId)
+  // r24-e：优先每沙箱专属用户（dyu-<uuid8>-<uname6>）；无 UUID 场景回退每平台用户（兼容）
+  const linuxUser = spec.workspaceUuid && spec.ownerUsername
+    ? await ensureSandboxLinuxUser(spec.workspaceUuid, spec.ownerUsername)
+    : await ensureLinuxUser(spec.userId)
 
   const resolution = spec.resolution || "1280x800"
   const pidsLimit = Math.max(64, Math.min(1024, spec.pidsLimit ?? 256))
@@ -450,8 +600,14 @@ export async function createEmbeddedSandbox(spec: EmbeddedSandboxSpec): Promise<
     ? `exec prlimit --nproc=${pidsLimit} --`
     : `# 同用户模式：跳过 prlimit --nproc（按 UID 计数会把平台共享进程计入上限）\n# 资源面由内存上限（js-flags max-old-space-size）兜底\nexec`
   const proxyArgs = spec.proxyUrl ? `--proxy-server=${spec.proxyUrl}` : ""
+  // r24-c：输入法环境（XIM/fcitx 通道；fcitx5 由监督脚本拉起，作用域=本沙箱显示）
+  const imeEnv = `export XMODIFIERS="@im=fcitx"
+export GTK_IM_MODULE="fcitx"
+export QT_IM_MODULE="fcitx"
+export SDL_IM_MODULE="fcitx"`
   const inner = `#!/bin/sh
 # 由嵌入式沙箱引擎生成（沙箱 ${id}）
+${imeEnv}
 DY_POLICY_FILE="\${DY_POLICY_FILE:-}"
 if [ -n "$DY_POLICY_FILE" ] && [ -f "$DY_POLICY_FILE" ]; then
   if [ -e /etc/chromium/policies/managed/dockyard.json ]; then
@@ -507,6 +663,14 @@ ${nprocExec} "${bins.chrome}" \\
       DY_PROFILE_DIR: profileDir,
       DY_DOWNLOADS_DIR: downloadsDir,
       DY_PIDS: String(pidsLimit),
+      // r24-e：沙箱身份标识（审计/台账追溯）
+      DY_WORKSPACE_UUID: spec.workspaceUuid || "",
+      DY_OWNER_USERNAME: spec.ownerUsername || "",
+      // r24-c：输入法偏好（监督脚本 start_ime 后应用：fcitx5-remote -s / setxkbmap）
+      DY_IME_ENGINE: spec.imeEngine || "",
+      DY_KB_LAYOUT: spec.kbLayout || "",
+      // r24-d：剪贴板策略（false → x11vnc 关闭 X 剪贴板向 VNC 端透传）
+      DY_CLIPBOARD: spec.clipboardEnabled === false ? "0" : "1",
     },
     detached: true, // 脱离平台进程组：平台重启不牵连沙箱（state.json 重新收养）
     stdio: ["ignore", fs.openSync(join(logDir, "supervisor.log"), "a"), fs.openSync(join(logDir, "supervisor.log"), "a")],

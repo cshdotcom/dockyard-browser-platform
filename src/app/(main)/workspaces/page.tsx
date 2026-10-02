@@ -110,7 +110,7 @@ export default async function WorkspacesPage({
       tags: (r.tags as string[]) || [],
       createdAt: fmtDate(r.createdAt),
       profileSnapshotId: r.profileSnapshotId,
-      steelSessionId: r.steelSessionId,
+      browserSessionId: r.browserSessionId,
       novncSessionId: r.novncSessionId,
       shareControl,
     }

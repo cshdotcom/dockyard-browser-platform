@@ -41,6 +41,12 @@ ARG SINGBOX_VERSION=1.10.7
 #   fonts-noto-cjk        —— 中文/日文/韩文渲染
 #   openssl               —— Prisma 查询引擎链接库 + 密钥生成
 #   iproute2(ss)          —— 端口占用自检；wget —— 健康检查/内置调度器
+#   fcitx5 输入法全家桶（r24-c 每沙箱独立实例，常用语言全覆盖）：
+#     fcitx5 + chinese-addons（拼音/双拼/五笔/注音/仓颉）
+#     fcitx5-table / table-other（各语言码表）
+#     fcitx5-frontend-gtk3/gtk4 + qt5（应用侧 IM 模块）
+#     fcitx5-hangul（韩文）、fcitx5-mozc（日文，尽力）、fcitx5-unikey（越南文，尽力）
+#     x11-xkb-utils（setxkbmap 键盘布局）+ locales（多语言 locale）
 RUN apt-get update -o Acquire::Retries=5 \
     && apt-get install -y --no-install-recommends \
       chromium \
@@ -56,8 +62,28 @@ RUN apt-get update -o Acquire::Retries=5 \
       ca-certificates \
       wget \
       iproute2 \
+      fcitx5 \
+      fcitx5-chinese-addons \
+      fcitx5-table \
+      fcitx5-table-other \
+      fcitx5-frontend-gtk3 \
+      fcitx5-frontend-gtk4 \
+      fcitx5-frontend-qt5 \
+      fcitx5-config-qt \
+      x11-xkb-utils \
+      locales \
+      dbus-x11 \
+    && (apt-get install -y --no-install-recommends fcitx5-mozc \
+        || echo "[warn] fcitx5-mozc 不可用，跳过（日文输入以 fcitx5-table 日文码表兜底）") \
+    && (apt-get install -y --no-install-recommends fcitx5-hangul fcitx5-unikey fcitx5-thai fcitx5-arabic \
+        || echo "[warn] 部分语言输入法包不可用，跳过（以键盘布局兜底）") \
     && (apt-get install -y --no-install-recommends fonts-noto-color \
         || echo "[warn] fonts-noto-color 不可用，跳过（CJK 字体已含于 fonts-noto-cjk）") \
+    # 常用语言 locale（输入法候选窗/应用本地化）：中英日韩德法西葡俄泰越阿拉伯
+    && for loc in en_US.UTF-8 zh_CN.UTF-8 zh_TW.UTF-8 ja_JP.UTF-8 ko_KR.UTF-8 de_DE.UTF-8 fr_FR.UTF-8 es_ES.UTF-8 pt_BR.UTF-8 ru_RU.UTF-8 th_TH.UTF-8 vi_VN.UTF-8 ar_SA.UTF-8; do \
+        sed -i "/^# $loc /s/^# //" /etc/locale.gen 2>/dev/null || true; \
+      done \
+    && (locale-gen || echo "[warn] locale-gen 部分失败（不影响核心功能）") \
     && rm -rf /var/lib/apt/lists/* \
     # X socket 目录（Xvfb 挂载 unix socket 用）
     && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix \
@@ -121,6 +147,7 @@ COPY docker/embedded/sandbox-launch.sh /app/docker/embedded/sandbox-launch.sh
 RUN chmod +x /app/docker/*.sh /app/docker/embedded/*.sh \
     && mkdir -p /app/db /app/storage/backups /app/storage/uploads /app/storage/snapshots \
       /app/storage/sandboxes /app/storage/homes /app/storage/netpolicy \
+      /app/storage/profiles /app/storage/system \
     && echo "dockyard" > /app/.app-marker
 
 # 数据卷：数据库 / 文件存储（含 Profile/沙箱状态/策略文件）

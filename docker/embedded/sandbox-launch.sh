@@ -87,6 +87,9 @@ cleanup() {
   [ "$CLEANED" = "1" ] && return
   CLEANED=1
   log "收到终止信号：级联停止沙箱进程树"
+  [ -n "$IME_PID" ] && kill "$IME_PID" 2>/dev/null
+  # fcitx5 守护双保险：按沙箱专用用户扫杀（root+独立用户形态；共享用户形态不扫，避免误伤其他沙箱）
+  [ "$AM_ROOT" = "1" ] && [ -n "${DY_USER:-}" ] && pkill -TERM -u "$DY_USER" -x fcitx5 2>/dev/null
   [ -n "$CHROME_PID" ] && kill "$CHROME_PID" 2>/dev/null
   [ -n "$VNC_PID" ] && kill "$VNC_PID" 2>/dev/null
   [ -n "$XVFB_PID" ] && kill "$XVFB_PID" 2>/dev/null
@@ -111,6 +114,45 @@ cleanup() {
 }
 trap cleanup TERM INT
 trap '[ -n "$CHROME_PID" ] && kill "$CHROME_PID" 2>/dev/null; log "USR1：浏览器进程级重启（同一 Profile）"' USR1
+
+# ---- 0. r24-c 输入法（IME）：每沙箱独立 fcitx5 实例 ----
+# 仅本沙箱 X 显示作用域：与其他沙箱/其他在线会话完全隔离；
+# 以沙箱专用用户运行（root 环境），监督树成员之一（崩溃自愈）；
+# 偏好输入法（DY_IME_ENGINE）通过预写 fcitx5 profile 落地；布局由 setxkbmap 应用。
+IME_PID=""
+export XMODIFIERS="@im=fcitx"
+IME_ENABLED=0
+start_ime() {
+  command -v fcitx5 >/dev/null 2>&1 || return 0
+  if [ "$AM_ROOT" = "1" ] && [ -z "${DY_USER:-}" ]; then return 0; fi # 共享用户形态不启 fcitx5（避免跨沙箱串扰）
+  IME_ENABLED=1
+  bg_user fcitx5 --replace >/dev/null 2>&1
+  IME_PID=$!
+  log "fcitx5 输入法守护已拉起（display :$DISPLAY_NUM，作用域=本沙箱）"
+}
+apply_ime_prefs() {
+  # 键盘布局偏好（setxkbmap 作用于本显示）
+  if [ -n "${DY_KB_LAYOUT:-}" ] && command -v setxkbmap >/dev/null 2>&1; then
+    if as_user setxkbmap -display ":$DISPLAY_NUM" "$DY_KB_LAYOUT" 2>>"$LOG_DIR/ime.log"; then
+      log "键盘布局已应用：$DY_KB_LAYOUT"
+    else
+      log "WARN: 键盘布局 $DY_KB_LAYOUT 应用失败（回退默认）"
+    fi
+  fi
+  # 输入法引擎切换（fcitx5 就绪后 remote 切换；最多重试 5 次×0.4s）
+  if [ -n "${DY_IME_ENGINE:-}" ] && command -v fcitx5-remote >/dev/null 2>&1; then
+    i=0
+    while [ "$i" -lt 5 ]; do
+      if as_user env DISPLAY=":$DISPLAY_NUM" XMODIFIERS="@im=fcitx" fcitx5-remote -s "$DY_IME_ENGINE" >/dev/null 2>&1; then
+        log "输入法已切换：$DY_IME_ENGINE"
+        return 0
+      fi
+      sleep 0.4
+      i=$((i + 1))
+    done
+    log "WARN: 输入法 $DY_IME_ENGINE 切换未确认（可稍后在 VNC 工具栏手动切换）"
+  fi
+}
 
 # root 环境：Profile/下载/家目录/日志目录归属沙箱 Linux 用户（700 隔离，互不可读）
 # 【修复】logs 目录原先归 root（平台 mkdir），而 x11vnc/chromium 内层脚本以
@@ -152,6 +194,10 @@ fi
 log "Xvfb 就绪 :$DISPLAY_NUM（${DY_RESOLUTION:-1280x800x24}）"
 
 # ---- 2. VNC（仅回环；平台 VNC 桥票据中转，容器外不可触达） ----
+# r24-d 剪贴板隔离策略：DY_CLIPBOARD=0 → -nosel -noclipboard（X 剪贴板/选区
+# 不向 VNC 端透传；跨沙箱天然隔离之外，再做会话级策略关闭）
+VNC_CLIP_FLAGS=""
+[ "${DY_CLIPBOARD:-1}" = "0" ] && VNC_CLIP_FLAGS="-nosel -noclipboard"
 start_vnc() {
   # 日志预创建：即使目录 chown 失败，root 预创建 + 授权后降权进程也可写
   # （-o 打开失败会导致 x11vnc 直接退出，必须双重保障）
@@ -160,7 +206,7 @@ start_vnc() {
   fi
   [ "$AM_ROOT" = "1" ] && [ -n "${DY_USER:-}" ] && chown "$DY_USER" "$LOG_DIR/x11vnc.log" 2>/dev/null
   bg_user "$X11VNC_BIN" -display ":$DISPLAY_NUM" -forever -shared \
-    -rfbport "$RFB_PORT" -localhost -nopw -noxdamage -repeat -quiet \
+    -rfbport "$RFB_PORT" -localhost -nopw -noxdamage -repeat -quiet $VNC_CLIP_FLAGS \
     -o "$LOG_DIR/x11vnc.log"
   VNC_PID=$!
 }
@@ -187,6 +233,9 @@ log "x11vnc 监听 127.0.0.1:$RFB_PORT"
 # ---- 3. 防退出主循环 ----
 # 浏览器退出（任何原因）→ wait 返回 → 1 秒后同一 user-data-dir 拉起
 # Xvfb 意外死亡 → 先重建显示再拉起浏览器（整机自愈语义）
+start_ime
+# 偏好输入法/布局应用（fcitx5 后台就绪窗口内重试）
+apply_ime_prefs &
 while :; do
   if ! kill -0 "${XVFB_PID:-0}" 2>/dev/null; then
     log "Xvfb 意外退出，重建虚拟显示"
@@ -199,6 +248,11 @@ while :; do
   if ! kill -0 "${VNC_PID:-0}" 2>/dev/null; then
     log "x11vnc 意外退出，重建 VNC 服务（端口 $RFB_PORT）"
     start_vnc
+  fi
+  # fcitx5 意外退出 → 重建输入法守护（作用域仍为本显示；不重放偏好，可手动切换）
+  if [ "$IME_ENABLED" = "1" ] && ! kill -0 "${IME_PID:-0}" 2>/dev/null; then
+    log "fcitx5 意外退出，重建输入法守护"
+    start_ime
   fi
   # setpriv/unshare/sh/prlimit 全链 exec —— $! 即 chromium 主进程 PID
   if [ "$UNSHARE_OK" = "1" ]; then

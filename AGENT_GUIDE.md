@@ -84,7 +84,7 @@ db.systemConfig, db.configVersion, db.scheduleTask, db.scheduleTaskLog, db.fileM
 db.alert, db.alertRule, db.notice, db.webhookRule, db.webhookDelivery,
 db.browserWorkspace, db.browserTemplate, db.browserProfileSnapshot, db.browserScriptTemplate,
 db.browserModifyRule, db.domainRule, db.uaRecord, db.workspaceShare,
-db.steelNode, db.proxyNode, db.proxyUsage, db.hostNode,
+db.browserNode, db.proxyNode, db.proxyUsage, db.hostNode,
 db.singboxInstance, db.singboxConfigVersion, db.singboxStats,
 db.mcpTask, db.mcpTaskItem, db.recycleBin, db.riskListRule, db.userBehaviorProfile,
 db.announcement, db.announcementRead, db.userBehaviorProfile, db.idempotencyRecord, ...
@@ -173,7 +173,7 @@ export default async function Page({ searchParams }: { searchParams: Promise<Rec
 - Alert: id title level(INFO/WARN/CRITICAL) content resourceType resourceId ownerUserId handleStatus(PENDING/HANDLED/AUTO_RESOLVED) handledByUserId handledAt triggerAt dedupeKey createdAt
 - Notice: id userId title content type readAt createdAt
 - WebhookRule: id name url secret events(Json) groupId enabled failCount
-- BrowserWorkspace: id uuid name mode(cdp_light/novnc_full) status(CREATING/RUNNING/IDLE/STOPPED/ERROR/DESTROYED/FROZEN) userId groupId proxyNodeId singboxInstanceId steelNodeId templateId profileSnapshotId tags(Json) steelSessionId cdpUrl novncSessionId novncSecret novncConnCount novncFps novncActiveMin ttlMinutes idleTimeoutMinutes cdpCallCount cdpBlockedCount crashCategory lifecycleRules(Json) expireAt createdByUserId createdAt deletedAt
+- BrowserWorkspace: id uuid name mode(cdp_light/novnc_full) status(CREATING/RUNNING/IDLE/STOPPED/ERROR/DESTROYED/FROZEN) userId groupId proxyNodeId singboxInstanceId browserNodeId templateId profileSnapshotId tags(Json) browserSessionId cdpUrl novncSessionId novncSecret novncConnCount novncFps novncActiveMin ttlMinutes idleTimeoutMinutes cdpCallCount cdpBlockedCount crashCategory lifecycleRules(Json) expireAt createdByUserId createdAt deletedAt
 - BrowserTemplate: id name description scope(PRIVATE/GROUP/GLOBAL) userId groupId parentId configJson version tags createdByUserId deletedAt
 - BrowserProfileSnapshot: id name scope userId groupId workspaceId sizeBytes storageKey expireAt createdByUserId deletedAt
 - BrowserScriptTemplate: id name description code version scope userId boundDomains(Json) enabled createdByUserId deletedAt
@@ -181,7 +181,7 @@ export default async function Page({ searchParams }: { searchParams: Promise<Rec
 - DomainRule: id pattern type(BLACK/WHITE) enabled note createdByUserId
 - UaRecord: id ua label category(DESKTOP/MOBILE) enabled usageCount
 - WorkspaceShare: id workspaceId targetUserId permission(VIEW/OPERATE) expireAt revokedAt createdByUserId
-- SteelNode: id name baseUrl labels(Json) weight status(ONLINE/OFFLINE/ISOLATED) grayGroup(PROD/TEST) activeSessions loadScore probeFailCount enabled deletedAt
+- BrowserNode: id name baseUrl labels(Json) weight status(ONLINE/OFFLINE/ISOLATED) grayGroup(PROD/TEST) activeSessions loadScore probeFailCount enabled deletedAt（自研浏览器节点，Steel 声明已全部移除）
 - ProxyNode: id name type(internal_singbox/external) protocol(socks5/http) host port username password status(HEALTHY/DEGRADED/FAILED/DISABLED) latencyMs labels(Json) weight singboxInstanceId maxSessions currentSessions healthFailCount scheduleStrategy createdByUserId deletedAt
 - HostNode: id name dockerApiUrl labels(Json) cpuCores memTotalMb cpuUsedPct memUsedMb diskUsedPct reservedCpu reservedMemMb grayGroup status enabled deletedAt
 - SingboxInstance: id name remark tags(Json) cpuLimit memLimitMb maxSessions currentSessions hostNodeId containerId status(CREATING/RUNNING/STOPPED/ERROR/RELOADING) socksAddr configJson configVersion autoRestart lastError trafficLimitMb bytesUpMb bytesDownMb overLimitAction ownerUserId createdByUserId expireAt deletedAt

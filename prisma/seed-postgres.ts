@@ -141,13 +141,13 @@ async function main() {
   }
   console.log(`[seed-pg] 定时任务 ${tasks.length} 项已注册`)
 
-  // ---- 默认 Steel 节点 + 宿主机 ----
-  const steelCount = await db.steelNode.count()
-  if (steelCount === 0) {
-    await db.steelNode.create({
+  // ---- 默认 浏览器节点 + 宿主机 ----
+  const browserNodeCount = await db.browserNode.count()
+  if (browserNodeCount === 0) {
+    await db.browserNode.create({
       data: {
-        name: "steel-default",
-        baseUrl: process.env.STEEL_BROWSER_URL || "http://steel-internal:3000",
+        name: "node-default",
+        baseUrl: "http://browser-node:3000",
         labels: ["default"],
         weight: 1,
         status: "ONLINE",

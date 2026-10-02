@@ -6,7 +6,7 @@ import { writeAudit } from "@/lib/audit"
 import { getConfigNumber, getConfigBool } from "@/lib/config"
 
 // CDP 指令网关转发：限速 + 黑名单拦截 + 权限校验
-// 真实部署：转发到 Steel 会话的 CDP WebSocket；未配置 Steel 时记录并返回（链路演示）
+// 真实部署：转发到浏览器会话的 CDP WebSocket；未配置浏览器端点时记录并返回（链路演示）
 // CDP 服务后台端口可由环境变量 CDP_SERVICE_PORT 改变（Docker host 模式部署用）
 
 const CDP_BLACKLIST = [
@@ -55,13 +55,13 @@ export async function POST(req: NextRequest) {
   }
 
   await db.browserWorkspace.update({ where: { id: ws.id }, data: { cdpCallCount: { increment: 1 }, lastActiveAt: new Date() } })
-  const { touchSimSession } = await import("@/lib/external/steel")
-  if (ws.steelSessionId) touchSimSession(ws.steelSessionId)
+  const { touchSimSession } = await import("@/lib/external/browser-session")
+  if (ws.browserSessionId) touchSimSession(ws.browserSessionId)
 
   return NextResponse.json({
     code: 0,
     msg: "ok",
-    data: { forwarded: true, method: body.method, sessionId: ws.steelSessionId, cdpServicePort: Number(process.env.CDP_SERVICE_PORT || 9222) },
+    data: { forwarded: true, method: body.method, sessionId: ws.browserSessionId, cdpServicePort: Number(process.env.CDP_SERVICE_PORT || 9222) },
     traceId,
   })
 }

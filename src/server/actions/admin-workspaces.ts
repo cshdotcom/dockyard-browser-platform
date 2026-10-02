@@ -1,7 +1,7 @@
 "use server"
 
 // 工作区管控（管理员强制操作核心页）：停止/重启/回收/物理删除/断开VNC/改TTL/资源转移 + 全量批量
-// 全部真实调用 Steel/NoVNC 外部适配器；审计记录 ownerUserId + createdByUserId
+// 全部真实调用自研会话引擎/NoVNC 适配器；审计记录 ownerUserId + createdByUserId
 
 import { actionHandler, type ActionResult } from "@/lib/api"
 import { zodValidate, zId, zPrecision, zUsername } from "@/lib/validators"
@@ -13,7 +13,7 @@ import { raiseAlert } from "@/lib/alerts"
 import { moveToRecycle } from "@/lib/recycle"
 import { encrypt } from "@/lib/crypto"
 import { trackBehavior } from "@/lib/risk"
-import { createSession, destroySession } from "@/lib/external/steel"
+import { createSession, destroySession } from "@/lib/external/browser-session"
 import { createNovncSession, destroyNovncSession, disconnectNovncClients } from "@/lib/external/novnc"
 
 type Workspace = {
@@ -25,10 +25,10 @@ type Workspace = {
   userId: string
   createdByUserId: string | null
   proxyNodeId: string | null
-  steelNodeId: string | null
+  browserNodeId: string | null
   templateId: string | null
   profileSnapshotId: string | null
-  steelSessionId: string | null
+  browserSessionId: string | null
   novncSessionId: string | null
   ttlMinutes: number
   idleTimeoutMinutes: number
@@ -62,9 +62,9 @@ async function buildProxyUrl(proxyNodeId: string | null): Promise<string | undef
 // 销毁底层会话（停止/删除/重启前置）
 async function destroyUnderlying(ws: Workspace): Promise<string[]> {
   const destroyed: string[] = []
-  if (ws.mode === "cdp_light" && ws.steelSessionId) {
-    await destroySession(ws.steelSessionId)
-    destroyed.push(`steel:${ws.steelSessionId}`)
+  if (ws.mode === "cdp_light" && ws.browserSessionId) {
+    await destroySession(ws.browserSessionId)
+    destroyed.push(`browser:${ws.browserSessionId}`)
   }
   if (ws.novncSessionId) {
     await destroyNovncSession(ws.novncSessionId)
@@ -85,7 +85,7 @@ export async function forceStopWorkspaceAction(input: unknown): Promise<ActionRe
     const runtimeDelta = ws.startedAt ? Math.max(0, Math.floor((Date.now() - ws.startedAt.getTime()) / 1000)) : 0
     const updated = await db.browserWorkspace.update({
       where: { id },
-      data: { status: "STOPPED", freezeReason: null, steelSessionId: null, cdpUrl: null, novncSessionId: null, novncConnCount: 0, startedAt: null, runtimeAccumSec: { increment: runtimeDelta } },
+      data: { status: "STOPPED", freezeReason: null, browserSessionId: null, cdpUrl: null, novncSessionId: null, novncConnCount: 0, startedAt: null, runtimeAccumSec: { increment: runtimeDelta } },
     })
     await writeAudit({
       operatorUserId: ctx.userId,
@@ -124,7 +124,7 @@ async function coreRestart(ctx: AuthContext, ws: Workspace): Promise<void> {
     const session = await createSession({ proxyUrl, ttlMinutes: ttl })
     await db.browserWorkspace.update({
       where: { id: ws.id },
-      data: { status: "RUNNING", steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, freezeReason: null, crashCategory: null, startedAt: new Date() },
+      data: { status: "RUNNING", browserSessionId: session.sessionId, cdpUrl: session.cdpUrl, freezeReason: null, crashCategory: null, startedAt: new Date() },
     })
     await writeAudit({
       operatorUserId: ctx.userId,
@@ -136,8 +136,8 @@ async function coreRestart(ctx: AuthContext, ws: Workspace): Promise<void> {
       ownerUserId: ws.userId,
       createdByUserId: ws.createdByUserId,
       severity: "WARN",
-      before: { status: ws.status, steelSessionId: ws.steelSessionId },
-      after: { status: "RUNNING", steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, proxyUrl: proxyUrl || null, profileSnapshotId: ws.profileSnapshotId, templateId: ws.templateId, simulated: session.simulated },
+      before: { status: ws.status, browserSessionId: ws.browserSessionId },
+      after: { status: "RUNNING", browserSessionId: session.sessionId, cdpUrl: session.cdpUrl, proxyUrl: proxyUrl || null, profileSnapshotId: ws.profileSnapshotId, templateId: ws.templateId, simulated: session.simulated },
     })
   } else {
     const session = await createNovncSession({ proxyUrl, ttlMinutes: ttl })
@@ -205,7 +205,7 @@ export async function forceRecycleWorkspaceAction(input: unknown): Promise<Actio
     const { id } = zodValidate(z.object({ id: zId }), input)
     const ws = await getWorkspace(id)
     const runtimeDelta = ws.startedAt ? Math.max(0, Math.floor((Date.now() - ws.startedAt.getTime()) / 1000)) : 0
-    await db.browserWorkspace.update({ where: { id }, data: { deletedAt: new Date(), status: "STOPPED", steelSessionId: null, cdpUrl: null, novncSessionId: null, startedAt: null, runtimeAccumSec: { increment: runtimeDelta } } })
+    await db.browserWorkspace.update({ where: { id }, data: { deletedAt: new Date(), status: "STOPPED", browserSessionId: null, cdpUrl: null, novncSessionId: null, startedAt: null, runtimeAccumSec: { increment: runtimeDelta } } })
     await moveToRecycle({
       resourceType: "WORKSPACE",
       resourceId: ws.id,
@@ -231,12 +231,12 @@ export async function forcePurgeWorkspaceAction(input: unknown): Promise<ActionR
     // 回收站中的工作区也允许物理清除（含软删记录）
     const ws = await db.browserWorkspace.findUnique({ where: { id } })
     if (!ws) throw new Error("工作区不存在")
-    // 前置检查：同步销毁关联 VNC / Steel 会话（尽力而为，失败不阻断库内清理）
+    // 前置检查：同步销毁关联 VNC / 浏览器会话（尽力而为，失败不阻断库内清理）
     const destroyed: string[] = []
-    if (ws.steelSessionId) {
+    if (ws.browserSessionId) {
       try {
-        await destroySession(ws.steelSessionId)
-        destroyed.push(`steel:${ws.steelSessionId}`)
+        await destroySession(ws.browserSessionId)
+        destroyed.push(`browser:${ws.browserSessionId}`)
       } catch { /* 会话可能已不存在 */ }
     }
     if (ws.novncSessionId) {

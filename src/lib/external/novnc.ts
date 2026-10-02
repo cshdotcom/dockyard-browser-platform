@@ -77,6 +77,12 @@ export interface NovncProvisionParams {
   domainPolicy?: DomainPolicy | null // 生效域名黑白名单（作用域合并后），同层下发
   endpointPolicy?: EndpointPolicy | null // 生效端点级精确限制（host:port），同层下发
   filePolicy?: import("../file-policy").FilePolicy | null // 生效文件访问限制（四层合并：单沙箱>用户>组>全局）
+  // r24-c/r24-d/r24-e：每沙箱输入法偏好、剪贴板策略与沙箱专属 Linux 用户身份（内嵌形态生效）
+  imeEngine?: string | null // 偏好输入法引擎（fcitx5，如 pinyin）
+  kbLayout?: string | null // 偏好键盘布局（xkb，如 us/cn）
+  clipboardEnabled?: boolean // VNC 侧 X 剪贴板透传开关（false → x11vnc -nosel -noclipboard）
+  workspaceUuid?: string | null // 工作区 UUID（沙箱专属 Linux 用户 dyu-<uuid8>-<uname6> 命名）
+  ownerUsername?: string | null // 所有者用户名（同上，参与命名）
 }
 
 export async function createNovncSession(params: NovncProvisionParams): Promise<NovncSession> {
@@ -141,6 +147,11 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       memLimitMb: params.memLimitMb,
       pidsLimit: 256,
       policyFile,
+      imeEngine: params.imeEngine || null,
+      kbLayout: params.kbLayout || null,
+      clipboardEnabled: params.clipboardEnabled !== false,
+      workspaceUuid: params.workspaceUuid || null,
+      ownerUsername: params.ownerUsername || null,
     })
     return {
       novncSessionId: sb.id,

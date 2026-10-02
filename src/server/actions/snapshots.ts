@@ -1,7 +1,7 @@
 "use server"
 
 // 浏览器配置快照（用户侧）：从运行中的 CDP 工作区导出 profile
-// 创建（Steel exportProfile → fileMeta + BrowserProfileSnapshot）/ 删除 / 设置过期时间 / 重命名
+// 创建（浏览器 Profile 打包导出 → fileMeta + BrowserProfileSnapshot）/ 删除 / 设置过期时间 / 重命名
 // 权限锁：blockDeleteResource / blockModifyResourceExpiry
 
 import { z } from "zod"
@@ -12,7 +12,7 @@ import { writeAudit } from "@/lib/audit"
 import { zodValidate, zId } from "@/lib/validators"
 import { moveToRecycle } from "@/lib/recycle"
 import { trackBehavior } from "@/lib/risk"
-import { exportProfile } from "@/lib/external/steel"
+import { exportProfile } from "@/lib/external/browser-session"
 import { bizError, ErrorCode } from "@/lib/errors"
 
 // 归属校验：仅快照所有者可操作（共享快照只允许查看）
@@ -43,11 +43,11 @@ export async function createSnapshotAction(input: unknown): Promise<ActionResult
     if (ws.status !== "RUNNING") {
       throw bizError(ErrorCode.RESOURCE_IN_USE, `工作区当前状态为 ${ws.status}，仅运行中可创建快照`)
     }
-    if (!ws.steelSessionId) throw bizError(ErrorCode.RESOURCE_IN_USE, "工作区缺少 Steel 会话标识，无法导出")
+    if (!ws.browserSessionId) throw bizError(ErrorCode.RESOURCE_IN_USE, "工作区缺少 浏览器会话标识，无法导出")
 
-    // 调用 Steel 导出 profile → archiveKey
-    const exported = await exportProfile(ws.steelSessionId)
-    if (!exported) throw bizError(ErrorCode.EXTERNAL_SERVICE, "Steel 导出接口调用失败，请稍后重试")
+    // 打包导出浏览器 Profile → archiveKey
+    const exported = await exportProfile(ws.browserSessionId)
+    if (!exported) throw bizError(ErrorCode.EXTERNAL_SERVICE, "浏览器 Profile 导出失败，请稍后重试")
 
     // 模拟导出时使用估算大小，真实导出按归档实际占用统计入口在文件模块
     const sizeBytes = exported.simulated ? 524288 : 0

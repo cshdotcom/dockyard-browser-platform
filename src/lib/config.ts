@@ -55,6 +55,7 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "workspace.cdpRateLimitPerMin": { value: 600, category: "GENERAL", type: "number", description: "单工作区CDP指令每分钟上限" },
   "workspace.createRateLimitPerMin": { value: 10, category: "GENERAL", type: "number", description: "单用户每分钟创建工作区上限" },
   "workspace.clipboardGlobal": { value: true, category: "GENERAL", type: "boolean", description: "NoVNC双向剪贴板全局开关" },
+  "workspace.clipboardVncSync": { value: true, category: "GENERAL", type: "boolean", description: "VNC 通道 X 剪贴板透传开关（false=该沙箱 x11vnc 以 -nosel -noclipboard 启动，X 剪贴板不向 VNC 端透传；跨沙箱本就独立 X 显示天然隔离）" },
   "workspace.clipboardMaxChars": { value: 5000, category: "GENERAL", type: "number", description: "剪贴板最大字符数（防卡死）" },
   "workspace.vncDefaultMode": { value: "auto", category: "GENERAL", type: "string", description: "VNC默认输入模式：auto/mouse/touch" },
   "workspace.vncForceMode": { value: "", category: "GENERAL", type: "string", description: "VNC强制输入模式（空=不强制）" },
@@ -132,6 +133,9 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "mcp.perKeyPerMinute": { value: 300, category: "MCP", type: "number", description: "单Key每分钟上限" },
   "mcp.perKeyPerHour": { value: 5000, category: "MCP", type: "number", description: "单Key每小时上限" },
   "mcp.dangerEndpointEnabled": { value: false, category: "MCP", type: "boolean", description: "高危物理删除接口开关" },
+  // —— r24-a：自定义任务执行体安全开关 ——
+  "tasks.allowShellExec": { value: true, category: "TASKS", type: "boolean", description: "自定义任务 Shell 脚本执行体总开关（false=保存仍可，但执行时一律拒绝；危险黑名单不受此开关影响恒生效）" },
+  "tasks.webhookAllowPrivate": { value: false, category: "TASKS", type: "boolean", description: "Webhook 任务允许内网/私网目标（默认拦截防 SSRF；需调用内网服务时由超管开启）" },
   "proxy.healthCheckIntervalSec": { value: 60, category: "NETWORK", type: "number", description: "代理健康探测间隔（秒）" },
   "proxy.probeTimeoutMs": { value: 5000, category: "NETWORK", type: "number", description: "代理探测超时（ms）" },
   "env.overrideDbConfig": { value: false, category: "GENERAL", type: "boolean", description: "环境变量覆盖数据库配置开关" },

@@ -150,25 +150,30 @@ export async function updateTaskAction(
 // r23：自定时任务（自定义任务）CRUD + 批量操作 + 日志清理
 // ============================================================
 
-import { TASKS } from "@/server/tasks/engine"
+import { TASKS, customExecMeta } from "@/server/tasks/engine"
+import { validateCustomExecParams } from "@/server/tasks/custom-exec"
 import { parseCron, nextCronRun, describeCron } from "@/lib/cron-next"
 
-// ---- 4. 可用任务类型清单（自定义任务创建表单用） ----
-export async function listCustomTaskTypesAction(): Promise<ActionResult<{ items: { code: string; description: string }[] }>> {
+// ---- 4. 可用任务类型清单（自定义任务创建表单用；r24-a：参数化类型标记 paramKind）----
+export async function listCustomTaskTypesAction(): Promise<ActionResult<{ items: { code: string; description: string; paramKind: "shell" | "chain" | "webhook" | null }[] }>> {
   return actionHandler(async () => {
     await requireAdmin()
     const nameMap: Record<string, string> = {}
     const rows = await db.scheduleTask.findMany({ where: { isCustom: false }, select: { code: true, name: true } })
     for (const r of rows) nameMap[r.code] = r.name
-    const items = Object.keys(TASKS).map((code) => ({
-      code,
-      description: nameMap[code] || code,
-    }))
+    const items = Object.keys(TASKS).map((code) => {
+      const meta = customExecMeta(code)
+      return {
+        code,
+        description: meta ? `${meta.name} · ${meta.description}` : (nameMap[code] || code),
+        paramKind: meta ? (meta.kind as "shell" | "chain" | "webhook") : null,
+      }
+    })
     return { items }
   })
 }
 
-// ---- 5. 创建自定义任务 ----
+// ---- 5. 创建自定义任务（r24-a：params 携带参数化执行体内容，存 paramsJson）----
 const createCustomSchema = z.object({
   name: z.string().min(2, "任务名称至少2个字符").max(64),
   taskType: z.string().min(1).max(64),
@@ -176,6 +181,7 @@ const createCustomSchema = z.object({
   timeoutSec: zPrecision("超时时间（秒）", 5, 86400),
   description: z.string().max(300).optional(),
   enabled: z.boolean().optional().default(true),
+  params: z.record(z.string(), z.unknown()).optional(), // r24-a：参数化执行体（shell/chain/webhook）执行内容
 })
 
 export async function createCustomTaskAction(input: unknown): Promise<ActionResult<{ code: string; name: string; cronExpr: string; nextRunAt: string | null; describe: string }>> {
@@ -188,6 +194,14 @@ export async function createCustomTaskAction(input: unknown): Promise<ActionResu
     if (!cron.ok) throw bizError(ErrorCode.PARAM_ERROR, cron.error || "cron 表达式非法")
     const next = nextCronRun(p.cronExpr)
     if (!next) throw bizError(ErrorCode.PARAM_ERROR, "cron 表达式无法计算出下次运行时间（可能永不触发）")
+
+    // r24-a：参数化执行体内容校验（shell 黑名单/chain 步骤/webhook SSRF 参数）
+    let paramsJson: string | null = null
+    if (p.params !== undefined) {
+      const v = validateCustomExecParams(p.taskType, p.params, ENV.storageLocalPath)
+      if (!v.ok) throw bizError(ErrorCode.PARAM_ERROR, `执行内容校验失败：${v.error}`)
+      if (v.kind) paramsJson = JSON.stringify(p.params)
+    }
 
     // 同名检查
     const dup = await db.scheduleTask.findFirst({ where: { name: p.name } })
@@ -203,6 +217,7 @@ export async function createCustomTaskAction(input: unknown): Promise<ActionResu
         timeoutSec: Math.round(p.timeoutSec),
         isCustom: true,
         taskType: p.taskType,
+        paramsJson,
         description: p.description ?? null,
         createdByUserId: ctx.userId,
         nextRunAt: next,
@@ -215,14 +230,14 @@ export async function createCustomTaskAction(input: unknown): Promise<ActionResu
       resourceType: "TASK",
       resourceId: code,
       resourceName: p.name,
-      after: { taskType: p.taskType, cronExpr: p.cronExpr, timeoutSec: p.timeoutSec, enabled: p.enabled, description: p.description ?? null },
+      after: { taskType: p.taskType, cronExpr: p.cronExpr, timeoutSec: p.timeoutSec, enabled: p.enabled, description: p.description ?? null, paramsJson: paramsJson ? `${paramsJson.slice(0, 300)}${paramsJson.length > 300 ? "…" : ""}` : null },
       severity: "INFO",
     })
     return { code, name: p.name, cronExpr: p.cronExpr, nextRunAt: next.toISOString(), describe: describeCron(p.cronExpr) }
   })
 }
 
-// ---- 6. 编辑自定义任务（名称/类型/cron/超时/描述/启停） ----
+// ---- 6. 编辑自定义任务（名称/类型/cron/超时/描述/启停/执行内容） ----
 const updateCustomSchema = z.object({
   code: z.string().min(1).max(64),
   name: z.string().min(2).max(64).optional(),
@@ -231,6 +246,7 @@ const updateCustomSchema = z.object({
   timeoutSec: zPrecision("超时时间（秒）", 5, 86400).optional(),
   description: z.string().max(300).nullable().optional(),
   enabled: z.boolean().optional(),
+  params: z.record(z.string(), z.unknown()).optional(), // r24-a：更新参数化执行体内容（undefined=不改）
 })
 
 export async function updateCustomTaskAction(input: unknown): Promise<ActionResult<{ code: string; nextRunAt: string | null; describe: string }>> {
@@ -251,6 +267,16 @@ export async function updateCustomTaskAction(input: unknown): Promise<ActionResu
     if (p.taskType) {
       if (!TASKS[p.taskType]) throw bizError(ErrorCode.PARAM_ERROR, `任务类型不存在：${p.taskType}`)
       data.taskType = p.taskType
+    }
+    // r24-a：执行内容更新（类型切换或参数变更时校验）
+    const effectiveType = (p.taskType || task.taskType || "") as string
+    if (p.params !== undefined) {
+      const v = validateCustomExecParams(effectiveType, p.params, ENV.storageLocalPath)
+      if (!v.ok) throw bizError(ErrorCode.PARAM_ERROR, `执行内容校验失败：${v.error}`)
+      data.paramsJson = v.kind ? JSON.stringify(p.params) : null
+    } else if (p.taskType && p.taskType !== task.taskType) {
+      // 切换到非参数化类型：清空旧参数
+      data.paramsJson = null
     }
     if (p.cronExpr) {
       const cron = parseCron(p.cronExpr)

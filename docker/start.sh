@@ -64,7 +64,17 @@ if [ ! -d "$APP_DIR/.next" ]; then
   exit 1
 fi
 mkdir -p /app/db /app/storage/uploads /app/storage/backups /app/storage/snapshots \
-  /app/storage/sandboxes /app/storage/homes /app/storage/netpolicy
+  /app/storage/sandboxes /app/storage/homes /app/storage/netpolicy \
+  /app/storage/profiles /app/storage/system
+# r24-e：沙箱用户 UID 台账（storage/system/sandbox-users.json，随卷持久化）
+# 台账存在 → 容器重建后由平台按原 UID 复活沙箱专用用户（属主零冲突）；
+# 台账不存在 → 全新部署（旧卷无沙箱账户，首次创建沙箱时自动建立台账）
+if [ -f /app/storage/system/sandbox-users.json ]; then
+  log "沙箱用户 UID 台账已就位（容器重建场景：沙箱启动时按台账原 UID 复活账户）"
+  chmod 600 /app/storage/system/sandbox-users.json 2>/dev/null || true
+else
+  log "沙箱用户 UID 台账不存在（全新部署；首个沙箱创建时自动建立）"
+fi
 touch /app/storage/.write-test 2>/dev/null || { log "严重错误：存储目录不可写"; exit 1; }
 rm -f /app/storage/.write-test
 

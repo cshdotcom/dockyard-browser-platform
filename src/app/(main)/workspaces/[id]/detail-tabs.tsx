@@ -35,7 +35,7 @@ export interface WorkspaceDetailData {
   tags: string[]; ttlMinutes: number; idleTimeoutMinutes: number
   cdpCallCount: number; cdpBlockedCount: number
   novncConnCount: number; novncFps: number; novncActiveMin: number
-  cdpUrl: string | null; steelSessionId: string | null; novncSessionId: string | null
+  cdpUrl: string | null; browserSessionId: string | null; novncSessionId: string | null
   containerRef: string | null; hardening: Record<string, unknown> | null
   createdAt: string; updatedAt: string
   proxyName: string | null; proxyType: string | null; proxyStatus: string | null
@@ -584,8 +584,8 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
             </div>
           )}
           <div className="flex items-center justify-between rounded-md border p-2.5">
-            <span className="text-muted-foreground">Steel 会话ID</span>
-            <code className="text-xs font-mono">{workspace.steelSessionId ?? "-"}</code>
+            <span className="text-muted-foreground">浏览器会话ID</span>
+            <code className="text-xs font-mono">{workspace.browserSessionId ?? "-"}</code>
           </div>
           <div className="flex items-center justify-between rounded-md border p-2.5">
             <span className="text-muted-foreground">内部 CDP 端点</span>
@@ -856,7 +856,7 @@ function ScriptPanel({ workspace, scripts, runLogs, canOperate }: { workspace: W
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">执行脚本</CardTitle>
-          <CardDescription>JS 脚本经网关沙箱校验后下发 Steel 会话自动执行；支持绑定域名执行</CardDescription>
+          <CardDescription>JS 脚本经网关沙箱校验后下发浏览器会话自动执行；支持绑定域名执行</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <Select value={scriptId} onValueChange={setScriptId}>

@@ -42,6 +42,7 @@ export interface TaskRow {
   name: string
   isCustom: boolean
   taskType: string | null
+  paramsJson: string | null // r24-a：参数化执行体内容（shell/chain/webhook）
   description: string | null
   createdByUsername: string | null
   cronExpr: string

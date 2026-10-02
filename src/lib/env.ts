@@ -15,9 +15,6 @@ export const ENV = {
   get dockerApiTimeout() {
     return Number(process.env.DOCKER_API_TIMEOUT || 10000)
   },
-  get steelUrl() {
-    return process.env.STEEL_BROWSER_URL || "" // 为空时进入模拟模式
-  },
   get novncPoolUrl() {
     return process.env.NOVNC_POOL_URL || ""
   },
@@ -111,11 +108,12 @@ export const ENV = {
 // 外部服务是否可用（不可用时适配器自动降级为模拟模式，业务链路仍完整可跑）
 export const externalAvailable = {
   get docker() { return !!ENV.dockerApiUrl },
-  get steel() { return !!ENV.steelUrl },
   get novnc() { return !!ENV.novncPoolUrl },
   get smtp() { return !!ENV.smtpHost },
-  // 外部浏览器分离部署形态（EXTERNAL_BROWSER_URL 填写即启用）
+  // 外部浏览器分离部署形态（EXTERNAL_BROWSER_URL 填写即启用）——自研会话引擎唯一外部形态
   get external() { return !!ENV.externalBrowserUrl },
+  // browser 为语义别名（cdp-control 等调用方使用；等价 external）
+  get browser() { return !!ENV.externalBrowserUrl },
 }
 
 // ---- [22-d] 跨域请求源白名单（逗号分隔；与 proxy.ts / /api/me/cross-domain 共用）----

@@ -31,6 +31,7 @@ export interface TaskLogRow {
   itemsProcessed: number
   summary: string | null
   errorStack: string | null
+  output: string | null // r24-a：参数化执行体完整输出（outputJson）
 }
 
 interface TaskLogsTableProps {
@@ -264,6 +265,16 @@ export function TaskLogsTable({ rows, total, page, pageSize, keyword, sortField,
               <div className="rounded-md bg-muted p-3 text-sm whitespace-pre-wrap break-all">
                 {detail?.summary || "（无摘要）"}
               </div>
+            </div>
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">执行输出（脚本 stdout / 响应体）</p>
+              {detail?.output ? (
+                <ScrollArea className="h-56 rounded-md border bg-muted p-3">
+                  <pre className="text-xs font-mono whitespace-pre-wrap break-all">{detail.output}</pre>
+                </ScrollArea>
+              ) : (
+                <div className="rounded-md border bg-muted/50 p-3 text-xs text-muted-foreground">（无执行输出；仅参数化执行体（Shell/任务链/Webhook）产生完整输出）</div>
+              )}
             </div>
             <div className="space-y-1">
               <p className="text-xs text-muted-foreground">错误堆栈（errorStack）</p>

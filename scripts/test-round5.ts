@@ -195,9 +195,9 @@ async function main() {
   const catalog = listBrowserActions()
   ok("目录输出一致", catalog.length === BROWSER_ACTIONS.length)
 
-  // 建一个 cdp_light 工作区（demo 名下）——直接走 steel 库 + db（脚本无请求作用域）
-  const { createSession } = await import("../src/lib/external/steel")
-  const steelSession = await createSession({ ttlMinutes: 30 })
+  // 建一个 cdp_light 工作区（demo 名下）——直接走 browserNode 库 + db（脚本无请求作用域）
+  const { createSession } = await import("../src/lib/external/browser-session")
+  const browserSession = await createSession({ ttlMinutes: 30 })
   const wsRow = await db.browserWorkspace.create({
     data: {
       name: `smoke-browser-${Date.now().toString(36)}`,
@@ -207,14 +207,14 @@ async function main() {
       groupId: group.id,
       ttlMinutes: 30,
       idleTimeoutMinutes: 30,
-      steelSessionId: steelSession.sessionId,
-      cdpUrl: steelSession.cdpUrl,
-      steelNodeId: null,
+      browserSessionId: browserSession.sessionId,
+      cdpUrl: browserSession.cdpUrl,
+      browserNodeId: null,
       createdByUserId: demo.id,
     },
   })
   const wsId = wsRow.id
-  ok("工作区创建成功", !!wsId && !!steelSession.cdpUrl, `sim=${steelSession.simulated}`)
+  ok("工作区创建成功", !!wsId && !!browserSession.cdpUrl, `sim=${browserSession.simulated}`)
 
   const ctx = { userId: demo.id, username: demo.username, isAdmin: false, via: "MCP" as const }
 

@@ -9,7 +9,7 @@ import { writeAudit } from "@/lib/audit"
 import { raiseAlert } from "@/lib/alerts"
 import { trackBehavior } from "@/lib/risk"
 import { moveToRecycle, restoreFromRecycle, purgeFromRecycle } from "@/lib/recycle"
-import { createSession, destroySession } from "@/lib/external/steel"
+import { createSession, destroySession } from "@/lib/external/browser-session"
 import { createNovncSession, destroyNovncSession } from "@/lib/external/novnc"
 import { BROWSER_ACTIONS, executeBrowserAction } from "@/lib/external/cdp-control"
 
@@ -346,7 +346,7 @@ export const MCP_OPERATIONS: McpOpDef[] = [
 ]
 
 // ============================================================
-// 浏览器全量控制操作（browser.*）：Steel-Browser 全功能复制，单目标/批量多工作区
+// 浏览器全量控制操作（browser.*）：自研会话引擎 CDP 通道，单目标/批量多工作区
 // 与 OpenAPI REST 网关共用同一执行层（src/lib/external/cdp-control.ts）
 // ============================================================
 for (const def of BROWSER_ACTIONS) {

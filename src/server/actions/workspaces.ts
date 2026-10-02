@@ -13,7 +13,7 @@ import { idempotencyCheck } from "@/lib/idempotency"
 import { trackBehavior, detectAbnormalBehavior } from "@/lib/risk"
 import { raiseAlert } from "@/lib/alerts"
 import { zodValidate, zPrecision } from "@/lib/validators"
-import { createSession, destroySession } from "@/lib/external/steel"
+import { createSession, destroySession } from "@/lib/external/browser-session"
 import { createNovncSession, destroyNovncSession, refreshNovncSecret, novncDialTarget, restartNovncBrowser, type NovncSession } from "@/lib/external/novnc"
 import { browserHardeningSummary, restartBrowserProcessInContainer, type BrowserHardeningInfo } from "@/lib/external/docker"
 import { resolveNetworkPolicy, type NetworkPolicy } from "@/lib/network-policy"
@@ -28,7 +28,7 @@ import { resolveIdlePolicyForUser, isAdminRole, fmtIdleBrief } from "@/lib/idle-
 // ============================================================
 // 浏览器工作区业务 Server Actions
 // 数据流：前端表单 → Server Action（权限+配额+幂等+风控校验）
-//   → Steel-Browser/NoVNC 外部API → Prisma 落库 → 审计 → 返回
+//   → 自研会话引擎/NoVNC 适配层 → Prisma 落库 → 审计 → 返回
 // ============================================================
 
 // 网络策略快照序列化（落库展示 / MCP·OpenAPI 归属字段）
@@ -87,9 +87,9 @@ async function checkProxyAccess(userId: string, proxyNodeId: string) {
   }
 }
 
-// Steel 节点调度：负载感知 + 标签 + 灰度分组隔离
-async function pickSteelNode(labels?: string[]): Promise<string | null> {
-  const nodes = await db.steelNode.findMany({
+// 浏览器节点调度：负载感知 + 标签 + 灰度分组隔离
+async function pickBrowserNode(labels?: string[]): Promise<string | null> {
+  const nodes = await db.browserNode.findMany({
     where: { enabled: true, deletedAt: null, status: "ONLINE", grayGroup: "PROD" },
     orderBy: { loadScore: "asc" },
   })
@@ -171,8 +171,8 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
     if (p.mode === "cdp_light") {
       // ---- CDP 轻量会话 ----
       const proxyInfo = await buildProxyUrl(p.proxyNodeId)
-      const steelNodeId = await pickSteelNode()
-      // 生效网络访问策略快照（Steel 外部集群形态：策略随规格下发并落库；自托管形态由容器层执行）
+      const browserNodeId = await pickBrowserNode()
+      // 生效网络访问策略快照（外部分离部署形态：策略随规格下发并落库；自托管形态由容器层执行）
       const { network: netPolicy, domain: domPolicy, endpoint: endPolicy, file: filePolicy } = await resolveAccessPolicies(ctx.userId)
       const session = await createSession({
         proxyUrl: proxyInfo.proxyUrl,
@@ -193,11 +193,11 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           groupId: (await userGroupIds(ctx.userId))[0] ?? null,
           proxyNodeId: p.proxyNodeId || null,
           singboxInstanceId: proxyInfo.singboxInstanceId || null,
-          steelNodeId,
+          browserNodeId,
           templateId: p.templateId || null,
           profileSnapshotId: p.profileSnapshotId || null,
           tags,
-          steelSessionId: session.sessionId,
+          browserSessionId: session.sessionId,
           cdpUrl: session.cdpUrl,
           networkPolicyJson: netPolicyJson(netPolicy, domPolicy, endPolicy, filePolicy),
           ttlMinutes: p.ttlMinutes || (await getConfigNumber("workspace.defaultTtlMinutes", 0)),
@@ -212,7 +212,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_CREATE",
         resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
         ownerUserId: ctx.userId, createdByUserId: ctx.userId,
-        after: { mode: "cdp_light", steelSessionId: session.sessionId, proxy: proxyInfo.proxyNodeName, simulated: session.simulated, idleTimeoutMinutes: idleMinutes, ...(idleIgnoredByPolicy ? { idlePolicy: { lockedBy: idlePolicy.lockSource, enforced: fmtIdleBrief(idleMinutes), submittedIgnored: p.idleTimeoutMinutes } } : {}) },
+        after: { mode: "cdp_light", browserSessionId: session.sessionId, proxy: proxyInfo.proxyNodeName, simulated: session.simulated, idleTimeoutMinutes: idleMinutes, ...(idleIgnoredByPolicy ? { idlePolicy: { lockedBy: idlePolicy.lockSource, enforced: fmtIdleBrief(idleMinutes), submittedIgnored: p.idleTimeoutMinutes } } : {}) },
       })
       return { id: ws.id, uuid: ws.uuid, cdpUrl: session.cdpUrl, mode: "cdp_light" }
     } else {
@@ -222,6 +222,8 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
       const { network: netPolicy, domain: domPolicy, endpoint: endPolicy, file: filePolicy } = await resolveAccessPolicies(ctx.userId)
       // 隔离Profile键：绑定“用户对应的配置的浏览器”，闪退/重建后自动还原同一环境
       const profileKey = p.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
+      // r24-e：预生成工作区 UUID（沙箱专属 Linux 用户命名 + 库内主键同值，创建前即可定身份）
+      const wsUuid = crypto.randomUUID()
       const novnc = await createNovncSession({
         proxyUrl: proxyInfo.proxyUrl,
         resolution: p.resolution,
@@ -234,6 +236,13 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         startUrl: (templateConfig.startUrl as string) || undefined,
         labels: { "dockyard.owner": ctx.userId, "dockyard.profile-key": profileKey },
         networkPolicy: netPolicy,
+        // r24-c/d/e：偏好输入法/布局随会话应用；VNC X 剪贴板透传受全局开关管控；
+        // 沙箱专属 Linux 用户（dyu-<uuid8>-<uname6>）——创建流程预生成 wsUuid 与 ws.create 同值
+        imeEngine: (templateConfig.imeEngine as string) || null,
+        kbLayout: (templateConfig.kbLayout as string) || null,
+        clipboardEnabled: await getConfigBool("workspace.clipboardVncSync", true),
+        workspaceUuid: wsUuid,
+        ownerUsername: ctx.username,
         domainPolicy: domPolicy,
         endpointPolicy: endPolicy,
         filePolicy,
@@ -249,6 +258,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           name: p.name,
           mode: "novnc_full",
           status: "RUNNING",
+          uuid: wsUuid, // r24-e：与沙箱专属 Linux 用户命名同源（创建前已传给会话引擎）
           startedAt: new Date(),
           lastActiveAt: new Date(),
           userId: ctx.userId,
@@ -293,13 +303,13 @@ export async function stopWorkspaceAction(input: unknown): Promise<ActionResult>
     if (!ws) throw new Error("工作区不存在")
     if (ctx.userId !== ws.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作该工作区")
 
-    if (ws.mode === "cdp_light" && ws.steelSessionId) await destroySession(ws.steelSessionId).catch(() => {})
+    if (ws.mode === "cdp_light" && ws.browserSessionId) await destroySession(ws.browserSessionId).catch(() => {})
     if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId, ws.containerRef).catch(() => {})
     if (ws.proxyNodeId) await db.proxyNode.update({ where: { id: ws.proxyNodeId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
     if (ws.singboxInstanceId) await db.singboxInstance.update({ where: { id: ws.singboxInstanceId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
 
     const runtimeDelta = ws.startedAt ? Math.max(0, Math.floor((Date.now() - ws.startedAt.getTime()) / 1000)) : 0
-    await db.browserWorkspace.update({ where: { id }, data: { status: "STOPPED", steelSessionId: null, cdpUrl: null, novncSessionId: null, startedAt: null, runtimeAccumSec: { increment: runtimeDelta } } })
+    await db.browserWorkspace.update({ where: { id }, data: { status: "STOPPED", browserSessionId: null, cdpUrl: null, novncSessionId: null, startedAt: null, runtimeAccumSec: { increment: runtimeDelta } } })
     await trackBehavior(ctx.userId, "DELETE")
     await writeAudit({
       operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_STOP",
@@ -329,7 +339,7 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
         ttlMinutes: ws.ttlMinutes || undefined,
         profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
       })
-      await db.browserWorkspace.update({ where: { id }, data: { status: "RUNNING", steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, steelNodeId: await pickSteelNode(), startedAt: new Date() } })
+      await db.browserWorkspace.update({ where: { id }, data: { status: "RUNNING", browserSessionId: session.sessionId, cdpUrl: session.cdpUrl, browserNodeId: await pickBrowserNode(), startedAt: new Date() } })
     } else {
       const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
       const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
@@ -347,6 +357,12 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
         domainPolicy: domPolicy,
         endpointPolicy: endPolicy,
         filePolicy,
+        // r24-c/d/e：沙箱输入法/布局偏好随重建应用；剪贴板透传全局开关；沙箱专属用户身份
+        imeEngine: ws.imeEngine,
+        kbLayout: ws.kbLayout,
+        clipboardEnabled: await getConfigBool("workspace.clipboardVncSync", true),
+        workspaceUuid: ws.uuid,
+        ownerUsername: (await db.user.findUnique({ where: { id: ws.userId }, select: { username: true } }))?.username || "u",
       })
       await db.browserWorkspace.update({
         where: { id },
@@ -382,7 +398,7 @@ export async function deleteWorkspaceAction(input: unknown): Promise<ActionResul
     if (ctx.userId !== ws.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作该工作区")
 
     if (ws.status === "RUNNING" || ws.status === "CREATING") {
-      if (ws.mode === "cdp_light" && ws.steelSessionId) await destroySession(ws.steelSessionId).catch(() => {})
+      if (ws.mode === "cdp_light" && ws.browserSessionId) await destroySession(ws.browserSessionId).catch(() => {})
       if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId, ws.containerRef).catch(() => {})
     }
     if (ws.proxyNodeId) await db.proxyNode.update({ where: { id: ws.proxyNodeId }, data: { currentSessions: { decrement: 1 } } }).catch(() => {})
@@ -413,7 +429,7 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
     const proxyInfo = await buildProxyUrl(proxyNodeId)
     // Chrome不支持热切代理：销毁旧会话 → 保留profile快照 → 新代理重建
     if (ws.mode === "cdp_light") {
-      if (ws.steelSessionId) await destroySession(ws.steelSessionId).catch(() => {})
+      if (ws.browserSessionId) await destroySession(ws.browserSessionId).catch(() => {})
       const session = await createSession({
         proxyUrl: proxyInfo.proxyUrl,
         profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
@@ -421,7 +437,7 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
       })
       await db.browserWorkspace.update({
         where: { id },
-        data: { steelSessionId: session.sessionId, cdpUrl: session.cdpUrl, proxyNodeId: proxyNodeId || null, singboxInstanceId: proxyInfo.singboxInstanceId || null, status: "RUNNING", startedAt: new Date() },
+        data: { browserSessionId: session.sessionId, cdpUrl: session.cdpUrl, proxyNodeId: proxyNodeId || null, singboxInstanceId: proxyInfo.singboxInstanceId || null, status: "RUNNING", startedAt: new Date() },
       })
     } else {
       if (ws.novncSessionId) await destroyNovncSession(ws.novncSessionId, ws.containerRef).catch(() => {})
@@ -446,6 +462,12 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
         domainPolicy: switchedDomain,
         endpointPolicy: switchedEndpoint,
         filePolicy: switchedFile,
+        // r24-c/d/e：沙箱输入法/布局偏好随重建应用；剪贴板透传全局开关；沙箱专属用户身份
+        imeEngine: ws.imeEngine,
+        kbLayout: ws.kbLayout,
+        clipboardEnabled: await getConfigBool("workspace.clipboardVncSync", true),
+        workspaceUuid: ws.uuid,
+        ownerUsername: (await db.user.findUnique({ where: { id: ws.userId }, select: { username: true } }))?.username || "u",
       })
       await db.browserWorkspace.update({
         where: { id },
@@ -1020,7 +1042,7 @@ export async function runScriptAction(input: unknown): Promise<ActionResult<{ ru
     const forbidden = [/eval\s*\(/, /Function\s*\(/, /require\s*\(/, /process\./, /import\s*\(/]
     const hit = forbidden.find((re) => re.test(code))
     const log = await db.browserScriptRunLog.create({
-      data: { scriptId, workspaceId, status: hit ? "BLOCKED" : "SUCCESS", log: hit ? `脚本命中高危模式 ${hit} 被沙箱拦截` : `脚本经网关下发至 Steel 会话执行（${ws.steelSessionId}），绑定域名：${JSON.stringify(script.boundDomains)}`, finishedAt: new Date() },
+      data: { scriptId, workspaceId, status: hit ? "BLOCKED" : "SUCCESS", log: hit ? `脚本命中高危模式 ${hit} 被沙箱拦截` : `脚本经网关下发至浏览器会话执行（${ws.browserSessionId}），绑定域名：${JSON.stringify(script.boundDomains)}`, finishedAt: new Date() },
     })
     await writeAudit({
       operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "SCRIPT_RUN",

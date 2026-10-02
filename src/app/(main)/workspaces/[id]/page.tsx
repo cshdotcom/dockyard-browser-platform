@@ -56,7 +56,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
   const shareMap = new Map(shareTargets.map((u) => [u.id, u]))
 
   // 公网 CDP 网关端点（PUBLIC_BASE_URL 等环境变量配置后展示，内网穿透/域名部署场景）
-  // 外部工具（Puppeteer/Playwright/自定义脚本）应使用该端点，而非内部 ws://steel-internal 地址
+  // 外部工具（Puppeteer/Playwright/自定义脚本）应使用该端点，而非内部 ws://browser-internal 地址
   const publicCdpEndpoint = ENV.publicBaseUrl
     ? `${ENV.publicBaseUrl}/api/cdp/command`
     : ""
@@ -101,7 +101,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
         ttlMinutes: ws.ttlMinutes, idleTimeoutMinutes: ws.idleTimeoutMinutes,
         cdpCallCount: ws.cdpCallCount, cdpBlockedCount: ws.cdpBlockedCount,
         novncConnCount: ws.novncConnCount, novncFps: ws.novncFps, novncActiveMin: ws.novncActiveMin,
-        cdpUrl: ws.cdpUrl, steelSessionId: ws.steelSessionId, novncSessionId: ws.novncSessionId,
+        cdpUrl: ws.cdpUrl, browserSessionId: ws.browserSessionId, novncSessionId: ws.novncSessionId,
         containerRef: ws.containerRef,
         hardening: (ws.hardeningJson as Record<string, unknown> | null) ?? null,
         createdAt: fmtDate(ws.createdAt), updatedAt: fmtDate(ws.updatedAt),

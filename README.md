@@ -10,9 +10,9 @@
 
 企业内部**多租户浏览器工作区平台**：
 
-- 浏览器工作会话基于 **Steel-Browser** 提供 CDP 轻量会话与 **NoVNC** 重度人机交互会话（双模式）
+- 浏览器工作会话由**自研会话引擎**编排：单容器内嵌沙箱（每工作区独立进程树+独立 Linux 用户）提供 CDP 轻量会话，**NoVNC** 提供重度人机交互会话（双模式）
 - 会话支持**直连**或分配**内置 Sing-Box 代理实例**（配置经内存组装注入容器环境变量，不落盘）
-- 全部外部调用（Docker API / Steel-Browser / NoVNC 池）经 NextJS 网关中转，底层服务不暴露公网
+- 全部外部调用（Docker API / NoVNC 池）经 NextJS 网关中转，底层服务不暴露公网；浏览器会话引擎为平台自研，无第三方浏览器编排 API 依赖
 - 统一网关：单域名 + 单 WebSocket + 单 API 入口；APIKey 五重隔离（租户/资源/用户/客户端/设备）
 
 ## 二、技术栈（固定约束）
@@ -104,7 +104,7 @@
 ### MCP / OpenAPI 统一网关
 - 标准MCP协议（原生+JSON-RPC 2.0双风格）、tools/list
 - 批量任务体系：20+操作（批量创建工作区/批量启停销毁SingBox/批量用户管控/批量有效期/批量回收站/批量强制操作...）
-- **浏览器全量控制（browser.*，Steel-Browser 全功能复制，30 个动作）**：
+- **浏览器全量控制（browser.*，自研会话引擎 CDP 通道，30 个动作）**：
   - 页面：navigate / screenshot(PNG base64) / scrape(text·html·links) / evaluate(JS，awaitPromise) / get_url / dom_snapshot / wait_for
   - 输入：click(选择器或坐标) / type(选择器或焦点) / press_key(含修饰键位掩码) / scroll / hover
   - 标签：get_tabs / new_tab / close_tab / activate_tab；历史：back / forward / reload(忽略缓存)
@@ -175,7 +175,7 @@ docker run -d --name dockyard --network host \
 >
 > **公开域名配置（内网穿透 / 反向代理 / 域名部署）**：`PUBLIC_BASE_URL`（或 `APP_PUBLIC_URL` / `AUTH_PUBLIC_URL` / `AUTH_URL` / `NEXTAUTH_URL` 任一）设置为平台对外可达地址（如 `https://workspace.example.cn`）后：
 > - 登录回调/重定向固定使用该域名（NextAuth `trustHost` 已启用，兼容任意 Host 头反代）
-> - 工作区详情页展示**公网 CDP 网关端点**（`<域名>/api/cdp/command`）——外部工具（Puppeteer/Playwright/脚本）经此端点鉴权转发，无需触达内部网络；内部 `ws://steel-internal/...` 端点仅作运维参考
+> - 工作区详情页展示**公网 CDP 网关端点**（`<域名>/api/cdp/command`）——外部工具（Puppeteer/Playwright/脚本）经此端点鉴权转发，无需触达内部网络；内部 `ws://browser-internal/...` 端点仅作运维参考
 > - 未配置时自动使用请求 Host（网关同源转发场景无需任何配置）
 > ```bash
 > docker run -e PUBLIC_BASE_URL=https://workspace.example.cn ... ghcr.io/cshdotcom/dockyard-browser-platform
@@ -288,7 +288,7 @@ docker run -d --name dockyard --network host \
 |---|---|---|
 | DOCKER_API_URL | Docker Engine HTTP API 地址 | 本地模拟容器模式 |
 | BROWSER_IMAGE | 自托管硬隔离浏览器镜像 | GHCR 官方 dockyard-browser |
-| STEEL_BROWSER_URL | Steel-Browser API（仅内网） | 模拟会话模式 |
+
 | NOVNC_POOL_URL | NoVNC 池 API（仅内网） | 模拟桌面模式 |
 | **EXTERNAL_BROWSER_URL** | [22-d] 外部浏览器分离部署地址（docker/browser 镜像的 CDP 端点，如 `http://browser-host:9222`）；填写后所有会话挂接该自部署浏览器，未填写默认单容器内嵌 | 单容器内嵌（零外部依赖） |
 | EXTERNAL_BROWSER_CDP_PORT / EXTERNAL_BROWSER_VNC_PORT / EXTERNAL_BROWSER_VNC_HOST | 外部浏览器 CDP 端口（9222）/ RFB 端口（5900）/ RFB 目标主机覆盖（默认从 URL 推导，CDP 与 VNC 分置两台主机时使用） | 9222 / 5900 / URL 主机 |
@@ -306,6 +306,56 @@ docker run -d --name dockyard --network host \
 ```cron
 */5 * * * * curl -s -H "x-cron-secret: <CRON_SECRET>" http://127.0.0.1:3000/api/cron?task=all
 ```
+
+## 四B、单容器多用户沙箱架构与数据持久化（r24）
+
+### 部署形态：后台 root + 每沙箱独立 Ubuntu 用户
+
+一个容器 = 整个平台（后台与浏览器同容器）：
+
+- **后台（平台进程）以 root 运行**：NextJS 主服务、WS 枢纽、VNC 桥、定时调度器、入口网关；
+- **每个沙箱（工作区）一个专属 Linux 用户**：`dyu-<工作区UUID前8位>-<所有者用户名前6位>`（如 `dyu-cld9k2x4-zhangs`）。
+  浏览器进程树（Xvfb + Chromium + x11vnc + fcitx5 输入法守护）以 `setpriv --reuid` 降权到该用户运行：
+  - 同一平台用户的**不同沙箱 = 不同 Linux 账户** → Profile / 下载 / 家目录 `700` 权限互不可读（同容器内完全隔离）；
+  - **仅 root（管理后台）可访问全部目录**（root 无视 DAC，满足审计取证与文件管理器）；
+  - `prlimit --nproc` 进程数硬上限按 UID 生效（单沙箱资源面隔离）。
+
+### 数据持久化与挂载（零冲突方案）
+
+两个数据卷（`VOLUME ["/app/db", "/app/storage"]`）：
+
+| 挂载点 | 内容 | 持久性 |
+|---|---|---|
+| `/app/db` | SQLite 数据库（custom.db） | 全持久（业务删除前永不丢） |
+| `/app/storage/profiles/<userId>/<profileKey>` | 浏览器 Profile | 持久（回收站保留；销毁才物理删除） |
+| `/app/storage/sandboxes/emb-*` | 沙箱运行目录（state.json / 下载 / 日志） | 运行态（重启 re-adopt 收养） |
+| `/app/storage/homes/dyu-*` | 每沙箱用户家目录 | 持久（含 fcitx5 输入法配置） |
+| `/app/storage/netpolicy/` | 每沙箱 Chromium 托管策略文件 | 持久 |
+| `/app/storage/snapshots/` | Profile 快照归档（tar.gz） | 持久 |
+| `/app/storage/backups/` | 数据库备份 | 持久 |
+| `/app/storage/system/sandbox-users.json` | **沙箱用户 UID 台账** | 持久（安全关键） |
+
+**UID 台账机制（容器重建零冲突）**：容器重建时 `/etc/passwd` 重置但存储卷保留。每个沙箱专用用户的
+UID 在创建时写入台账（原子写 + 0600）；容器重启后平台按台账**原 UID 复活账户**（`useradd -u <原UID>`），
+存储卷上既有 Profile/家目录的数字属主与复活账户完全一致 → **零所有权冲突、零 chown 开销**。
+台账意外丢失时以 `/etc/passwd` 现状为权威反写收养；沙箱每次启动的 `chown` 兜底修正属主漂移。
+
+```
+docker run -d --name dockyard \
+  -v dockyard-db:/app/db -v dockyard-storage:/app/storage \
+  -p 3000:3000 -p 9222:9222 ghcr.io/xxx/dockyard:latest
+```
+
+### 剪贴板与输入法（每沙箱作用域）
+
+- **剪贴板**：每沙箱独立 Xvfb = 独立 X server → CLIPBOARD/PRIMARY 选区**物理隔离**（跨沙箱不可见，
+  已实测验证）。VNC 端 X 剪贴板透传统一受 `workspace.clipboardVncSync` 开关管控（关闭时该沙箱
+  x11vnc 以 `-nosel -noclipboard` 启动）；平台中转通道（/api/vnc-proxy/clipboard）按工作区 +
+  会话身份校验、逐连接隔离、内容审计留痕。
+- **输入法**：每沙箱独立 fcitx5 实例（监督树成员，崩溃自愈）。镜像内置中文（拼音/双拼/五笔/注音/
+  仓颉）、日文、韩文、越南文等常用语言输入法 + 全量键盘布局（setxkbmap）。VNC 控制端工具栏
+  「输入法」按钮可实时切换**仅作用于该沙箱的 X 显示**（其他沙箱与在线用户互不影响），偏好持久化
+  到工作区（沙箱重建自动重新应用）。
 
 ## 五、仓库结构
 

@@ -88,6 +88,7 @@ export default async function AdminTasksPage({
       itemsProcessed: l.itemsProcessed,
       summary: l.summary,
       errorStack: l.errorStack,
+      output: l.outputJson,
     }))
 
     return (
@@ -153,6 +154,7 @@ export default async function AdminTasksPage({
     name: t.name,
     isCustom: t.isCustom,
     taskType: t.taskType,
+    paramsJson: t.paramsJson,
     description: t.description,
     createdByUsername: t.createdByUserId ? (creatorMap.get(t.createdByUserId) ?? null) : null,
     cronExpr: t.cronExpr,
