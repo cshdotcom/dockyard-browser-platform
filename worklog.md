@@ -833,3 +833,17 @@ Work Log:
 - 【UI】管理端工作区表：行菜单「离线冻结封存」（Snowflake 蓝色，弹窗=原因 textarea+自动解冻开关+datetime-local）/「解除冻结」（Sunrise 青色，仅 FROZEN 行显示）；冻结弹窗含调查取证语义说明
 - 【QA 浏览器实测】创建工作区→管理端冻结（原因填写+提交）→DB 断言 FROZEN/原因落库/底层会话销毁（destroyedSessions 审计）/WARN 告警→冻结期间工作区详情页无任何启动入口→设置 expireAt 过去+POST /api/cron 触发 frozen_expire_check →「到期自动解冻1个冻结沙箱」→DB 断言 STOPPED/原因清空/自动解冻审计/INFO 告警→解冻后列表 STOPPED 徽章；截图 08；QA 数据清理归零（工作区+审计3+告警2+任务日志）
 - 【质量门】tsc 全库 75 错误=基线持平（零新增）；eslint 0/0；bun run build 全绿（39.8s）
+
+---
+Task ID: 24-i
+Agent: main
+Task: r24-i 快照导出真实化（exportProfile 真 tar 归档链路）+ r24 收尾
+
+Work Log:
+- 【快照真实化】snapshots.ts createSnapshotAction：从 hardeningJson.profileKey 推导 Profile 目录（storage/profiles/<userId>/<profileKey>）传入 exportProfile → browser-session.ts 真实 tar -czf 归档到 storage/snapshots/（archivePrefix=ws-<uuid8>）；真实导出按归档实际字节数统计（替代估算值）；无目录/外部分离部署回退模拟标识（链路完整）
+- 【归档测试】真实目录（Preferences+Cookies）→ 归档生成（201 字节实际值）→ tar -tzf 验证归档内容完整可解；目录缺失/无参数 → 模拟回退断言全过
+- 【收尾】tsc 改动文件零新增错误；eslint 0/0；dev 服务器重启恢复（login=200 / snapshots=307 登录守卫正常）
+
+Stage Summary:
+- r24 全批次九个子项闭环（a 自定义执行内容 / b Steel 零残留 / c IME / d 剪贴板隔离 / e 专属用户+UID 台账 / f 持久化挂载 / g 质量门 / h 离线冻结闭环 / i 快照真实归档）
+- 冒烟测试 69+ 断言、浏览器端到端 5 条链路（shell 任务创建→执行→日志输出、链编排 2/2 步、浏览器节点表、IME 切换器渲染+降级、冻结→guard→自动解冻）全部实测通过；QA 数据全部清理归零

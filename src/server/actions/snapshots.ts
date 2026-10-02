@@ -46,11 +46,18 @@ export async function createSnapshotAction(input: unknown): Promise<ActionResult
     if (!ws.browserSessionId) throw bizError(ErrorCode.RESOURCE_IN_USE, "工作区缺少 浏览器会话标识，无法导出")
 
     // 打包导出浏览器 Profile → archiveKey
-    const exported = await exportProfile(ws.browserSessionId)
+    // r24：内嵌形态真实归档——从 hardeningJson 取 profileKey 推导 Profile 目录
+    // （storage/profiles/<userId>/<profileKey>，平台侧 tar -czf 到 storage/snapshots/）；
+    // 无 Profile 目录（外部分离部署/演示形态）→ 模拟归档标识（业务链路完整可跑）
+    const hardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
+    const profileKey = (hardening.profileKey as string) || ws.profileSnapshotId || ""
+    const { ENV } = await import("@/lib/env")
+    const profileDir = profileKey ? `${ENV.storageLocalPath.replace(/\/$/, "")}/profiles/${ws.userId}/${profileKey}` : undefined
+    const exported = await exportProfile(ws.browserSessionId, { profileDir, archivePrefix: `ws-${ws.uuid.slice(0, 8)}` })
     if (!exported) throw bizError(ErrorCode.EXTERNAL_SERVICE, "浏览器 Profile 导出失败，请稍后重试")
 
-    // 模拟导出时使用估算大小，真实导出按归档实际占用统计入口在文件模块
-    const sizeBytes = exported.simulated ? 524288 : 0
+    // 真实导出按归档实际字节数统计；模拟导出使用估算大小
+    const sizeBytes = exported.simulated ? 524288 : exported.sizeBytes
 
     const file = await db.fileMeta.create({
       data: {
