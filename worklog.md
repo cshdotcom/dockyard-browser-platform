@@ -759,3 +759,20 @@ Work Log:
 Stage Summary:
 - 三块 UI 全部交付并双账号浏览器端到端实测：用户/组 Token 策略对话框（四级链生效值只读+来源三色徽章+六字段三态覆盖+清除全部）、每 Key 分钟限流编辑（管理端可写+审计前后对照+用户端只读展示，跨链路实时解析断言）、离线设备记录删除（单条/多选/一键清理+已撤销设备删除，DB 行消失断言）
 - QA 产物全部清理归零（tokenPolicy/rateLimitPerMin/审计/安全事件/行为计数/密码种子值），29 张截图存档 download/qa-23d/，清理脚本可重复执行
+
+---
+Task ID: 23-close
+Agent: main
+Task: r23 收尾 — 主代理核心链路抽检 + 质量门 + 提交
+
+Work Log:
+- 【抽检一轮】qa-spot-r23.ts：IP封禁落库/正确密码被拒(46002)✓、cron到期判定✓、host_probe真实指标(CPU/MEM/DISK非mock)✓、config_drift手动执行✓；3项待修正=测试方法问题(误用404路由/自刷密码触发验证码/直写DB未刷缓存)
+- 【抽检二轮】修正测试方法：封禁IP经POST /api/mcp无效Key→403+46002✓、有效Key同样403✓（封禁对API通道完全生效）；demo force2faSetup=true→登录→/workspaces→浏览器自动跳转/account/security?force2fa=1✓（agent-browser实测）；demo有效API-Key在2FA门控期间GET /api/mcp code=0✓（API/MCP通道不受影响，符合用户要求）
+- 【上传路由补门控】/api/files/upload +enforce2faCompliance（写操作与requireWritableMode同语义）
+- 【三轮抽检】配置真实生效链路：DB写白名单→config_drift刷新缓存（漂移检测任务即缓存自愈通道）→上传txt过/exe拒(带白名单明细)✓；types=user单类型搜索✓、from=未来0结果✓
+- 【质量门】bun run build 全绿（61路由含/admin/ipban）；eslint 29个基础层文件 0 error 0 warning（清理db.ts无用disable指令）；tsc新改文件零新增错误；终态DB干净(users=2/groups=1/ws=0/shares=0/ipbans=0/customTasks=0/QATokens=0、demo策略已复位、封禁阈值恢复10/邮件预警恢复false)
+- 【提交】git commit 433aa0f→r23批次全量入库
+
+Stage Summary:
+- r23 全批次闭环：4路子代理UI(A共享/组员、B任务中心、C搜索+预警配置+IP封禁、D Token策略+离线设备)+主代理基础层与抽检全部通过
+- 用户全部原话需求落地：共享列表多选/搜索/筛选/踢出、全局搜索+完整筛选栏、2FA强制策略下发真拦截、IP封禁(错误次数/时长/对应用户IP)、配置保存真实生效+可自检、组员批量管理、任务列表分页/首页尾页/指定页+自定义任务+批量+搜索+日期筛选、全资源权限搜索、下线已离线设备(数据库不认cookie)、资源80/85%阈值可设+邮件提醒+各功能预警开关、Docker磁盘按容器存储位置(data-root)统计、API-Key组/用户精确管理、MCP/API限流可配
