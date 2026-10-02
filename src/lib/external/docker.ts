@@ -61,12 +61,20 @@ export interface BrowserHardeningInfo {
   endpointPolicy?: { blackPatterns: string[]; whitePatterns: string[] }
   policyManagedChromium: boolean // Chromium 托管策略文件已注入（只读、不可篡改）
   iccDisabledNetwork: boolean // 会话网络容器互访封禁（跨用户网络不可达）
-  // —— 单容器全内置形态（r13）——
-  runtime?: "embedded" | "docker" // 运行时形态（缺省 docker = 历史快照兼容）
+  // —— 单容器全内置形态（r13）/ 外部浏览器分离部署（r14）——
+  runtime?: "embedded" | "docker" | "external" // 运行时形态（缺省 docker = 历史快照兼容）
   separateLinuxUser?: boolean // 每平台用户独立 Linux 用户（Profile 700 隔离）
   mountNamespacePolicy?: boolean // unshare 用户+挂载命名空间：每沙箱私有策略视图
   vncLoopbackOnly?: boolean // RFB/CDP 仅回环绑定
   perSandboxDisplay?: boolean // 每沙箱独立虚拟显示
+  // —— 外部浏览器分离部署（EXTERNAL_BROWSER_URL）快照 ——
+  externalBrowser?: {
+    endpoint: string // CDP 端点 host:port
+    vncEndpoint: string // RFB 端点 host:port
+    browser: string | null // /json/version 探测到的浏览器版本
+    latencyMs: number | null
+    policyNote: string // 策略执行位置说明（外部部署侧自管）
+  }
 }
 
 export const SESSION_NETWORK = "dockyard-sessions"

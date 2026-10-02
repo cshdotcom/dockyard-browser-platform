@@ -21,6 +21,16 @@ export const ENV = {
   get novncPoolUrl() {
     return process.env.NOVNC_POOL_URL || ""
   },
+  // ---- 外部浏览器分离部署（r14：填写则优先外部，未填默认单容器内嵌）----
+  get externalBrowserUrl() {
+    return (process.env.EXTERNAL_BROWSER_URL || "").trim()
+  },
+  get externalBrowserCdpPort() {
+    return Number(process.env.EXTERNAL_BROWSER_CDP_PORT || 9222)
+  },
+  get externalBrowserVncPort() {
+    return Number(process.env.EXTERNAL_BROWSER_VNC_PORT || 5900)
+  },
   get smtpHost() {
     return process.env.SMTP_HOST || ""
   },
@@ -99,4 +109,6 @@ export const externalAvailable = {
   get steel() { return !!ENV.steelUrl },
   get novnc() { return !!ENV.novncPoolUrl },
   get smtp() { return !!ENV.smtpHost },
+  // 外部浏览器分离部署形态（EXTERNAL_BROWSER_URL 填写即启用）
+  get external() { return !!ENV.externalBrowserUrl },
 }

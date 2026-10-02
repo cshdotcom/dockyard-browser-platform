@@ -1,0 +1,8 @@
+{
+  "name": "pg-test",
+  "private": true,
+  "dependencies": {
+    "@electric-sql/pglite": "0.2.0",
+    "@electric-sql/pglite-socket": "0.1.3"
+  }
+}

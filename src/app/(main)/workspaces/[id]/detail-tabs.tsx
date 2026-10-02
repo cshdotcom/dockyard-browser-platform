@@ -391,6 +391,7 @@ function VncPanel({ workspace, canOperate, vncBridge }: { workspace: WorkspaceDe
 // ================= 安全隔离面板（硬隔离 + 防退出可视化） =================
 function IsolationPanel({ hardening, containerRef }: { hardening: Record<string, unknown> | null; containerRef: string | null }) {
   const h = hardening || {}
+  const isExternal = h.runtime === "external"
   const items: { ok: boolean; icon: React.ReactNode; title: string; desc: string }[] = [
     {
       ok: h.readOnlyRootfs !== false,
@@ -450,10 +451,12 @@ function IsolationPanel({ hardening, containerRef }: { hardening: Record<string,
           : "本机 CDP:9222/VNC:5900、file:// 协议、chrome:// 管理页、平台内部端点全部封禁；代理设置锁定不可改",
     },
     {
-      ok: h.policyManagedChromium === true,
+      ok: isExternal || h.policyManagedChromium === true,
       icon: <LockKeyhole className="h-4 w-4" />,
-      title: "Chromium 托管策略锁",
-      desc: "网络策略以只读 bind-mount 注入（/etc/chromium/policies/managed），只读根 FS 下沙箱内无法篡改",
+      title: isExternal ? "Chromium 托管策略（外部部署侧）" : "Chromium 托管策略锁",
+      desc: isExternal
+        ? "网络/域名/CRX 策略由外部浏览器部署侧的 Chromium 托管策略执行（平台侧不注入）"
+        : "网络策略以只读 bind-mount 注入（/etc/chromium/policies/managed），只读根 FS 下沙箱内无法篡改",
     },
     {
       ok: h.iccDisabledNetwork !== false,
@@ -468,6 +471,9 @@ function IsolationPanel({ hardening, containerRef }: { hardening: Record<string,
         <CardTitle className="text-base flex flex-wrap items-center gap-2">
           <ShieldCheck className="h-4 w-4" /> 安全隔离 · 防退出
           {h.provisioned === "simulated" && <Badge variant="secondary">沙箱演示规格</Badge>}
+          {isExternal && (
+            <Badge className="bg-teal-600 text-white">外部浏览器 · 分离部署 {String(h.externalBrowser?.endpoint || "")}</Badge>
+          )}
           {containerRef && (
             <Badge className="bg-teal-600 hover:bg-teal-600">
               <Anchor className="h-3 w-3 mr-1" /> 容器 {containerRef.slice(0, 20)}

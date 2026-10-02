@@ -1,8 +1,10 @@
 // Steel-Browser HTTP API 客户端：所有调用经 NextJS 后端中转，Steel 服务仅内网可达
-// 未配置 STEEL_BROWSER_URL 时模拟模式：会话生命周期全链路可跑
+// 未配置 STEEL_BROWSER_URL 时：若 EXTERNAL_BROWSER_URL 已配置（外部浏览器分离部署，r14）→
+//   CDP 轻量会话直接挂接自部署浏览器端点（平台只连接不编排）；否则本地模拟模式
 
 import { ENV, externalAvailable } from "../env"
 import { randomUUID } from "crypto"
+import { externalBrowserEndpoint, probeExternalBrowser } from "./browser-endpoint"
 
 export interface CreateSteelSessionParams {
   proxyUrl?: string
@@ -42,6 +44,22 @@ async function steelFetch(path: string, init?: RequestInit, timeoutMs = 15000): 
 
 // 创建浏览器会话：POST /v1/sessions
 export async function createSession(params: CreateSteelSessionParams): Promise<SteelSession> {
+  // ---- 外部浏览器分离部署形态（r14）：CDP 轻量会话挂接自部署浏览器 ----
+  // 探测可达后返回真实 CDP 端点（http://host:cdpPort/json）；生命周期由外部 supervisor 自管
+  if (!externalAvailable.steel && ENV.externalBrowserUrl) {
+    const ep = externalBrowserEndpoint()
+    if (ep) {
+      const probe = await probeExternalBrowser(6000)
+      if (!probe.ok) {
+        throw new Error(`外部浏览器不可达（${probe.error}），请检查 EXTERNAL_BROWSER_URL 配置与网络连通性`)
+      }
+      return {
+        sessionId: "ext-" + randomUUID().replace(/-/g, "").slice(0, 12),
+        cdpUrl: `${ep.cdpBase}/json`,
+        simulated: false,
+      }
+    }
+  }
   if (externalAvailable.steel) {
     const res = await steelFetch("/v1/sessions", {
       method: "POST",
@@ -71,6 +89,11 @@ export async function createSession(params: CreateSteelSessionParams): Promise<S
 
 // 查询会话状态
 export async function sessionStatus(sessionId: string): Promise<{ status: "ACTIVE" | "CRASHED" | "GONE"; lastActive: number } | null> {
+  // 外部浏览器分离部署：CDP 探测为权威存活信号
+  if (sessionId.startsWith("ext-")) {
+    const probe = await probeExternalBrowser(4000)
+    return { status: probe.ok ? "ACTIVE" : "GONE", lastActive: Date.now() }
+  }
   if (externalAvailable.steel) {
     const res = await steelFetch(`/v1/sessions/${sessionId}`)
     if (res.status === 404) return null
@@ -94,8 +117,11 @@ export function touchSimSession(sessionId: string) {
   if (s) s.lastActive = Date.now()
 }
 
-// 销毁会话：DELETE /v1/sessions/:id
+// 销毁会话：DELETE /v1/sessions/:id（外部浏览器形态：部署侧自管，仅解除挂接）
 export async function destroySession(sessionId: string): Promise<boolean> {
+  if (sessionId.startsWith("ext-")) {
+    return true
+  }
   if (externalAvailable.steel) {
     const res = await steelFetch(`/v1/sessions/${sessionId}`, { method: "DELETE" })
     if (!res.ok && res.status !== 404) throw new Error(`Steel API destroy failed: HTTP ${res.status}`)

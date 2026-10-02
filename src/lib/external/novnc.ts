@@ -1,10 +1,13 @@
-// NoVNC 池客户端：四种运行形态（r13 起单容器内嵌为默认）
+// NoVNC 池客户端：五种运行形态（r13 起单容器内嵌为默认，r14 新增外部浏览器分离部署）
 //   1. embedded（默认）→ 单容器全内置：Xvfb+Chromium+x11vnc 同容器进程树，零外部服务
-//   2. DOCKER_API_URL 配置 → 平台经 Docker API 直接编排硬隔离浏览器容器（可选外部形态）
-//   3. NOVNC_POOL_URL 配置 → 独立 NoVNC 容器池集群 API（可选外部形态）
-//   4. 均不可用 → 本地模拟模式（全链路演示/沙箱验证）
+//   2. EXTERNAL_BROWSER_URL 配置 → 外部浏览器分离部署（docker/browser 镜像独立运行，平台只连接不编排）
+//   3. DOCKER_API_URL 配置 → 平台经 Docker API 直接编排硬隔离浏览器容器（可选外部形态）
+//   4. NOVNC_POOL_URL 配置 → 独立 NoVNC 容器池集群 API（可选外部形态）
+//   5. 均不可用 → 本地模拟模式（全链路演示/沙箱验证）
 // 浏览器隔离安全模型（内嵌形态）：独立 Linux 用户 Profile 700 隔离 + prlimit 进程硬上限
 //   + unshare 用户/挂载命名空间每沙箱私有策略视图 + 监督循环防退出（同一 Profile 1s 拉起）
+// 外部浏览器形态：隔离由部署侧保证（镜像内非 root/只读根 FS/CapDrop=ALL/supervisor 防退出）；
+//   平台侧生命周期只连接与探测，不创建/不销毁（崩溃自愈由外部 supervisor 负责）
 
 import { ENV, externalAvailable } from "../env"
 import { randomUUID } from "crypto"
@@ -17,6 +20,7 @@ import {
   type BrowserHardeningInfo,
   type BrowserHardeningSpec,
 } from "./docker"
+import { externalBrowserEndpoint, probeExternalBrowser, externalBrowserHardening } from "./browser-endpoint"
 import { writeNetworkPolicyFile, sessionNetworkGateway, embeddedSandboxBaseline, type NetworkPolicy } from "../network-policy"
 import { resolveWorkspaceCrxPolicy, buildCrxManagedPolicy } from "../crx-policy"
 import type { DomainPolicy } from "../domain-policy"
@@ -79,6 +83,28 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
   // ---- 单容器全内置（默认形态）：Xvfb+Chromium+x11vnc 同容器进程树 ----
   const { resolveBrowserRuntimeMode, createEmbeddedSandbox } = await import("../embedded-sandbox")
   const { mode } = resolveBrowserRuntimeMode()
+  // ---- 外部浏览器分离部署形态（EXTERNAL_BROWSER_URL）：平台只连接不编排 ----
+  // 探测可达后挂接：RFB → 拨号外部 host:vncPort；CDP → http://host:cdpPort/json
+  // 生命周期由外部部署侧 supervisor 自管（崩溃 1s 同 Profile 拉起），平台不创建/不销毁
+  if (mode === "external") {
+    const probe = await probeExternalBrowser(6000)
+    if (!probe.ok) {
+      throw new Error(`外部浏览器不可达（${probe.error}），请检查 EXTERNAL_BROWSER_URL 配置与网络连通性`)
+    }
+    const ep = probe.endpoint!
+    const id = "ext-" + randomUUID().replace(/-/g, "").slice(0, 12)
+    return {
+      novncSessionId: id,
+      wsPath: `/novnc/${id}`,
+      secret: randomUUID(),
+      resolution: params.resolution || "1280x800",
+      simulated: false,
+      rfb: ep.rfb,
+      containerName: null,
+      hardening: externalBrowserHardening(params, probe),
+      cdpUrl: `${ep.cdpBase}/json`,
+    }
+  }
   if (mode === "embedded" && params.userId && params.profileKey) {
     // 每沙箱 Chromium 托管策略：四层合并 + CRX + 文件限制 + 代理锁定（写入每沙箱专属策略文件，
     // 由 unshare 私有挂载命名空间 bind 到 /etc/chromium/policies/managed/ —— 沙箱间互不可见）
@@ -237,8 +263,14 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
   }
 }
 
-// 解析 VNC 桥拨号目标：内嵌沙箱(127.0.0.1:rfbPort) / 池集群(RFB端点) / 自托管容器IP / 模拟(演示RFB引擎)
+// 解析 VNC 桥拨号目标：外部浏览器(分离部署 RFB 端点) / 内嵌沙箱(127.0.0.1:rfbPort) / 池集群(RFB端点) / 自托管容器IP / 模拟(演示RFB引擎)
 export async function novncDialTarget(sessionId: string, containerRef?: string | null): Promise<VncDialTarget | null> {
+  // 外部浏览器分离部署：桥直接拨号外部部署的 x11vnc（host:vncPort，镜像 EXPOSE 5900）
+  if ((containerRef || sessionId).startsWith("ext-")) {
+    const ep = externalBrowserEndpoint()
+    if (ep) return { k: "tcp", h: ep.host, p: ep.vncPort }
+    return null
+  }
   // 单容器内嵌：回环拨号每沙箱 x11vnc（仅本容器网络命名空间内可达，无任何 UDP）
   if (containerRef && containerRef.startsWith("emb-")) {
     const { embeddedSandbox } = await import("../embedded-sandbox")
@@ -304,6 +336,23 @@ export async function novncHealth(
   sessionId: string,
   ctx?: NovncHealthCtx,
 ): Promise<{ alive: boolean; clients: number; fps: number; lastInputAt: number | null; frames?: number } | null> {
+  // ---- 外部浏览器分离部署：CDP /json/version 真实探测为权威存活信号 ----
+  // （外部 supervisor 崩溃自愈 1s 级；探测间隔内瞬断不影响）
+  if ((ctx?.containerRef || sessionId).startsWith("ext-")) {
+    const probe = await probeExternalBrowser(4000)
+    let lastInputAt: number | null = null
+    let clients = 0
+    let frames: number | undefined
+    if (ctx?.workspaceId) {
+      const st = await bridgeStats(ctx.workspaceId)
+      if (st) {
+        lastInputAt = st.lastAt
+        clients = st.clients
+        frames = st.frames
+      }
+    }
+    return { alive: probe.ok, clients, fps: 0, lastInputAt, frames }
+  }
   if (externalAvailable.novnc) {
     const res = await novncFetch(`/api/sessions/${sessionId}/health`)
     if (res.status === 404) return null
@@ -358,6 +407,10 @@ export async function novncHealth(
 }
 
 export async function destroyNovncSession(sessionId: string, containerRef?: string | null): Promise<boolean> {
+  // 外部浏览器分离部署：生命周期由部署侧自管，平台不销毁（仅断开本工作区挂接）
+  if ((containerRef || sessionId).startsWith("ext-")) {
+    return true
+  }
   // 单容器内嵌：级联终止沙箱进程树（chromium/x11vnc/Xvfb）
   if ((containerRef || sessionId).startsWith("emb-")) {
     const { destroyEmbeddedSandbox } = await import("../embedded-sandbox")
@@ -396,8 +449,13 @@ export async function disconnectNovncClients(sessionId: string): Promise<boolean
   return true
 }
 
-// 进程级重启（同 Profile 拉起，防退出语义一致）：内嵌 USR1 → 监督循环；池侧 API
+// 进程级重启（同 Profile 拉起，防退出语义一致）：内嵌 USR1 → 监督循环；池侧 API；
+// 外部浏览器形态不支持平台侧重启（由部署侧 supervisor 自管）
 export async function restartNovncBrowser(sessionId: string, containerRef?: string | null): Promise<{ restarted: boolean }> {
+  // 外部浏览器分离部署：重启由外部 supervisor/运维通道负责，平台侧无权限
+  if ((containerRef || sessionId).startsWith("ext-")) {
+    throw new Error("外部浏览器由独立部署管理，不支持平台侧重启（其 supervisor 会在崩溃后 1 秒内自动拉起）")
+  }
   if ((containerRef || sessionId).startsWith("emb-")) {
     const { restartEmbeddedBrowser } = await import("../embedded-sandbox")
     const r = await restartEmbeddedBrowser(containerRef || sessionId)

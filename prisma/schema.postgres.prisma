@@ -1,0 +1,1303 @@
+// [r14] 本文件由 scripts/db/sync-postgres-schema.ts 从 schema.prisma 自动派生 —— 请勿手工编辑模型
+// （模型变更请改 schema.prisma 后重新执行同步脚本；本文件仅 datasource provider 不同）
+// Dockyard — 企业级远程浏览器工作平台
+// 完整数据模型：认证安全 / 组织权限 / 审计 / Token / 系统 / 定时任务 / 文件 / 备份 / 告警
+// 浏览器工作区 / 模板 / 快照 / 脚本 / 规则 / Steel / 代理 / 宿主机 / SingBox / MCP / 回收站 / 风控
+// 说明：审计日志(AuditLog)仅允许 INSERT —— 应用层禁止任何 update/delete 入口；
+//       PostgreSQL 部署时可执行 scripts/sql/audit_triggers.sql 施加数据库层触发器保护。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// 一、用户与认证安全
+// ============================================================
+
+model User {
+  id                  String    @id @default(cuid())
+  username            String    @unique
+  email               String?   @unique
+  displayName         String?
+  avatarPath          String?   // 用户头像存储相对路径（独立空间：storage/avatars/<userId>/avatar.webp）
+  avatarUpdatedAt     DateTime? // 头像更新时间（ETag/缓存失效用）
+  passwordHash        String?
+  role                String    @default("USER") // SUPER_ADMIN | ADMIN | GROUP_ADMIN | USER
+  enabled             Boolean   @default(true)
+  emailVerified       Boolean   @default(false)
+  mustChangePassword  Boolean   @default(false)
+  twoFactorEnabled    Boolean   @default(false)
+  force2faSetup       Boolean   @default(false) // 强制2FA策略命中标记
+  lockedUntil         DateTime?
+  failedLoginCount    Int       @default(0)
+  preferences          Json? // { pageSize, theme, columns, sidebarCollapsed }
+  quota               Json? // { sessions, novncSessions, diskMb, proxyBandwidthMb }
+  lastLoginAt         DateTime?
+  lastLoginIp         String?
+  lastLoginCountry    String?
+  frozen              Boolean   @default(false) // 永久冻结
+  permissionLocks     Json? // 用户级权限锁覆盖
+  shareAllowed        Boolean? // r13c：用户级共享开关（null=继承用户组，true=强制允许，false=强制禁止）
+  // —— 网络访问管控（管理员按用户覆盖；null=继承所属组，组缺失时用全局默认）——
+  allowInternalNetwork      Boolean? // 允许浏览器会话访问内网（RFC1918/链路本地/云元数据）
+  allowSecureLocationAccess Boolean? // 允许访问容器内安全位置（CDP/VNC本机端口、file://、平台内部端点）
+  // —— VNC 会话时长上限（分钟，null=继承用户组，0=不限；三级优先级：沙箱>用户>用户组）——
+  vncSessionMaxMinutes      Int?
+  loginSessionCount   Int       @default(0)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  deletedAt           DateTime?
+
+  @@index([role])
+  @@index([deletedAt])
+  @@index([enabled])
+  @@index([createdAt])
+}
+
+model PasswordHistory {
+  id           String   @id @default(cuid())
+  userId       String
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model RefreshToken {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  clientIp   String?
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model LoginSession {
+  id              String    @id @default(cuid())
+  userId          String
+  refreshTokenId  String?
+  sessionHash     String    @unique
+  ip              String?
+  userAgent       String?
+  deviceLabel     String?
+  deviceId        String? // 设备指纹（哈希）
+  trusted         Boolean   @default(false)
+  rememberMe      Boolean   @default(false)
+  expiresAt       DateTime
+  idleTimeoutSec  Int       @default(1800)
+  lastActiveAt    DateTime  @default(now())
+  revokedAt       DateTime?
+  revokedReason   String? // LOGOUT | PASSWORD_CHANGE | ADMIN_KICK | IDLE_TIMEOUT | EXPIRED | SECURITY
+  createdAt       DateTime  @default(now())
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@index([lastActiveAt])
+}
+
+model TrustedDevice {
+  id         String    @id @default(cuid())
+  userId     String
+  deviceId   String
+  label      String?
+  ua         String?
+  ip         String?
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@unique([userId, deviceId])
+  @@index([userId])
+}
+
+model EmailVerificationCode {
+  id          String    @id @default(cuid())
+  email       String
+  codeHash    String
+  purpose     String // LOGIN | REGISTER | RESET_PASSWORD | CHANGE_EMAIL_OLD | CHANGE_EMAIL_NEW
+  userId      String?
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  attempts    Int       @default(0)
+  sentAt      DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+
+  @@index([email, purpose])
+  @@index([expiresAt])
+}
+
+model TotpSecret {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  secretEncrypted  String // AES-256-GCM 加密，绝不明文落盘
+  confirmed        Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model TwoFactorBackupCode {
+  id        String    @id @default(cuid())
+  userId    String
+  codeHash  String
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// 安全事件（登录成功/失败、2FA、密码修改、邮箱变更、设备下线、管理员安全重置）
+model SecurityEvent {
+  id         String   @id @default(cuid())
+  userId     String?
+  username   String?
+  eventType  String
+  success    Boolean  @default(true)
+  ip         String?
+  userAgent  String?
+  detail     String?
+  traceId    String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([eventType, createdAt])
+  @@index([createdAt])
+}
+
+// ============================================================
+// 二、用户组与组织
+// ============================================================
+
+model Group {
+  id               String   @id @default(cuid())
+  name             String   @unique
+  description      String?
+  parentId         String?
+  enabled          Boolean  @default(true)
+  inheritParentQuota Boolean @default(true)
+  quota            Json? // { sessions, novncSessions, diskMb, proxyBandwidthMb, reservedSessions, reservedNovnc }
+  reservedQuota    Json? // 预留资源水位
+  tags             Json? // ["标签"]
+  webhookUrl       String?
+  force2fa         Boolean  @default(false) // 组级强制2FA
+  allowShare       Boolean  @default(true) // r13c：组级共享开关（false=组内成员默认禁止共享工作区；用户级可覆盖）
+  allowInternalNetwork       Boolean  @default(false) // 组级：允许访问内网（成员默认继承）
+  allowSecureLocationAccess  Boolean  @default(false) // 组级：允许访问容器内安全位置
+  vncSessionMaxMinutes       Int? // 组级 VNC 会话时长上限（分钟，null=继承全局默认，0=不限）
+  policy           Json? // 组级权限锁 / 生命周期默认策略
+  createdByUserId  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  deletedAt        DateTime?
+
+  @@index([parentId])
+  @@index([deletedAt])
+}
+
+model GroupUser {
+  id        String   @id @default(cuid())
+  groupId   String
+  userId    String
+  createdAt DateTime @default(now())
+
+  @@unique([groupId, userId])
+  @@index([userId])
+}
+
+model GroupAdmin {
+  id             String   @id @default(cuid())
+  groupId        String
+  userId         String
+  canModifyQuota Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  @@unique([groupId, userId])
+}
+
+model GroupProxy {
+  id           String   @id @default(cuid())
+  groupId      String
+  proxyNodeId  String
+  createdAt    DateTime @default(now())
+
+  @@unique([groupId, proxyNodeId])
+}
+
+// ============================================================
+// 三、审计日志（只插入，禁止修改删除）
+// ============================================================
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  traceId        String?
+  operatorUserId String?
+  operatorName   String?
+  operationType  String
+  resourceType   String
+  resourceId     String?
+  resourceName   String?
+  ownerUserId    String? // 资源当前所有者
+  createdByUserId String? // 资源原始创建人
+  clientIp       String?
+  userAgent      String?
+  severity       String   @default("INFO") // INFO | WARN | CRITICAL | DANGER
+  beforeJson     String?
+  afterJson      String?
+  extraJson      String?
+  createdAt      DateTime @default(now())
+
+  @@index([resourceType, resourceId])
+  @@index([operatorUserId, createdAt])
+  @@index([createdAt])
+  @@index([operationType])
+}
+
+model AuditLogArchive {
+  id             String   @id @default(cuid())
+  originId       String
+  traceId        String?
+  operatorUserId String?
+  operatorName   String?
+  operationType  String
+  resourceType   String
+  resourceId     String?
+  resourceName   String?
+  ownerUserId    String?
+  createdByUserId String?
+  clientIp       String?
+  severity       String?
+  beforeJson     String?
+  afterJson      String?
+  extraJson      String?
+  archivedAt     DateTime @default(now())
+  createdAt      DateTime
+
+  @@index([resourceType, resourceId])
+}
+
+// ============================================================
+// 四、API-Token
+// ============================================================
+
+model ApiToken {
+  id             String    @id @default(cuid())
+  userId         String
+  name           String
+  tokenHash      String    @unique
+  tokenPrefix    String // 前8位用于辨识
+  permissionsMask Int      @default(0)
+  // 功能范围（scope 白名单）：null/[] = 不限（全部授权范围）；
+  // 非空数组 = 仅允许调用命中数组内 scope 的功能面（browser/proxy/user/token/recycle/session/crx/resources）
+  scopes         Json?
+  ipWhitelist    Json?
+  qpsLimit       Float     @default(0) // 0 = 全局默认
+  expireAt       DateTime? // null = 永久
+  enabled        Boolean   @default(true)
+  lastCallAt     DateTime?
+  callCount      Int       @default(0)
+  failCount      Int       @default(0)
+  createdByUserId String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  @@index([userId, deletedAt])
+  @@index([expireAt])
+}
+
+model ApiTokenCallLog {
+  id           String   @id @default(cuid())
+  tokenId      String?
+  tokenUserId  String?
+  path         String
+  method       String
+  status       Int
+  durationMs   Int
+  wasExpired   Boolean  @default(false) // 调用时Token是否已过期
+  ip           String?
+  traceId      String?
+  createdAt    DateTime @default(now())
+
+  @@index([tokenId, createdAt])
+  @@index([tokenUserId, createdAt])
+  @@index([createdAt])
+}
+
+// ============================================================
+// 五、系统配置 / 定时任务 / 幂等
+// ============================================================
+
+model SystemConfig {
+  key          String   @id
+  valueJson    String
+  category     String   @default("GENERAL") // SECURITY | SESSION | STORAGE | ALERT | NETWORK | UI | GENERAL | MCP
+  valueType    String   @default("string") // string | number | boolean | json
+  description  String?
+  version      Int      @default(1)
+  updatedByUserId String?
+  updatedAt    DateTime @updatedAt
+
+  @@index([category])
+}
+
+model ConfigVersion {
+  id             String   @id @default(cuid())
+  configKey      String
+  version        Int
+  beforeJson     String?
+  afterJson      String?
+  operatorUserId String?
+  createdAt      DateTime @default(now())
+
+  @@index([configKey, version])
+}
+
+model ScheduleTask {
+  code             String   @id
+  name             String
+  cronExpr         String
+  enabled          Boolean  @default(true)
+  timeoutSec       Int      @default(300)
+  dependsOn        String?  // 依赖任务code
+  consecutiveFails Int      @default(0)
+  lastExecuteAt    DateTime?
+  lastResult       String?
+  avgDurationMs    Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model ScheduleTaskLog {
+  id          String   @id @default(cuid())
+  taskCode    String
+  triggerType String   @default("CRON") // CRON | MANUAL
+  status      String   @default("RUNNING") // RUNNING | SUCCESS | FAILED | TIMEOUT
+  startAt     DateTime @default(now())
+  endAt       DateTime?
+  durationMs  Int?
+  errorStack  String?
+  summary     String?
+  itemsProcessed Int  @default(0)
+
+  @@index([taskCode, startAt])
+}
+
+model IdempotencyRecord {
+  id          String   @id @default(cuid())
+  fingerprint String   @unique
+  userId      String?
+  action      String
+  resultJson  String?
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
+
+// ============================================================
+// 六、文件存储与备份
+// ============================================================
+
+model FileMeta {
+  id            String    @id @default(cuid())
+  fileName      String
+  storageKey    String    @unique
+  size          Int       @default(0)
+  mime          String?
+  checksum      String?
+  category      String    @default("GENERAL") // GENERAL | PROFILE | BACKUP | SNAPSHOT | LOG | REPORT
+  userId        String?
+  workspaceId   String?
+  shareTo       Json?
+  expireAt      DateTime?
+  virusScanned  Boolean   @default(false)
+  createdByUserId String?
+  deletedAt     DateTime?
+  purgedAt      DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([userId, deletedAt])
+  @@index([category])
+  @@index([expireAt])
+}
+
+model BackupRecord {
+  id            String   @id @default(cuid())
+  fileMetaId    String
+  type          String   @default("FULL") // FULL | PARTIAL
+  tableList     Json?
+  encrypted     Boolean  @default(false)
+  sizeBytes     Int      @default(0)
+  checksum      String?
+  status        String   @default("SUCCESS") // SUCCESS | FAILED | RESTORING
+  createdByUserId String?
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// ============================================================
+// 七、告警 / 通知 / Webhook
+// ============================================================
+
+model Alert {
+  id             String   @id @default(cuid())
+  title          String
+  level          String   @default("WARN") // INFO | WARN | CRITICAL
+  content        String
+  resourceType   String?
+  resourceId     String?
+  ownerUserId    String?
+  traceId        String?
+  dedupeKey      String?  // 抑制/聚合键
+  triggerAt      DateTime @default(now())
+  handleStatus   String   @default("PENDING") // PENDING | HANDLED | AUTO_RESOLVED
+  handledByUserId String?
+  handledAt      DateTime?
+  createdAt      DateTime @default(now())
+
+  @@index([level, handleStatus])
+  @@index([createdAt])
+  @@index([dedupeKey])
+}
+
+model AlertRule {
+  id             String   @id @default(cuid())
+  name           String
+  conditionsJson String // [{field,op,value}] + logic: AND/OR
+  level          String   @default("WARN")
+  silenceWindowMin Int    @default(30)
+  webhookEnabled Boolean  @default(true)
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model AlertSubscription {
+  id           String   @id @default(cuid())
+  userId       String?
+  groupId      String?
+  resourceType String
+  createdAt    DateTime @default(now())
+}
+
+model Notice {
+  id        String    @id @default(cuid())
+  userId    String
+  title     String
+  content   String
+  type      String    @default("ALERT") // ALERT | SYSTEM | ANNOUNCEMENT | TOKEN_EXPIRE | SECURITY
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+}
+
+model WebhookRule {
+  id          String   @id @default(cuid())
+  name        String
+  url         String
+  secret      String? // HMAC 签名密钥
+  events      Json?    // 触发事件类型列表
+  groupId     String?  // 绑定用户组范围
+  enabled     Boolean  @default(true)
+  failCount   Int      @default(0)
+  createdByUserId String?
+  createdAt   DateTime @default(now())
+  deletedAt   DateTime?
+}
+
+model WebhookDelivery {
+  id          String   @id @default(cuid())
+  ruleId      String?
+  url         String
+  event       String
+  payloadJson String?
+  status      String   @default("PENDING") // PENDING | SUCCESS | FAILED
+  attempts    Int      @default(0)
+  nextRetryAt DateTime?
+  lastError   String?
+  createdAt   DateTime @default(now())
+  sentAt      DateTime?
+
+  @@index([status, nextRetryAt])
+}
+
+// ============================================================
+// 八、浏览器工作区业务
+// ============================================================
+
+model BrowserWorkspace {
+  id                 String    @id @default(cuid())
+  uuid               String    @unique @default(cuid())
+  name               String
+  mode               String    @default("cdp_light") // cdp_light | novnc_full
+  status             String    @default("CREATING") // CREATING | RUNNING | IDLE | STOPPED | ERROR | DESTROYED | FROZEN
+  userId             String // 当前所有者
+  groupId            String?
+  proxyNodeId        String?
+  singboxInstanceId  String?
+  steelNodeId        String?
+  templateId         String?
+  profileSnapshotId  String?
+  tags               Json?
+  steelSessionId     String?
+  cdpUrl             String?
+  novncSessionId     String?
+  novncSecret        String? // 加密存储
+  novncConnCount     Int       @default(0)
+  novncFps           Float     @default(0)
+  novncActiveMin     Float     @default(0)
+  ttlMinutes         Float     @default(0) // 0=不限
+  idleTimeoutMinutes Float     @default(60)
+  vncSessionMaxMinutes Int? // 沙箱级 VNC 会话时长上限（分钟；null=继承用户/用户组，0=不限）
+  shareDisabled    Boolean   @default(false) // r13c：沙箱级共享否决（管理员总列表可设；true=该工作区禁止任何新共享/链接，既有共享可在总列表撤销）
+  // —— 沙箱级网络访问策略覆盖（四层解析最高优先；null=继承用户/用户组/全局）——
+  policyAllowInternalNetwork     Boolean? // 沙箱级：允许访问内网（非 null 即覆盖上层）
+  policyAllowSecureLocationAccess Boolean? // 沙箱级：允许访问容器内安全位置（非 null 即覆盖上层）
+  crxInheritEnabled Boolean   @default(true) // CRX 扩展上层继承开关（false=完全使用本沙箱插件列表，黑名单仍继承）
+  crxBlocklistExempt Boolean  @default(false) // 超管单独豁免黑名单插件（仅沙箱级）
+  sessionSecAccum   Int       @default(0) // VNC 会话累计连接秒数（策略执行统计）
+  cdpCallCount       Int       @default(0)
+  cdpBlockedCount    Int       @default(0)
+  crashCategory      String?
+  lifecycleRules     Json?    // 定时生命周期策略
+  freezeReason       String?
+  expireAt           DateTime?
+  containerRef       String?  // 自托管硬隔离浏览器容器（name/id，防退出看门狗自愈目标）
+  hardeningJson      Json?    // 隔离防护快照（只读根FS/CapDrop/noexec下载/独立Profile卷/防退出循环）
+  networkPolicyJson  Json?    // 生效网络策略快照 { allowInternalNetwork, allowSecureLocationAccess, source, enforcedAt, domainMode, domainBlack, domainWhite, endpointBlack, endpointWhite }
+  startedAt          DateTime? // 最近一次启动时间（运行时长计算基准；停止时冻结增量入 runtimeAccumSec）
+  runtimeAccumSec    Int       @default(0) // 累计运行秒数（不含当前运行段）
+  lastActiveAt       DateTime? // 最近活跃（VNC取票/CDP指令/脚本执行触发）
+  createdByUserId    String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+
+  @@index([userId, deletedAt])
+  @@index([status])
+  @@index([groupId])
+  @@index([createdAt])
+}
+
+model BrowserTemplate {
+  id             String   @id @default(cuid())
+  name           String
+  description    String?
+  scope          String   @default("PRIVATE") // PRIVATE | GROUP | GLOBAL
+  userId         String?
+  groupId        String?
+  parentId       String? // 模板继承
+  configJson     String // UA/时区/地理/指纹/节流/脚本/域名规则/变量插值
+  version        Int      @default(1)
+  tags           Json?
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deletedAt      DateTime?
+
+  @@index([scope, deletedAt])
+  @@index([userId])
+}
+
+model BrowserProfileSnapshot {
+  id             String   @id @default(cuid())
+  name           String
+  scope          String   @default("PRIVATE") // PRIVATE | GROUP | GLOBAL
+  userId         String?
+  groupId        String?
+  workspaceId    String?
+  sizeBytes      Int      @default(0)
+  storageKey     String?
+  expireAt       DateTime?
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+  deletedAt      DateTime?
+
+  @@index([userId, deletedAt])
+}
+
+model BrowserScriptTemplate {
+  id             String   @id @default(cuid())
+  name           String
+  description    String?
+  code           String
+  version        Int      @default(1)
+  scope          String   @default("PRIVATE")
+  userId         String?
+  boundDomains   Json?
+  enabled        Boolean  @default(true)
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deletedAt      DateTime?
+
+  @@index([scope, deletedAt])
+}
+
+model BrowserScriptRunLog {
+  id          String   @id @default(cuid())
+  scriptId    String
+  workspaceId String
+  status      String   @default("RUNNING") // RUNNING | SUCCESS | FAILED | BLOCKED
+  log         String?
+  startedAt   DateTime @default(now())
+  finishedAt  DateTime?
+}
+
+model BrowserModifyRule {
+  id             String   @id @default(cuid())
+  name           String
+  type           String // REQ_HEADER | RESP_HEADER | REDIRECT
+  matchPattern   String
+  headerKey      String?
+  headerValue    String?
+  redirectUrl    String?
+  enabled        Boolean  @default(true)
+  templateBinding String?
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+  deletedAt      DateTime?
+}
+
+model DomainRule {
+  id             String   @id @default(cuid())
+  pattern        String
+  type           String   @default("BLACK") // BLACK | WHITE
+  enabled        Boolean  @default(true)
+  note           String?
+  // —— 作用域（四层定向：全局 1=用户组 2=用户 3=单沙箱）：策略下发中心按目标批量落规则 ——
+  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER | SANDBOX
+  groupId        String?  // scopeType=GROUP 时生效
+  userId         String?  // scopeType=USER 时生效
+  workspaceId    String?  // scopeType=SANDBOX 时生效（单沙箱定向限制）
+  deploymentId   String?  // 来源策略下发批次（回滚时整批清理）
+  priority       Int      @default(0) // 数字越大越先应用
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+
+  @@index([scopeType, groupId])
+  @@index([scopeType, userId])
+  @@index([scopeType, workspaceId])
+  @@index([type, enabled])
+}
+
+model UaRecord {
+  id        String   @id @default(cuid())
+  ua        String
+  label     String?
+  category  String   @default("DESKTOP") // DESKTOP | MOBILE
+  enabled   Boolean  @default(true)
+  usageCount Int     @default(0)
+  createdAt DateTime @default(now())
+}
+
+model WorkspaceShare {
+  id             String    @id @default(cuid())
+  workspaceId    String
+  targetUserId   String
+  permission     String    @default("VIEW") // VIEW | OPERATE
+  expireAt       DateTime?
+  revokedAt      DateTime?
+  createdByUserId String?
+  createdAt      DateTime  @default(now())
+
+  @@unique([workspaceId, targetUserId])
+}
+
+// 沙箱共享临时链接（带有效期 + 权限控制）：
+// 已登录用户访问 /workspaces/shared?token=xxx → 校验通过后自动绑定为目标共享（WorkspaceShare），
+// 之后与普通共享完全一致（VNC 观看/操作、HAR 下载等按 permission 生效）
+model WorkspaceShareLink {
+  id             String    @id @default(cuid())
+  workspaceId    String
+  token          String    @unique // 32 字节随机 hex（不可猜测）
+  permission     String    @default("VIEW") // VIEW | OPERATE
+  expireAt       DateTime? // null=永久有效
+  revokedAt      DateTime? // 撤销后立即失效
+  maxUses        Int       @default(0) // 最大使用次数（0=不限；每次访问绑定记 1 次）
+  useCount       Int       @default(0)
+  lastUsedAt     DateTime?
+  note           String?   // 备注说明（分享给谁/什么用途）
+  createdByUserId String?
+  createdAt      DateTime  @default(now())
+
+  @@index([workspaceId])
+}
+
+model SteelNode {
+  id            String   @id @default(cuid())
+  name          String
+  baseUrl       String
+  labels        Json?
+  weight        Int      @default(1)
+  status        String   @default("ONLINE") // ONLINE | OFFLINE | ISOLATED | GRAY_TEST
+  grayGroup     String   @default("PROD") // PROD | TEST
+  activeSessions Int     @default(0)
+  loadScore     Float    @default(0)
+  probeFailCount Int     @default(0)
+  enabled       Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  deletedAt     DateTime?
+
+  @@index([status])
+}
+
+model ProxyNode {
+  id               String   @id @default(cuid())
+  name             String
+  type             String   @default("external") // internal_singbox | external
+  protocol         String   @default("socks5") // socks5 | http
+  host             String?
+  port             Int?
+  username         String?
+  password         String? // 加密存储
+  status           String   @default("UNKNOWN") // HEALTHY | DEGRADED | FAILED | DISABLED
+  latencyMs        Float    @default(0)
+  labels           Json?
+  weight           Int      @default(1)
+  singboxInstanceId String?
+  maxSessions      Int      @default(0) // 0=不限
+  currentSessions  Int      @default(0)
+  healthFailCount  Int      @default(0)
+  scheduleStrategy String   @default("LEAST_LOAD") // WEIGHT | ROUND_ROBIN | LEAST_LOAD | AFFINITY
+  createdByUserId  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  deletedAt        DateTime?
+
+  @@index([status, deletedAt])
+  @@index([type])
+}
+
+model ProxyUsage {
+  id           String   @id @default(cuid())
+  workspaceId  String?
+  proxyNodeId  String
+  userId       String?
+  groupId      String?
+  bytesUp      Float    @default(0) // 精度 0.001 MB
+  bytesDown    Float    @default(0)
+  recordedAt   DateTime @default(now())
+  sessionDate  String   @default("")
+
+  @@index([proxyNodeId, sessionDate])
+  @@index([userId, sessionDate])
+}
+
+model HostNode {
+  id            String   @id @default(cuid())
+  name          String
+  dockerApiUrl  String
+  labels        Json?
+  cpuCores      Float    @default(0)
+  memTotalMb    Float    @default(0)
+  cpuUsedPct    Float    @default(0) // 0.001 精度
+  memUsedMb     Float    @default(0)
+  diskUsedPct   Float    @default(0)
+  reservedCpu   Float    @default(0) // 资源预留
+  reservedMemMb Float    @default(0)
+  grayGroup     String   @default("PROD")
+  status        String   @default("ONLINE")
+  probeFailCount Int     @default(0)
+  enabled       Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  deletedAt     DateTime?
+
+  @@index([status])
+}
+
+model SingboxInstance {
+  id              String   @id @default(cuid())
+  name            String
+  remark          String?
+  tags            Json?
+  cpuLimit        Float    @default(1) // 0.001 精度
+  memLimitMb      Float    @default(512)
+  maxSessions     Int      @default(0)
+  currentSessions Int      @default(0)
+  hostNodeId      String?
+  containerId     String?
+  status          String   @default("CREATING") // CREATING | RUNNING | STOPPED | ERROR | RELOADING | DELETED
+  socksAddr       String? // 内网socks地址 host:port
+  configJson      String? // 当前配置快照
+  configVersion   Int      @default(0)
+  autoRestart     Boolean  @default(true)
+  lastError       String?
+  trafficLimitMb  Float    @default(0) // 0=不限
+  bytesUpMb       Float    @default(0)
+  bytesDownMb     Float    @default(0)
+  peakTrafficMb   Float    @default(0)
+  overLimitAction String   @default("ALERT") // ALERT | THROTTLE | BLOCK_NEW
+  ownerUserId     String?
+  createdByUserId String?
+  expireAt        DateTime?
+  lifecycleRules  Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  deletedAt       DateTime?
+
+  @@index([status, deletedAt])
+  @@index([hostNodeId])
+}
+
+model SingboxConfigVersion {
+  id             String   @id @default(cuid())
+  instanceId     String
+  version        Int
+  configJson     String
+  operatorUserId String?
+  createdAt      DateTime @default(now())
+
+  @@index([instanceId, version])
+}
+
+model SingboxStats {
+  id         String   @id @default(cuid())
+  instanceId String
+  cpuPct     Float    @default(0)
+  memMb      Float    @default(0)
+  bytesUpMb  Float    @default(0)
+  bytesDownMb Float   @default(0)
+  recordedAt DateTime @default(now())
+
+  @@index([instanceId, recordedAt])
+}
+
+model HarRecord {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String?
+  harJson     String?
+  sizeBytes   Int      @default(0)
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId])
+}
+
+model CdpRecording {
+  id          String   @id @default(cuid())
+  workspaceId String
+  fileMetaId  String?
+  eventCount  Int      @default(0)
+  durationMs  Int      @default(0)
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId])
+}
+
+// ============================================================
+// 九、MCP / OpenAPI 批量任务
+// ============================================================
+
+model McpTask {
+  id             String   @id @default(cuid())
+  taskUuid       String   @unique @default(cuid())
+  name           String
+  code           String // 操作编码
+  priority       String   @default("MEDIUM") // HIGH | MEDIUM | LOW
+  status         String   @default("PENDING") // PENDING | RUNNING | PAUSED | SUCCESS | FAILED | PARTIAL | ROLLED_BACK | CANCELLED
+  paramsJson     String?
+  resultJson     String?
+  progress       Int      @default(0)
+  totalItems     Int      @default(0)
+  successItems   Int      @default(0)
+  failedItems    Int      @default(0)
+  failReasonsJson String?
+  userId         String?
+  createdByUserId String?
+  apiTokenId     String?
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([status, priority])
+  @@index([userId, createdAt])
+}
+
+model McpTaskItem {
+  id             String   @id @default(cuid())
+  taskId         String
+  targetType     String
+  targetId       String
+  status         String   @default("PENDING")
+  error          String?
+  beforeSnapshot String?
+  afterSnapshot  String?
+  createdAt      DateTime @default(now())
+  finishedAt     DateTime?
+
+  @@index([taskId])
+}
+
+// ============================================================
+// 十、回收站 / 风控 / 公告 / 行为画像 / 自检
+// ============================================================
+
+model RecycleBin {
+  id                String    @id @default(cuid())
+  resourceType      String
+  resourceId        String
+  resourceName      String?
+  ownerUserId       String?
+  createdByUserId   String?
+  deletedByUserId   String?
+  deletedByType     String    @default("USER") // USER | ADMIN | SYSTEM
+  reason            String?
+  originalSnapshot  String // 完整原始记录快照，恢复用
+  locked            Boolean   @default(false) // 锁定保护
+  recoverDeadline   DateTime? // 恢复时效限制
+  purgeAt           DateTime? // 物理清除时间
+  restoredAt        DateTime?
+  createdAt         DateTime  @default(now())
+
+  @@index([resourceType, resourceId])
+  @@index([ownerUserId])
+  @@index([purgeAt])
+}
+
+model RiskListRule {
+  id             String   @id @default(cuid())
+  type           String // IP_BLACK | IP_WHITE | UA_BLACK | DEVICE_BLACK
+  value          String
+  note           String?
+  mode           String   @default("PERMANENT") // TEMP | PERMANENT
+  expiresAt      DateTime?
+  // —— 作用域：登录/入口级风控仍取 GLOBAL；用户/组/单沙箱级 IP 黑白名单供策略下发中心批量落规则 ——
+  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER | SANDBOX
+  groupId        String?
+  userId         String?
+  workspaceId    String? // scopeType=SANDBOX 时生效（单沙箱定向 IP 限制）
+  deploymentId   String?  // 来源策略下发批次（回滚时整批清理）
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+
+  @@index([type, value])
+  @@index([scopeType, groupId])
+  @@index([scopeType, userId])
+  @@index([scopeType, workspaceId])
+}
+
+// ============================================================
+// 策略下发中心：管理员按【用户/用户组】批量下发访问控制策略包
+// 策略包字段：内网开关 / 容器安全位置开关 / 域名黑白名单 / IP 黑白名单
+// 每次下发全量快照前置状态，支持一键回滚；逐目标结果落库可审计
+// ============================================================
+model PolicyDeployment {
+  id              String   @id @default(cuid())
+  name            String // 下发批次名称
+  bundleJson      String   // 下发的策略包内容（规范化后）
+  targetUsers     Json? // 目标用户ID列表
+  targetGroups    Json? // 目标用户组ID列表
+  targetWorkspaces Json? // 目标沙箱ID列表（单沙箱定向限制下发）
+  status          String   @default("PENDING") // PENDING(定时待生效) | RUNNING | SUCCESS | PARTIAL | FAILED | ROLLED_BACK | CANCELLED
+  // —— 定时生效：IMMEDIATE 立即执行；SCHEDULED 到 effectiveAt 由定时任务自动激活 ——
+  effectiveMode   String   @default("IMMEDIATE") // IMMEDIATE | SCHEDULED
+  effectiveAt     DateTime? // 定时生效时刻（仅 SCHEDULED）
+  activatedAt     DateTime? // 实际激活执行时刻
+  cancelledAt     DateTime? // 定时批次被取消时刻
+  cancelledByUserId String?
+  totalTargets    Int      @default(0)
+  successTargets  Int      @default(0)
+  failedTargets   Int      @default(0)
+  resultsJson     String? // 逐目标执行结果 [{targetId,targetType,targetName,ok,reason}]
+  snapshotJson    String? // 下发前全量状态快照（回滚依据）
+  note            String?
+  createdByUserId String?
+  deployedAt      DateTime?
+  finishedAt      DateTime?
+  rolledBackAt    DateTime?
+  rolledBackByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([status, effectiveAt])
+  @@index([createdByUserId])
+}
+
+// ============================================================
+// 文件访问限制策略（File Access Policy）—— 四层配置条目
+// 作用域：GLOBAL / GROUP / USER / SANDBOX（单沙箱），unique[scopeType, scopeId]
+// 可控维度（执行层：Chromium 托管策略 + 只读策略文件注入）：
+//   · allowDownload   —— 是否允许浏览器下载文件（false → DownloadRestrictions=2 全禁）
+//   · allowUpload     —— 是否允许选择本机文件上传（false → AllowFileSelectionDialogs=false 拾取器封禁）
+//   · allowFileScheme —— 是否允许 file:// 本地文件访问（false → URLBlocklist file://*）
+// 解析：SANDBOX > USER > GROUP（沿继承链）> GLOBAL > 系统默认（下载/上传允许、file:// 禁止）
+// ============================================================
+model FilePolicyConfig {
+  id              String   @id @default(cuid())
+  scopeType       String // GLOBAL | GROUP | USER | SANDBOX
+  scopeId         String // 对应 groupId/userId/workspaceId（GLOBAL 层恒为空串）
+  allowDownload   Boolean  @default(true)
+  allowUpload     Boolean  @default(true)
+  allowFileScheme Boolean  @default(false)
+  note            String?
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([scopeType, scopeId])
+  @@index([scopeType, scopeId])
+  @@index([scopeId])
+}
+
+// 端点级精确限制规则（host:port / host:* / CIDR:port / 方案级）
+// 与域名规则同一作用域模型（GLOBAL/GROUP/USER/SANDBOX 四层合并），供策略下发中心批量落规则
+model NetworkEndpointRule {
+  id             String   @id @default(cuid())
+  pattern        String // 形如 10.0.0.5:8080 / 192.168.1.*:443 / *.corp.com:22 / 127.0.0.1:* / [::1]:9222
+  type           String   @default("BLACK") // BLACK | WHITE（WHITE=显式放行例外）
+  enabled        Boolean  @default(true)
+  note           String?
+  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER | SANDBOX
+  groupId        String? // scopeType=GROUP 时生效
+  userId         String? // scopeType=USER 时生效
+  workspaceId    String? // scopeType=SANDBOX 时生效（单沙箱定向限制）
+  deploymentId   String?  // 来源策略下发批次（回滚时整批清理）
+  priority       Int      @default(0)
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+
+  @@index([scopeType, groupId])
+  @@index([scopeType, userId])
+  @@index([scopeType, workspaceId])
+  @@index([type, enabled])
+}
+
+model PolicyTemplate {
+  id              String   @id @default(cuid())
+  name            String   @unique
+  description     String?
+  bundleJson      String   // 模板策略包（同 PolicyDeployment.bundleJson 结构）
+  builtin         Boolean  @default(false) // 内置模板不可删除
+  usageCount      Int      @default(0)
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  deletedAt       DateTime?
+
+  @@index([builtin])
+  @@index([deletedAt])
+}
+
+model UserBehaviorProfile {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  resourcesCreated Int      @default(0)
+  resourcesDeleted Int      @default(0)
+  resourcesRestored Int     @default(0)
+  mcpCalls         Int      @default(0)
+  vncDurationMin   Float    @default(0)
+  batchOps         Int      @default(0)
+  abnormalOps      Int      @default(0)
+  riskTriggers     Int      @default(0)
+  updatedAt        DateTime @updatedAt
+}
+
+model Announcement {
+  id             String   @id @default(cuid())
+  title          String
+  content        String
+  type           String   @default("GLOBAL") // GLOBAL | GROUP | USER
+  groupId        String?
+  userId         String?
+  displayType    String   @default("POPUP") // POPUP | MARQUEE | FORCE_VIEW（主展示方式 = displayTypes 首项，兼容旧数据）
+  displayTypes   String?  // 多选展示方式（JSON 数组，如 ["POPUP","MARQUEE"]；空数组=仅站内信）
+  notifyInbox    Boolean  @default(false) // 站内信通道（发送到用户通知铃/站内信）
+  notifiedAt     DateTime? // 站内信已投递时间（幂等防重发：投递一次后永不重发）
+  startAt        DateTime? // 显示开始时间（null=立即显示；未到开始时间不展示）
+  endAt          DateTime? // 结束时间（null=永久；过期后不再展示，站内信保留可回看）
+  persistAfterRead Boolean @default(false) // 已读后持续显示（弹窗每次刷新仍弹出，除非勾选今日不再提醒）
+  allowDismiss   Boolean  @default(true) // 允许用户勾选「今日不再提醒」（管理员可控；跑马灯的今日不显示同样受控）
+  enabled        Boolean  @default(true)
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([type, enabled])
+  @@index([enabled, endAt])
+}
+
+model AnnouncementDismiss {
+  id             String   @id @default(cuid())
+  announcementId String
+  userId         String
+  dismissDate    String   // 今日不再提醒：yyyy-MM-DD（本地时区日）
+  dismissedAt    DateTime @default(now())
+
+  @@unique([announcementId, userId, dismissDate])
+  @@index([userId, dismissDate])
+}
+
+model AnnouncementRead {
+  id             String   @id @default(cuid())
+  announcementId String
+  userId         String
+  readAt         DateTime @default(now())
+
+  @@unique([announcementId, userId])
+}
+
+model ResourceLifecycleRule {
+  id             String   @id @default(cuid())
+  resourceType   String
+  resourceId     String?
+  scopeType      String   @default("RESOURCE") // RESOURCE | GROUP | GLOBAL
+  scopeId        String?
+  rulesJson      String // { autoPauseAt, autoFreezeAt, autoExpireAt, autoRecycleAt, autoDeleteAt }
+  enabled        Boolean  @default(true)
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+}
+
+model SystemSelfCheck {
+  id          String   @id @default(cuid())
+  checkCode   String
+  status      String   @default("PASS") // PASS | WARN | FAIL | FIXED
+  detail      String?
+  fixedAction String?
+  createdAt   DateTime @default(now())
+
+  @@index([checkCode, createdAt])
+}
+
+// ============================================================
+// CRX 扩展管控体系（企业浏览器后台 · 零内核 Patch · Managed Preferences 原生策略）
+// 约束：后台不存 CRX 二进制，只维护扩展 ID + update_url 元数据；
+//      全部依赖 Chromium ExtensionInstallForcelist / Blocklist / ExtensionSettings 原生策略
+// ============================================================
+
+// CRX 插件资源库（元数据库；所有下发沙箱的插件必须先录入）
+model CrxPlugin {
+  id                 String    @id @default(cuid())
+  crxId              String    @unique // Chrome/Edge 商店真实 32 位扩展 ID
+  name               String
+  description        String?
+  zhNote             String? // 中文备注
+  tags               Json? // 业务标签 ["office","dev","ops","highrisk"]
+  permissions        Json? // manifest 权限清单（自动导入 / 手动录入）
+  updateUrl          String // 主安装源 update_url
+  backupUpdateUrl    String? // 备用安装源（降级）
+  lockedVersion      String? // 强制锁定版本（禁止自动升级）
+  allowIncognito     Boolean   @default(false) // 允许无痕运行（全局默认，下发可覆盖）
+  allowUserDisable   Boolean   @default(true) // false=用户沙箱内不能禁用（force_installed）
+  highRisk           Boolean   @default(false) // 高危标记（按 manifest 权限自动判定）
+  highRiskReason     Json? // ["all_urls","clipboardRead",...]
+  enabled            Boolean   @default(true) // 库内禁用：禁用后所有继承沙箱不再安装
+  docUrl             String? // 内部文档链接
+  createdByUserId    String?
+  createdByName      String?
+  updatedByUserId    String?
+  updatedByName      String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime? // 软删（插件库回收站）
+  deletedByUserId    String?
+  deletedByName      String?
+
+  @@index([deletedAt])
+  @@index([enabled])
+  @@index([highRisk])
+  @@index([createdAt])
+}
+
+// 五级 CRX 策略条目（强制安装列表项：GLOBAL / GROUP / USER / SANDBOX 层）
+model CrxPolicyEntry {
+  id               String    @id @default(cuid())
+  scopeType        String // GLOBAL | GROUP | USER | SANDBOX
+  scopeId          String? // 对应 groupId/userId/workspaceId（GLOBAL 为空）
+  crxId            String
+  updateUrl        String? // 覆盖主源
+  backupUpdateUrl  String? // 覆盖备用源
+  lockedVersion    String? // 覆盖锁定版本
+  allowIncognito   Boolean? // 覆盖无痕运行
+  allowUserDisable Boolean? // 覆盖可禁用
+  note             String?
+  createdByUserId  String?
+  createdByName    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+
+  @@unique([scopeType, scopeId, crxId])
+  @@index([scopeType, scopeId])
+  @@index([crxId])
+}
+
+// CRX 黑名单（强制禁止安装；GLOBAL 层为主，黑名单不随继承开关失效）
+model CrxBlocklistEntry {
+  id              String   @id @default(cuid())
+  scopeType       String // GLOBAL | GROUP | USER | SANDBOX
+  scopeId         String?
+  crxId           String
+  note            String?
+  createdByUserId String?
+  createdByName   String?
+  createdAt       DateTime @default(now())
+
+  @@unique([scopeType, scopeId, crxId])
+  @@index([crxId])
+}
+
+// 沙箱逐插件安装状态（安装调度状态机）
+model CrxInstallStatus {
+  id              String    @id @default(cuid())
+  workspaceId     String
+  crxId           String
+  state           String    @default("PENDING") // PENDING | POLICY_APPLIED | INSTALLED | PRIMARY_FAILED | BACKUP_RETRY | ALL_FAILED | VERSION_MISMATCH
+  sourceUsed      String? // 当前使用的源（主/备）
+  currentVersion  String? // 实际安装版本（CDP 检测）
+  attempts        Int       @default(0)
+  lastErrorCode   String?
+  lastErrorAt     DateTime?
+  lastCheckedAt   DateTime?
+  resolvedBy      String? // SANDBOX | USER | GROUP | GLOBAL | LIBRARY
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([workspaceId, crxId])
+  @@index([workspaceId])
+  @@index([state])
+  @@index([crxId])
+}
+
+// CRX 灰度下发任务（分批推送 + 一键回滚；回滚仅超级管理员）
+model CrxGrayTask {
+  id              String    @id @default(cuid())
+  name            String
+  entriesJson     String // [{ crxId, updateUrl?, lockedVersion?, allowIncognito?, allowUserDisable? }]
+  targetIds       Json // [workspaceId,...] 灰度目标沙箱
+  status          String    @default("PENDING") // PENDING | ROLLING | SUCCESS | PARTIAL | ROLLED_BACK | CANCELLED
+  batchSize       Int       @default(3)
+  total           Int       @default(0)
+  progressed      Int       @default(0)
+  successCount    Int       @default(0)
+  failCount       Int       @default(0)
+  rollbackReason  String?
+  createdByUserId String?
+  createdByName   String?
+  createdAt       DateTime  @default(now())
+  activatedAt     DateTime?
+  finishedAt      DateTime?
+
+  @@index([status])
+  @@index([createdAt])
+}

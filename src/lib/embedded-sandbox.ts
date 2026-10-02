@@ -37,7 +37,7 @@ import type { BrowserHardeningInfo } from "./external/docker"
 // 运行时形态解析（BROWSER_RUNTIME=auto|embedded|docker|pool）
 // ============================================================
 
-export type BrowserRuntimeMode = "embedded" | "docker" | "pool" | "sim"
+export type BrowserRuntimeMode = "embedded" | "docker" | "pool" | "sim" | "external"
 
 let modeCache: { mode: BrowserRuntimeMode; reason: string } | null = null
 
@@ -92,11 +92,19 @@ export function resetEmbeddedCaches() {
 }
 
 // 解析当前浏览器运行时形态（cached；novnc/docker 路由共用）
+// r14 新增 external：EXTERNAL_BROWSER_URL 填写 → 外部浏览器分离部署形态
+//   （浏览器镜像独立部署，平台只连接不编排；未填写 → 默认单容器内嵌）
 export function resolveBrowserRuntimeMode(): { mode: BrowserRuntimeMode; reason: string } {
   if (modeCache) return modeCache
   const forced = (process.env.BROWSER_RUNTIME || "auto").toLowerCase()
   const bins = embeddedBinaries()
   const browserReady = !!(bins.chrome && bins.xvfb && bins.x11vnc)
+  if (forced === "external") {
+    modeCache = ENV.externalBrowserUrl
+      ? { mode: "external", reason: "BROWSER_RUNTIME=external（外部浏览器分离部署）" }
+      : { mode: "sim", reason: "BROWSER_RUNTIME=external 但 EXTERNAL_BROWSER_URL 未配置 → 演示模式" }
+    return modeCache
+  }
   if (forced === "embedded") {
     modeCache = browserReady
       ? { mode: "embedded", reason: "BROWSER_RUNTIME=embedded（强制单容器内嵌）" }
@@ -108,6 +116,12 @@ export function resolveBrowserRuntimeMode(): { mode: BrowserRuntimeMode; reason:
     modeCache = ok
       ? { mode: forced, reason: `BROWSER_RUNTIME=${forced}（外部编排形态）` }
       : { mode: "sim", reason: `BROWSER_RUNTIME=${forced} 但对应服务 URL 未配置` }
+    return modeCache
+  }
+  // auto：外部浏览器地址显式填写 → 分离部署形态优先（用户显式配置优先于内嵌；
+  // 未填写时默认单容器内嵌，零外部依赖）
+  if (ENV.externalBrowserUrl) {
+    modeCache = { mode: "external", reason: "auto：EXTERNAL_BROWSER_URL 已配置 → 外部浏览器分离部署" }
     return modeCache
   }
   // auto：单容器内嵌优先（零外部依赖）；仅在容器内无浏览器组件时才降级

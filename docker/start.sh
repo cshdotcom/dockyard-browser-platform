@@ -126,6 +126,14 @@ fi
 if [ -n "${PUBLIC_BASE_URL:-}" ]; then
   log "平台公网域名：$PUBLIC_BASE_URL（工作区详情将展示公网 CDP 网关端点）"
 fi
+# r14：外部浏览器分离部署（EXTERNAL_BROWSER_URL 填写则优先外部；未填默认单容器内嵌）
+# 地址 = 自部署 docker/browser 硬隔离浏览器镜像的 CDP 端点（如 http://192.168.1.10:9222）
+# 可选：EXTERNAL_BROWSER_VNC_PORT（RFB 端口，默认 5900）/ EXTERNAL_BROWSER_CDP_PORT（默认 9222）
+if [ -n "${EXTERNAL_BROWSER_URL:-}" ]; then
+  log "外部浏览器分离部署模式：$EXTERNAL_BROWSER_URL（所有会话挂接该自部署浏览器）"
+else
+  log "浏览器运行形态：单容器内嵌（EXTERNAL_BROWSER_URL 未配置，默认零外部依赖）"
+fi
 
 # 内部调度密钥（未显式配置时随机生成；内置调度器与外部 cron 均用它触发 /api/cron）
 if [ -z "${CRON_SECRET:-}" ]; then
