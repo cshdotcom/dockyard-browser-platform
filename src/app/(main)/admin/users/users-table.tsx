@@ -5,7 +5,7 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2 } from "lucide-react"
+import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2, Share2, Ban, Undo2 } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { UserAvatar } from "@/components/shared/user-avatar"
@@ -27,7 +27,7 @@ import {
   importUsersCsvAction, batchSetUserStatusAction, batchMoveGroupAction, batchResetQuotaAction,
   kickUserSessionsAction, deleteUserAction, unlockUserAction, adminResetPasswordAction,
   setForce2faAction, resetUserTotpAction, clearTrustedDevicesAction, resetBackupCodesAction,
-  setUserNetworkPolicyAction,
+  setUserNetworkPolicyAction, setUserShareAllowedAction,
   type CsvImportReport,
 } from "@/server/actions/users"
 import { batchDeleteUsersAction } from "@/server/actions/batch"
@@ -57,6 +57,7 @@ export interface AdminUserRow {
   groups: string[]
   allowInternalNetwork: boolean | null // 用户级覆盖（null=继承组）
   vncSessionMaxMinutes: number | null // 用户级 VNC 连接总时长上限（null=继承组，0=不限）
+  shareAllowed: boolean | null // r13c：用户级共享开关（null=继承组，true=强制允许，false=强制禁止）
   allowSecureLocationAccess: boolean | null
   netPolicy: { allowInternalNetwork: boolean; allowSecureLocationAccess: boolean; source: string } | null // 生效快照
 }
@@ -418,6 +419,26 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
             <DropdownMenuItem onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: row.allowInternalNetwork, allowSecureLocationAccess: null }))}>
               安全位置：恢复继承组/全局
             </DropdownMenuItem>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger className="gap-1.5">
+            <Share2 className="mr-1.5 h-4 w-4" /> 共享权限
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent className="w-64">
+            <p className="px-2 py-1 text-[11px] text-muted-foreground">
+              工作区共享开关（当前：{row.shareAllowed === null ? "继承所属组" : row.shareAllowed ? "允许共享" : "禁止共享"}）
+            </p>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserShareAllowedAction({ id: row.id, shareAllowed: false }))}>
+              <Ban className="mr-1.5 h-3.5 w-3.5 text-rose-600" /> 禁止共享（覆盖组设置）
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserShareAllowedAction({ id: row.id, shareAllowed: true }))}>
+              <Share2 className="mr-1.5 h-3.5 w-3.5 text-emerald-600" /> 允许共享（覆盖组设置）
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserShareAllowedAction({ id: row.id, shareAllowed: null }))}>
+              <Undo2 className="mr-1.5 h-3.5 w-3.5" /> 恢复继承所属组
+            </DropdownMenuItem>
+            <p className="px-2 py-1 text-[11px] text-muted-foreground">四级优先级：沙箱否决 {'>'} 用户 {'>'} 用户组 {'>'} 全局</p>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
         <DropdownMenuSub>

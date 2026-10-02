@@ -22,6 +22,7 @@ import { resolveEndpointPolicyForUser } from "@/lib/endpoint-policy"
 import { ENV } from "@/lib/env"
 import { moveToRecycle } from "@/lib/recycle"
 import { getConfigBool, getConfig, getConfigNumber } from "@/lib/config"
+import { assertShareAllowed } from "@/lib/share-policy"
 
 // ============================================================
 // 浏览器工作区业务 Server Actions
@@ -476,6 +477,8 @@ export async function shareWorkspaceAction(input: unknown): Promise<ActionResult
       }),
       input
     )
+    // r13c：四级共享管控门禁（沙箱否决 > 用户开关 > 组开关 > 全局开关）
+    await assertShareAllowed({ userId: ctx.userId, workspaceId, role: ctx.role })
     const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null } })
     if (!ws) throw new Error("工作区不存在")
     if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN") throw new Error("只有所有者可以共享工作区")
@@ -582,6 +585,8 @@ export async function createWorkspaceShareLinkAction(input: unknown): Promise<Ac
       }),
       input
     )
+    // r13c：四级共享管控门禁（临时链接与定向共享同一管控链）
+    await assertShareAllowed({ userId: ctx.userId, workspaceId, role: ctx.role })
     const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null } })
     if (!ws) throw new Error("工作区不存在")
     if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN") throw new Error("只有所有者可以创建分享链接")
@@ -642,6 +647,13 @@ export async function redeemWorkspaceShareLinkAction(input: unknown): Promise<Ac
     const ws = await db.browserWorkspace.findFirst({ where: { id: link.workspaceId, deletedAt: null } })
     if (!ws) throw new Error("链接指向的工作区已不存在")
     if (ws.userId === ctx.userId) throw new Error("这是你自己的工作区，无需兑换分享链接")
+
+    // r13c：兑换时同步校验发起人四级管控 + 沙箱否决（链接创建后策略可能收紧，
+    // 收紧后旧链接不得继续绑定新共享；管理员撤销的共享不会被链接复活）
+    if (link.createdByUserId) {
+      await assertShareAllowed({ userId: link.createdByUserId, workspaceId: link.workspaceId, role: "USER" })
+    }
+    if (ws.shareDisabled) throw new Error("该工作区已被管理员禁止共享，链接已失效")
 
     // 幂等：已有有效共享（同权限刷新；过期/撤销的重新激活）
     const existing = await db.workspaceShare.findFirst({

@@ -18,6 +18,7 @@ import {
   createWorkspaceAction, stopWorkspaceAction, startWorkspaceAction, deleteWorkspaceAction,
   switchProxyAction, exportWorkspaceConfigAction,
 } from "@/server/actions/workspaces"
+import { WorkspaceShareDialog } from "./share-dialogs"
 import { cn } from "@/lib/utils"
 
 export interface WorkspaceRow {
@@ -38,6 +39,8 @@ export interface WorkspaceRow {
   tags: string[]
   createdAt: string
   profileSnapshotId: string | null
+  /** r13c：共享管控状态（四级解析结果；仅 isOwner 行有意义） */
+  shareControl?: { allowed: boolean; reason: string }
 }
 
 interface Props {
@@ -62,6 +65,7 @@ export function WorkspacesTable(props: Props) {
   const [busyId, setBusyId] = React.useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<WorkspaceRow | null>(null)
   const [proxyTarget, setProxyTarget] = React.useState<WorkspaceRow | null>(null)
+  const [shareTarget, setShareTarget] = React.useState<WorkspaceRow | null>(null)
   const [selectedIds, setSelectedIds] = React.useState<string[]>([])
 
   const query = (patch: Record<string, string | undefined>) => {
@@ -169,6 +173,17 @@ export function WorkspacesTable(props: Props) {
       <Link href={`/workspaces/${r.id}`}>
         <Button variant="ghost" size="icon" title="打开会话"><MonitorPlay className="h-4 w-4" /></Button>
       </Link>
+      {r.isOwner && (
+        <Button
+          variant="ghost" size="icon"
+          title={r.shareControl?.allowed ? "共享：把该工作区共享给其他用户（权限/有效期可选）" : `共享被管理员禁止：${r.shareControl?.reason || ""}`}
+          disabled={!r.shareControl?.allowed}
+          onClick={() => setShareTarget(r)}
+          className={!r.shareControl?.allowed ? "opacity-40" : ""}
+        >
+          <Share2 className={`h-4 w-4 ${r.shareControl?.allowed ? "text-teal-600" : "text-muted-foreground"}`} />
+        </Button>
+      )}
       {r.status === "RUNNING" || r.status === "IDLE" ? (
         <Button variant="ghost" size="icon" title="停止" disabled={busyId === r.id} onClick={() => stop(r)}>
           <StopCircle className="h-4 w-4 text-amber-600" />
@@ -249,6 +264,17 @@ export function WorkspacesTable(props: Props) {
         onClose={() => setProxyTarget(null)}
         onDone={() => { setProxyTarget(null); router.refresh() }}
       />
+
+      {/* r13c：列表行内共享弹窗（与详情页同一组件；四级管控阻断原因透传） */}
+      {shareTarget && (
+        <WorkspaceShareDialog
+          workspace={{ id: shareTarget.id, name: shareTarget.name }}
+          open={!!shareTarget}
+          onOpenChange={(v) => { if (!v) setShareTarget(null) }}
+          onDone={() => router.refresh()}
+          blockedReason={shareTarget.shareControl?.allowed ? undefined : shareTarget.shareControl?.reason}
+        />
+      )}
     </div>
   )
 }

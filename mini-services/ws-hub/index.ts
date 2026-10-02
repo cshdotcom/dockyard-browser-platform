@@ -113,12 +113,31 @@ const WS_PORT = Number(process.env.PORT || process.env.WS_HUB_PORT || 3003)
 const EMIT_PORT = Number(process.env.EMIT_PORT || 3004)
 // 默认回环绑定：对外统一经网关（XTransformPort）透传；Docker host 网络模式下不额外暴露端口
 const WS_BIND = process.env.BIND_ADDR || "127.0.0.1"
-httpServer.listen(WS_PORT, WS_BIND, () => {
-  console.log(`[ws-hub] WebSocket 枢纽 ${WS_BIND}:${WS_PORT}（socket.io path=/）`)
-})
-emitServer.listen(EMIT_PORT, "127.0.0.1", () => {
-  console.log(`[ws-hub] 事件注入端口 ${EMIT_PORT}（POST /emit + x-hub-secret）`)
-})
+
+// ---- r13c: 端口占用重试退避（EADDRINUSE 不再一崩即溃）----
+// 守护轮次切换瞬间可能出现短暂端口残留：最多 30 次退避重绑，非占用类错误立即失败
+listenWithRetry(httpServer, WS_PORT, WS_BIND, "WebSocket 枢纽（socket.io path=/）")
+listenWithRetry(emitServer, EMIT_PORT, "127.0.0.1", "事件注入端口（POST /emit + x-hub-secret）")
+
+function listenWithRetry(srv: import("http").Server, port: number, host: string, label: string) {
+  let attempt = 0
+  const tryListen = () => {
+    attempt += 1
+    srv.once("error", (e: NodeJS.ErrnoException) => {
+      if (e.code === "EADDRINUSE" && attempt < 30) {
+        console.error(`[ws-hub] ${label} 端口 ${host}:${port} 被占用（第 ${attempt} 次，1.5 秒后重试）`)
+        setTimeout(tryListen, 1500)
+      } else {
+        console.error(`[ws-hub] ${label} 监听失败 ${host}:${port}：${e.message}（进程退出交由守护重启）`)
+        process.exit(1)
+      }
+    })
+    srv.listen(port, host, () => {
+      console.log(`[ws-hub] ${label} ${host}:${port} 已启动`)
+    })
+  }
+  tryListen()
+}
 
 process.on("SIGTERM", () => { httpServer.close(); emitServer.close(); process.exit(0) })
 process.on("SIGINT", () => { httpServer.close(); emitServer.close(); process.exit(0) })

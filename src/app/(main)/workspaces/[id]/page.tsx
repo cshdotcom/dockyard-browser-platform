@@ -1,3 +1,4 @@
+import { resolveShareControl } from "@/lib/share-policy"
 import { notFound } from "next/navigation"
 import { db } from "@/lib/db"
 import { requireAuth, userGroupIds } from "@/lib/permissions"
@@ -15,6 +16,14 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
 
   // 权限：所有者 / 被共享 / 管理员
   const gids = await userGroupIds(ctx.userId)
+  // r13c：四级共享管控解析（供所有者共享按钮禁用态；管理员豁免）
+  const ownerShareControl = await resolveShareControl({ userId: ctx.userId, role: ctx.role, workspaceId: id })
+  const shareControlBlockReason = !ownerShareControl.allowed
+    ? ownerShareControl.reason
+    : ws.shareDisabled
+      ? "该工作区已被管理员禁止共享（沙箱级否决）"
+      : ""
+
   const share = await db.workspaceShare.findFirst({
     where: { workspaceId: id, targetUserId: ctx.userId, revokedAt: null, OR: [{ expireAt: null }, { expireAt: { gt: new Date() } }] },
   })
@@ -99,6 +108,8 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
         isOwner: ws.userId === ctx.userId,
         mySharePermission: share?.permission ?? null,
         isAdmin,
+        shareDisabled: ws.shareDisabled === true,
+        shareBlockedReason: shareControlBlockReason,
         crashCategory: ws.crashCategory,
         policyAllowInternalNetwork: ws.policyAllowInternalNetwork,
         policyAllowSecureLocationAccess: ws.policyAllowSecureLocationAccess,
@@ -124,6 +135,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
       harRecords={harRecords.map((h) => ({ id: h.id, size: fmtBytes(h.sizeBytes), createdAt: fmtDate(h.createdAt) }))}
       runLogs={runLogs.map((l) => ({ id: l.id, status: l.status, log: l.log ?? "", startedAt: fmtDate(l.startedAt) }))}
       publicCdpEndpoint={publicCdpEndpoint}
+      vncBridge={{ mode: ENV.vncBridgePublic, url: ENV.vncBridgeUrl }}
     />
   )
 }

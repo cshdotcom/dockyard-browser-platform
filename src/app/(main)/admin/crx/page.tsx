@@ -57,7 +57,7 @@ export default async function CrxAdminPage({
   const [refEntries, grayTasks, installAgg, blockEntries, statuses, grayList, workspaces] = await Promise.all([
     db.crxPolicyEntry.findMany({
       where: { crxId: { in: crxIds }, deletedAt: null },
-      select: { crxId: true, scopeType: true, scopeId: true, note: true, lockedVersion: true, updateUrl: true },
+      select: { id: true, crxId: true, scopeType: true, scopeId: true, note: true, lockedVersion: true, updateUrl: true },
     }),
     db.crxGrayTask.findMany({ where: { status: { in: ["PENDING", "ROLLING"] } }, select: { entriesJson: true, name: true, status: true } }),
     db.crxInstallStatus.groupBy({ by: ["state"], _count: { _all: true } }),
@@ -188,10 +188,20 @@ export default async function CrxAdminPage({
     crxBlocklistExempt: w.crxBlocklistExempt,
   }))
 
+  // r13c：批量策略下发目标选项（用户组含成员数 / 用户）
+  const [groupRows, memberAgg, userRows] = await Promise.all([
+    db.group.findMany({ where: { deletedAt: null }, select: { id: true, name: true }, orderBy: { name: "asc" }, take: 200 }),
+    db.groupUser.groupBy({ by: ["groupId"], _count: { _all: true } }),
+    db.user.findMany({ where: { deletedAt: null, enabled: true }, select: { id: true, username: true, displayName: true }, orderBy: { username: "asc" }, take: 300 }),
+  ])
+  const memberCountMap = new Map(memberAgg.map((m) => [m.groupId, m._count._all]))
+  const groupOptions = groupRows.map((g) => ({ id: g.id, name: g.name, memberCount: memberCountMap.get(g.id) || 0 }))
+  const userOptions = userRows.map((u) => ({ id: u.id, username: u.username, displayName: u.displayName }))
+
   const refMap: CrxRefMap = {}
   for (const r of refEntries) {
     if (!refMap[r.crxId]) refMap[r.crxId] = []
-    refMap[r.crxId].push({ scopeType: r.scopeType, scopeId: r.scopeId || "", note: r.note || "", lockedVersion: r.lockedVersion || "", updateUrl: r.updateUrl || "" })
+    refMap[r.crxId].push({ entryId: r.id, scopeType: r.scopeType, scopeId: r.scopeId || "", note: r.note || "", lockedVersion: r.lockedVersion || "", updateUrl: r.updateUrl || "" })
   }
   // 灰度任务引用
   for (const t of grayTasks) {
@@ -239,6 +249,8 @@ export default async function CrxAdminPage({
         canManage={canManage}
         isSuper={isSuper}
         role={ctx.role}
+        groupOptions={groupOptions}
+        userOptions={userOptions}
       />
     </div>
   )

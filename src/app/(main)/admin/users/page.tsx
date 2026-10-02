@@ -67,6 +67,7 @@ export default async function AdminUsersPage({
         allowInternalNetwork: true,
         allowSecureLocationAccess: true,
         vncSessionMaxMinutes: true,
+        shareAllowed: true,
         lockedUntil: true,
         failedLoginCount: true,
         quota: true,
@@ -135,6 +136,7 @@ export default async function AdminUsersPage({
     allowInternalNetwork: u.allowInternalNetwork,
     vncSessionMaxMinutes: u.vncSessionMaxMinutes ?? null,
     allowSecureLocationAccess: u.allowSecureLocationAccess,
+    shareAllowed: u.shareAllowed ?? null,
     netPolicy: netPolicies.get(u.id) || null,
   }))
 

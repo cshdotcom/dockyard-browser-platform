@@ -100,6 +100,7 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "ui.siteLogo": { value: "", category: "UI", type: "string", description: "系统Logo URL" },
   "ui.loginAnnouncement": { value: "", category: "UI", type: "string", description: "登录页公告" },
   "mcp.enabled": { value: true, category: "MCP", type: "boolean", description: "MCP/OpenAPI网关开关" },
+  "share.globalAllow": { value: true, category: "GENERAL", type: "boolean", description: "工作区共享全局开关（false=全员禁止共享；四级管控第4层，用户/组/沙箱级可更精细覆盖）" },
   "mcp.perKeyPerSecond": { value: 20, category: "MCP", type: "number", description: "单Key每秒调用上限" },
   "mcp.perKeyPerMinute": { value: 300, category: "MCP", type: "number", description: "单Key每分钟上限" },
   "mcp.perKeyPerHour": { value: 5000, category: "MCP", type: "number", description: "单Key每小时上限" },

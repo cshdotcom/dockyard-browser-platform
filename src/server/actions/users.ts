@@ -940,3 +940,42 @@ export async function setUserNetworkPolicyAction(
     }
   })
 }
+
+// ---- r13c：用户级共享开关（三态：null=继承组 / true=强制允许 / false=强制禁止）----
+// 鉴权：SUPER_ADMIN / ADMIN 全量；GROUP_ADMIN 仅限本组成员
+export async function setUserShareAllowedAction(
+  input: unknown,
+): Promise<ActionResult<{ id: string; shareAllowed: boolean | null }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAuth()
+    const isAdmin = ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN"
+    const isGroupAdmin = ctx.role === "GROUP_ADMIN"
+    if (!isAdmin && !isGroupAdmin) throw new Error("无权设置用户共享开关（需要管理员或组管理员权限）")
+
+    const p = zodValidate(z.object({
+      id: zId,
+      shareAllowed: z.boolean().nullable(), // null=继承所属组
+    }), input)
+
+    const user = await db.user.findUnique({ where: { id: p.id } })
+    if (!user || user.deletedAt) throw new Error("用户不存在或已删除")
+    if (isGroupAdmin && !isAdmin) {
+      const { isGroupAdminOf } = await import("@/lib/permissions")
+      if (!(await isGroupAdminOf(ctx.userId, user.id))) throw new Error("仅可为本组成员设置共享开关")
+    }
+
+    const before = user.shareAllowed
+    await db.user.update({ where: { id: user.id }, data: { shareAllowed: p.shareAllowed } })
+
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "USER_SHARE_SWITCH",
+      resourceType: "USER", resourceId: user.id, resourceName: user.username, ownerUserId: user.id,
+      before: { shareAllowed: before },
+      after: { shareAllowed: p.shareAllowed, note: `管理员 ${ctx.username} 调整用户 ${user.username} 共享开关（${before === null ? "继承组" : before ? "允许" : "禁止"} → ${p.shareAllowed === null ? "继承组" : p.shareAllowed ? "允许" : "禁止"}）` },
+      severity: "WARN",
+    })
+    return { id: user.id, shareAllowed: p.shareAllowed }
+  })
+}

@@ -12,7 +12,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 import {
   Puzzle, Loader2, Plus, Pencil, Trash2, RotateCcw, Ban, Upload, GitBranch, RefreshCw,
-  ShieldAlert, Eye, Search, Send, Undo2, ShieldOff, Link2, Inbox, CheckCircle2, XCircle,
+  ShieldAlert, Eye, Search, Send, Undo2, ShieldOff, Link2, Inbox, CheckCircle2, XCircle, Rocket,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -29,6 +29,7 @@ import {
 import {
   saveCrxPluginAction, toggleCrxPluginAction, recycleCrxPluginAction, restoreCrxPluginAction,
   destroyCrxPluginAction, importCrxCsvAction, saveCrxPolicyEntryAction, removeCrxPolicyEntryAction,
+  batchDeployCrxPolicyAction,
   saveCrxBlocklistAction, removeCrxBlocklistAction, retryCrxInstallAction,
   createCrxGrayTaskAction, rollbackCrxGrayTaskAction, setSandboxCrxSettingsAction,
 } from "@/server/actions/crx"
@@ -120,7 +121,7 @@ export interface CrxWorkspaceOption {
 }
 
 export interface CrxRefMap {
-  [crxId: string]: Array<{ scopeType: string; scopeId: string; note: string; lockedVersion: string; updateUrl: string }>
+  [crxId: string]: Array<{ entryId?: string; scopeType: string; scopeId: string; note: string; lockedVersion: string; updateUrl: string }>
 }
 
 const STATE_META: Record<string, { label: string; tone: string }> = {
@@ -156,6 +157,8 @@ export function CrxPanel({
   canManage,
   isSuper,
   role,
+  groupOptions,
+  userOptions,
 }: {
   tab: string
   pluginRows: CrxPluginRow[]
@@ -174,6 +177,9 @@ export function CrxPanel({
   canManage: boolean
   isSuper: boolean
   role: string
+  /** r13c：批量策略下发目标选项（三级：用户组/用户/单沙箱） */
+  groupOptions: { id: string; name: string; memberCount: number }[]
+  userOptions: { id: string; username: string; displayName: string | null }[]
 }) {
   const router = useRouter()
   const pathname = usePathname()
@@ -188,6 +194,9 @@ export function CrxPanel({
 
   const [pluginDialog, setPluginDialog] = React.useState<CrxPluginRow | "new" | null>(null)
   const [csvDialog, setCsvDialog] = React.useState(false)
+  // r13c：批量策略下发（三级：用户组/用户/单沙箱 × 多选插件）
+  const [deployDialog, setDeployDialog] = React.useState(false)
+  const [deployPreset, setDeployPreset] = React.useState<string[]>([]) // 从库行「下发」预选的插件
   const [csvText, setCsvText] = React.useState("")
   const [refDialog, setRefDialog] = React.useState<CrxPluginRow | null>(null)
   const [destroyDialog, setDestroyDialog] = React.useState<CrxPluginRow | null>(null)
@@ -364,6 +373,11 @@ export function CrxPanel({
             <>
               <Button size="sm" onClick={() => setPluginDialog("new")}><Plus className="mr-1 h-3.5 w-3.5" />新增插件</Button>
               <Button size="sm" variant="outline" onClick={() => setCsvDialog(true)}><Upload className="mr-1 h-3.5 w-3.5" />CSV 批量导入</Button>
+              {canManage && (
+                <Button size="sm" onClick={() => { setDeployPreset([]); setDeployDialog(true) }} title="多选插件 × 多选目标（用户组/用户/单沙箱）一次性下发三级策略">
+                  <Rocket className="mr-1 h-3.5 w-3.5" />批量策略下发
+                </Button>
+              )}
             </>
           )}
           <span className="ml-auto text-xs text-muted-foreground">五级策略优先级：沙箱单插件 &gt; 用户 &gt; 用户组 &gt; 全局 &gt; 插件库默认</span>
@@ -379,6 +393,11 @@ export function CrxPanel({
           rowActions={(p) => (
             <div className="flex flex-wrap items-center gap-1">
               <Button size="sm" variant="ghost" className="h-7" onClick={() => setRefDialog(p)} title="查看引用关系"><Link2 className="h-3.5 w-3.5" /></Button>
+              {canManage && !p.deletedAt && (
+                <Button size="sm" variant="ghost" className="h-7" onClick={() => { setDeployPreset([p.crxId]); setDeployDialog(true) }} title="策略下发到用户组/用户/单沙箱">
+                  <Rocket className="h-3.5 w-3.5" />
+                </Button>
+              )}
               {canManage && !p.deletedAt && (
                 <>
                   <Button size="sm" variant="ghost" className="h-7" onClick={() => setPluginDialog(p)} title="编辑"><Pencil className="h-3.5 w-3.5" /></Button>
@@ -597,6 +616,18 @@ export function CrxPanel({
       />
 
       {/* CSV 批量导入 */}
+      {/* r13c：批量策略下发（三级 × 多选插件） */}
+      <BatchDeployDialog
+        open={deployDialog}
+        onClose={() => setDeployDialog(false)}
+        plugins={pluginRows}
+        groupOptions={groupOptions}
+        userOptions={userOptions}
+        wsOptions={wsOptions}
+        preset={deployPreset}
+        onDeployed={() => router.refresh()}
+      />
+
       <Dialog open={csvDialog} onOpenChange={setCsvDialog}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
@@ -650,12 +681,12 @@ export function CrxPanel({
                   {r.lockedVersion && <Badge variant="secondary" className="font-mono text-[10px]">v{r.lockedVersion}</Badge>}
                   {r.updateUrl && <span className="max-w-48 truncate font-mono" title={r.updateUrl}>{r.updateUrl}</span>}
                   {r.note && <span>{r.note}</span>}
-                  {canManage && r.scopeType !== "GRAY" && (
-                    <Button size="sm" variant="ghost" className="h-6 text-red-600" title="移除该引用"
-                      onClick={() => {
-                        const sp = new URLSearchParams(searchParams.toString())
-                        void sp
-                        toast.info("请在对应作用域（策略中心/用户/沙箱）移除该引用条目")
+                  {canManage && r.scopeType !== "GRAY" && r.entryId && (
+                    <Button size="sm" variant="ghost" className="h-6 text-red-600" title="移除该策略引用（目标沙箱下一轮调度自动清理）"
+                      onClick={async () => {
+                        const res = await removeCrxPolicyEntryAction({ id: r.entryId! })
+                        if (res.code === 0) { toast.success("已移除该策略引用"); router.refresh() }
+                        else toast.error(res.msg || "移除失败")
                       }}>
                       <Trash2 className="h-3 w-3" />
                     </Button>
@@ -1036,5 +1067,189 @@ function BlockForm({ canManage, onSaved }: { canManage: boolean; onSaved: () => 
         {saving && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />} 加入黑名单
       </Button>
     </div>
+  )
+}
+
+// ============================================================
+// r13c：批量策略下发对话框（多选插件 × 三级目标：用户组/用户/单沙箱）
+// 一次生成 N×M 条策略条目（逐对幂等 upsert + 冲突跳过汇总）；
+// 可选覆盖主源/锁定版本（如统一切换公司私有扩展镜像源）
+// ============================================================
+function BatchDeployDialog({ open, onClose, plugins, groupOptions, userOptions, wsOptions, preset, onDeployed }: {
+  open: boolean
+  onClose: () => void
+  plugins: CrxPluginRow[]
+  groupOptions: { id: string; name: string; memberCount: number }[]
+  userOptions: { id: string; username: string; displayName: string | null }[]
+  wsOptions: CrxWorkspaceOption[]
+  preset: string[]
+  onDeployed: () => void
+}) {
+  const [selectedPlugins, setSelectedPlugins] = React.useState<string[]>([])
+  const [scopeType, setScopeType] = React.useState<"GROUP" | "USER" | "SANDBOX">("GROUP")
+  const [selectedTargets, setSelectedTargets] = React.useState<string[]>([])
+  const [targetSearch, setTargetSearch] = React.useState("")
+  const [updateUrl, setUpdateUrl] = React.useState("")
+  const [lockedVersion, setLockedVersion] = React.useState("")
+  const [note, setNote] = React.useState("")
+  const [deploying, setDeploying] = React.useState(false)
+  const [result, setResult] = React.useState<{ deployed: number; skipped: number; conflicts: string[] } | null>(null)
+
+  React.useEffect(() => {
+    if (open) {
+      setSelectedPlugins(preset.length ? preset : [])
+      setSelectedTargets([])
+      setTargetSearch("")
+      setUpdateUrl(""); setLockedVersion(""); setNote("")
+      setResult(null)
+    }
+  }, [open, preset])
+
+  const toggle = (arr: string[], v: string, set: (a: string[]) => void) => set(arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v])
+
+  const availablePlugins = plugins.filter((p) => !p.deletedAt && p.enabled)
+  const targets: { id: string; label: string; sub: string }[] =
+    scopeType === "GROUP"
+      ? groupOptions.map((g) => ({ id: g.id, label: g.name, sub: `${g.memberCount} 成员` }))
+      : scopeType === "USER"
+        ? userOptions.map((u) => ({ id: u.id, label: u.username, sub: u.displayName || "" }))
+        : wsOptions.map((w) => ({ id: w.id, label: w.name, sub: w.ownerName }))
+  const filteredTargets = targetSearch.trim()
+    ? targets.filter((t) => t.label.toLowerCase().includes(targetSearch.trim().toLowerCase()) || t.sub.toLowerCase().includes(targetSearch.trim().toLowerCase()))
+    : targets
+
+  const totalPairs = selectedPlugins.length * selectedTargets.length
+
+  const submit = async () => {
+    setDeploying(true)
+    setResult(null)
+    try {
+      const res = await batchDeployCrxPolicyAction({
+        crxIds: selectedPlugins,
+        scopeType,
+        scopeIds: selectedTargets,
+        updateUrl: updateUrl.trim() || undefined,
+        lockedVersion: lockedVersion.trim() || undefined,
+        note: note.trim() || undefined,
+      })
+      if (res.code === 0 && res.data) {
+        setResult(res.data)
+        toast.success(`批量下发完成：${res.data.deployed} 条策略生效${res.data.skipped ? `，${res.data.skipped} 对跳过` : ""}`)
+        onDeployed()
+      } else {
+        toast.error(res.msg || "批量下发失败")
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "批量下发失败")
+    } finally {
+      setDeploying(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Rocket className="h-4 w-4 text-teal-600" />批量策略下发（三级作用域）</DialogTitle>
+          <DialogDescription>
+            多选插件 × 多选目标，一次性写入 N×M 条策略条目（幂等：已存在的覆盖更新）。生效优先级：沙箱单插件覆盖 {'>'} 用户 {'>'} 用户组 {'>'} 全局 {'>'} 插件库默认。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          {/* 插件多选 */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <Label className="text-xs">① 选择插件（{selectedPlugins.length}/{availablePlugins.length}，仅启用态）</Label>
+              {availablePlugins.length > 0 && (
+                <button type="button" className="text-[11px] text-teal-600 hover:underline"
+                  onClick={() => setSelectedPlugins(selectedPlugins.length === availablePlugins.length ? [] : availablePlugins.map((p) => p.crxId))}>
+                  {selectedPlugins.length === availablePlugins.length ? "全不选" : "全选"}
+                </button>
+              )}
+            </div>
+            <div className="rounded-md border max-h-44 overflow-y-auto divide-y">
+              {availablePlugins.length === 0 && <p className="px-3 py-4 text-xs text-muted-foreground text-center">插件库为空或全部禁用</p>}
+              {availablePlugins.map((p) => (
+                <label key={p.crxId} className="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-muted/60">
+                  <input type="checkbox" checked={selectedPlugins.includes(p.crxId)} onChange={() => toggle(selectedPlugins, p.crxId, setSelectedPlugins)} className="accent-teal-600" />
+                  <span className="font-medium">{p.name}</span>
+                  {p.highRisk && <Badge variant="destructive" className="text-[9px] px-1">高危</Badge>}
+                  <span className="ml-auto font-mono text-[10px] text-muted-foreground">{p.crxId.slice(0, 10)}…</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* 作用域类型 */}
+          <div className="space-y-1.5">
+            <Label className="text-xs">② 目标作用域</Label>
+            <div className="flex gap-1">
+              {([["GROUP", "用户组"], ["USER", "用户"], ["SANDBOX", "单沙箱"]] as const).map(([v, label]) => (
+                <button key={v} type="button"
+                  className={`px-3 py-1.5 text-xs rounded-md border ${scopeType === v ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+                  onClick={() => { setScopeType(v); setSelectedTargets([]) }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 目标多选 */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <Label className="text-xs">③ 选择目标（{selectedTargets.length}/{targets.length}）</Label>
+              <Input value={targetSearch} onChange={(e) => setTargetSearch(e.target.value)} placeholder="搜索目标…" className="h-6 w-40 text-xs" />
+            </div>
+            <div className="rounded-md border max-h-44 overflow-y-auto divide-y">
+              {filteredTargets.length === 0 && <p className="px-3 py-4 text-xs text-muted-foreground text-center">无匹配目标</p>}
+              {filteredTargets.map((t) => (
+                <label key={t.id} className="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-muted/60">
+                  <input type="checkbox" checked={selectedTargets.includes(t.id)} onChange={() => toggle(selectedTargets, t.id, setSelectedTargets)} className="accent-teal-600" />
+                  <span className="font-medium truncate">{t.label}</span>
+                  {t.sub && <span className="text-[10px] text-muted-foreground truncate">{t.sub}</span>}
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* 可选项 */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <div className="space-y-1">
+              <Label className="text-xs">覆盖主源（可选）</Label>
+              <Input value={updateUrl} onChange={(e) => setUpdateUrl(e.target.value)} className="font-mono text-[11px]" placeholder="留空=插件库默认" />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">锁定版本（可选）</Label>
+              <Input value={lockedVersion} onChange={(e) => setLockedVersion(e.target.value)} className="font-mono text-[11px]" placeholder="留空=不覆盖" />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">备注（可选）</Label>
+              <Input value={note} onChange={(e) => setNote(e.target.value)} className="text-[11px]" placeholder="如：市场部专用" />
+            </div>
+          </div>
+
+          {/* 汇总 */}
+          <div className="rounded-md border border-teal-200 bg-teal-50 dark:bg-teal-950/30 px-3 py-2 text-xs">
+            将下发 <b>{selectedPlugins.length}</b> 个插件 × <b>{selectedTargets.length}</b> 个目标 = <b>{totalPairs}</b> 条策略；目标沙箱在下一轮安装调度（每分钟）自动拉起。
+          </div>
+
+          {result && result.conflicts.length > 0 && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400 space-y-0.5">
+              <p className="font-medium">跳过 {result.skipped} 对（冲突/超限）：</p>
+              {result.conflicts.slice(0, 8).map((c, i) => <p key={i} className="font-mono">{c}</p>)}
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>{result ? "关闭" : "取消"}</Button>
+          <Button disabled={deploying || totalPairs === 0 || !!result} onClick={submit}>
+            {deploying ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Rocket className="mr-1 h-3.5 w-3.5" />}
+            {result ? "已完成" : `下发 ${totalPairs} 条策略`}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }

@@ -11,7 +11,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 import {
   Loader2, MoreHorizontal, Square, RotateCw, Trash2, Flame, Unplug, Timer, UserRoundCog, Anchor,
-  AlertTriangle, X, Columns3, ShieldCheck, ShieldX, Container, History, ArrowRightLeft,
+  AlertTriangle, X, Columns3, ShieldCheck, ShieldX, Container, History, ArrowRightLeft, Share2,
 } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
@@ -513,6 +513,13 @@ export function WorkspacesTable(props: Props) {
             onClick={() => pushQuery({ page: "1", view: "deleted" })}
           >
             <History className="h-3 w-3" /> 回收站记录
+          </button>
+          <button
+            type="button"
+            className={`px-3 py-1.5 text-xs font-medium flex items-center gap-1 bg-background hover:bg-muted text-primary`}
+            onClick={() => pushQuery({ page: "1", view: "shares" })}
+          >
+            <Share2 className="h-3 w-3" /> 共享关系总列表
           </button>
         </div>
 

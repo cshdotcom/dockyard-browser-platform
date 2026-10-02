@@ -181,6 +181,28 @@ docker run -d --name dockyard --network host \
 > docker run -e PUBLIC_BASE_URL=https://workspace.example.cn ... ghcr.io/cshdotcom/dockyard-browser-platform
 > ```
 
+### 跨域名部署（VNC 独立域名 / 平台域名分离）
+平台与 VNC 桥可分别部署在不同域名下，三种形态按需选择：
+
+**形态一：统一域名（默认，零配置）**
+VNC/WS 全部经平台入口网关嵌入当前访问域名（回环监听，不对外暴露端口）。反向代理只需透传一条域名即可，WebSocket 升级头由网关自动处理。
+
+**形态二：VNC 独立域名（跨域名直连）**
+VNC 流量走独立域名/独立入口（适合 VNC 与页面分置两地、CDN 分流、带宽隔离场景）：
+```bash
+docker run -e VNC_BRIDGE_PUBLIC=url \
+  -e VNC_BRIDGE_URL=wss://vnc.example.com ...
+```
+- 前端取票后直接对 `wss://vnc.example.com` 建立 WebSocket（不再经平台网关绕行）
+- 反向代理需透传 WS 升级头（`Upgrade`/`Connection`）且关闭读超时（RFB 长连接）
+- 鉴权与域名无关：连接采用 HMAC 单次票据（工作区 UUID + 时间戳 + 权限签名），跨域连接安全性不降级
+- 桥健康探测端点 `/health` 已放行 CORS，可从任一域名探测诊断
+
+**形态三：独立端口直连**
+`VNC_BRIDGE_PUBLIC=port` 时桥绑定 `0.0.0.0`，宿主 `-p 3005:3005` 映射后可 `ws://主机:3005` 直连。
+
+> 平台域名与 CDP 公网端点配置见上文「公开域名配置」；VNC 独立域名时工作区详情页「远程桌面 → VNC 接入信息」会展示实际生效的桥地址，便于联调确认。
+
 ### 外部服务对接（生产环境）
 | 环境变量 | 说明 | 缺省行为 |
 |---|---|---|

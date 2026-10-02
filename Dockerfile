@@ -73,6 +73,13 @@ RUN set -e; \
       && rm -rf /tmp/sing-box* \
     || echo "[warn] sing-box 下载失败（代理功能将保持模拟模式，不影响其余功能）"
 
+# ---- 跨域名部署（r13c 文档化；按需 docker run -e 覆盖）----
+# PUBLIC_BASE_URL   ：平台对外域名（如 https://browser.example.com）→ 工作区详情「连接信息」展示公网 CDP 网关端点
+#                     （Puppeteer/Playwright/外部脚本接入用）；同时作为邮件链接/分享链接的基准地址
+# VNC_BRIDGE_URL    ：VNC 桥独立域名（如 wss://vnc.example.com）→ 前端取票后直连该地址（反代需透传 WS 升级头）；
+#                     未配置时 VNC 经统一网关嵌入当前访问域名（默认，零配置）
+# VNC_BRIDGE_PUBLIC : gateway（默认，回环仅网关）| port（独立端口对外，需 -p 映射）| url（跨域名直连，配合 VNC_BRIDGE_URL）
+# 更多部署形态见 README「跨域名部署」章节
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \

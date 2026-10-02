@@ -6,7 +6,7 @@
 import { actionHandler, type ActionResult } from "@/lib/api"
 import { zodValidate, zId, zPrecision, zUsername } from "@/lib/validators"
 import { z } from "zod"
-import { requireAdmin, type AuthContext } from "@/lib/permissions"
+import { requireAdmin, requireRole, requireWritableMode, type AuthContext } from "@/lib/permissions"
 import { db } from "@/lib/db"
 import { writeAudit } from "@/lib/audit"
 import { raiseAlert } from "@/lib/alerts"
@@ -459,5 +459,125 @@ export async function setWorkspaceVncLimitAction(input: unknown): Promise<Action
       before, after: { vncSessionMaxMinutes: p.vncSessionMaxMinutes }, severity: "WARN",
     })
     return { id: ws.id, vncSessionMaxMinutes: p.vncSessionMaxMinutes }
+  })
+}
+
+// ============================================================
+// r13c：企业级共享关系总列表管控（管理员侧）
+// 精确到「共享给谁」的全生命周期管理：撤销单人 / 批量撤销 / 按工作区整批撤销 /
+// 沙箱级禁共享否决开关（四级管控最高层）
+// ============================================================
+
+// ---- 撤销单个共享（精确移除某个被共享者的访问权） ----
+export async function adminRevokeShareAction(input: unknown): Promise<ActionResult<{ shareId: string }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireRole(["SUPER_ADMIN", "ADMIN", "GROUP_ADMIN"])
+    const { shareId } = zodValidate(z.object({ shareId: zId }), input)
+
+    const share = await db.workspaceShare.findUnique({ where: { id: shareId } })
+    if (!share) throw new Error("共享记录不存在")
+    if (share.revokedAt) throw new Error("该共享已被撤销，无需重复操作")
+    const ws = await db.browserWorkspace.findUnique({ where: { id: share.workspaceId } })
+    if (!ws) throw new Error("共享指向的工作区已不存在")
+
+    // 组管理员范围校验（仅可撤销本组资源的共享）
+    if (ctx.role === "GROUP_ADMIN") {
+      const { isGroupAdminOf } = await import("@/lib/permissions")
+      if (!(await isGroupAdminOf(ctx.userId, ws.userId)) && !(await isGroupAdminOf(ctx.userId, share.targetUserId))) {
+        throw new Error("仅可管理本组成员相关的共享")
+      }
+    }
+
+    const target = await db.user.findUnique({ where: { id: share.targetUserId }, select: { username: true } })
+    await db.workspaceShare.update({ where: { id: shareId }, data: { revokedAt: new Date() } })
+
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "ADMIN_SHARE_REVOKE",
+      resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name, ownerUserId: ws.userId,
+      before: { targetUser: target?.username || share.targetUserId, permission: share.permission, revoked: false },
+      after: { targetUser: target?.username || share.targetUserId, permission: share.permission, revoked: true },
+      severity: "WARN",
+    })
+    return { shareId }
+  })
+}
+
+// ---- 批量撤销共享（勾选多条；返回成功/跳过计数） ----
+export async function adminBatchRevokeSharesAction(input: unknown): Promise<ActionResult<{ revoked: number; skipped: number }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireRole(["SUPER_ADMIN", "ADMIN"])
+    const { shareIds } = zodValidate(z.object({ shareIds: z.array(zId).min(1).max(200) }), input)
+
+    const shares = await db.workspaceShare.findMany({ where: { id: { in: shareIds } } })
+    const todo = shares.filter((s) => !s.revokedAt)
+    if (todo.length) {
+      await db.workspaceShare.updateMany({ where: { id: { in: todo.map((s) => s.id) } }, data: { revokedAt: new Date() } })
+      await writeAudit({
+        operatorUserId: ctx.userId, operatorName: ctx.username,
+        operationType: "ADMIN_SHARE_BATCH_REVOKE",
+        resourceType: "WORKSPACE", resourceId: todo[0].workspaceId,
+        after: { count: todo.length, shareIds: todo.map((s) => s.id) },
+        severity: "WARN",
+      })
+    }
+    return { revoked: todo.length, skipped: shares.length - todo.length }
+  })
+}
+
+// ---- 按工作区整批撤销（一键断掉该工作区的全部共享；同时可选禁共享） ----
+export async function adminRevokeAllWorkspaceSharesAction(input: unknown): Promise<ActionResult<{ revoked: number }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireRole(["SUPER_ADMIN", "ADMIN", "GROUP_ADMIN"])
+    const { workspaceId } = zodValidate(z.object({ workspaceId: zId }), input)
+    const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ctx.role === "GROUP_ADMIN") {
+      const { isGroupAdminOf } = await import("@/lib/permissions")
+      if (!(await isGroupAdminOf(ctx.userId, ws.userId))) throw new Error("仅可管理本组成员的工作区")
+    }
+
+    const r = await db.workspaceShare.updateMany({
+      where: { workspaceId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "ADMIN_SHARE_REVOKE_ALL",
+      resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name, ownerUserId: ws.userId,
+      after: { revoked: r.count }, severity: "WARN",
+    })
+    return { revoked: r.count }
+  })
+}
+
+// ---- 沙箱级禁共享否决开关（四级管控最高优先级：开启后该工作区禁止任何新共享/链接） ----
+export async function adminSetWorkspaceShareDisabledAction(input: unknown): Promise<ActionResult<{ id: string; shareDisabled: boolean }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireRole(["SUPER_ADMIN", "ADMIN", "GROUP_ADMIN"])
+    const { workspaceId, shareDisabled } = zodValidate(z.object({
+      workspaceId: zId,
+      shareDisabled: z.boolean(),
+    }), input)
+
+    const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ctx.role === "GROUP_ADMIN") {
+      const { isGroupAdminOf } = await import("@/lib/permissions")
+      if (!(await isGroupAdminOf(ctx.userId, ws.userId))) throw new Error("仅可管理本组成员的工作区")
+    }
+
+    await db.browserWorkspace.update({ where: { id: ws.id }, data: { shareDisabled } })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "WORKSPACE_SHARE_VETO",
+      resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name, ownerUserId: ws.userId,
+      before: { shareDisabled: ws.shareDisabled }, after: { shareDisabled }, severity: "WARN",
+    })
+    return { id: ws.id, shareDisabled }
   })
 }

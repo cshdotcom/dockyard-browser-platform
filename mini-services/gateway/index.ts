@@ -100,7 +100,8 @@ function pumpUpstream(upstreamUrl: string, headers: Headers): Promise<WebSocket>
   })
 }
 
-Bun.serve({
+// ---- r13c: 端口占用重试退避（EADDRINUSE 不再一崩即溃；网关是对外唯一入口，必须存活）----
+const gatewayOptions = {
   port: GATEWAY_PORT,
   idleTimeout: 0, // VNC RFB 长连接不断开
   fetch(req, srv) {
@@ -179,6 +180,28 @@ Bun.serve({
       if (d) d.upstream = null
     },
   },
-})
+}
+
+declare const Bun: { serve<T = unknown>(cfg: Record<string, unknown>): { stop(force?: boolean): void } }
+let gwServer: { stop(force?: boolean): void } | null = null
+for (let attempt = 1; attempt <= 30 && !gwServer; attempt++) {
+  try {
+    gwServer = Bun.serve(gatewayOptions as never)
+  } catch (e) {
+    const msg = String((e as Error)?.message || e)
+    const inUse = /EADDRINUSE|address.*in use|port.*in use|Is port/i.test(msg)
+    console.error(`[gateway] 第 ${attempt} 次监听端口 ${GATEWAY_PORT} 失败：${msg}`)
+    if (!inUse) break
+    console.error(`[gateway] 端口被占用，1.5 秒后重试（守护轮次切换的短暂残留会自动释放）`)
+    await new Promise((r) => setTimeout(r, 1500))
+  }
+}
+if (!gwServer) {
+  console.error(`[gateway] 无法监听端口 ${GATEWAY_PORT}（重试 30 次后放弃，进程退出交由守护重启）`)
+  process.exit(1)
+}
 
 console.log(`[gateway] Dockyard 统一入口网关已启动: 端口 ${GATEWAY_PORT}（对外唯一 UI 端口）→ Next ${APP_TARGET} | 桥/HUB 回环透传 (${[...ALLOWED_TRANSFORM_PORTS].join("/")})`)
+
+// 模块标记（tsc：top-level await 需要 ESM 上下文；对 bun 运行无影响）
+export {}

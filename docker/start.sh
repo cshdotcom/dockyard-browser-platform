@@ -1,9 +1,16 @@
 #!/bin/sh
 # ============================================================
-# Dockyard All-In-One 启动脚本（r13：单容器全内置）
-# 自检 → 数据库初始化 → WS枢纽 → VNC桥 → 内置调度 → 主服务
-# 自检：端口占用 / 数据库连通 / 目录权限 / 嵌入式浏览器组件
+# Dockyard All-In-One 启动脚本（r13c：三重启动可靠性修复）
+# 自检 → 数据库初始化 → WS枢纽 → VNC桥 → 内置调度 → 主服务 → 统一网关
 # 由 entrypoint-guard.sh 守护调用：本脚本退出（崩溃）时 guard 自动整轮重启
+#
+# r13c 关键修复（生产 EADDRINUSE 无限崩溃循环根因）：
+#   1. trap 信号名兼容：dash(/bin/sh) 要求无 SIG 前缀 —— 旧写法 `trap ... SIGTERM`
+#      在 set -e 下直接中止脚本（exit=1，主服务从未启动，子进程全部变孤儿）
+#   2. trap 前置：进入脚本即装好信号钩子，启动过程中收到 TERM 也能完整清理
+#   3. EXIT 兜底清理：任意退出路径（崩溃/信号/正常）都终止全部子进程，
+#      杜绝孤儿 vnc-bridge/ws-hub 占端口导致下一轮 EADDRINUSE
+#   4. 健康探测改用 wget（镜像内未装 curl，旧探测恒超时 60 秒）
 # ============================================================
 set -e
 
@@ -12,7 +19,30 @@ DB_PATH="/app/db/custom.db"
 
 log() { echo "[dockyard-start] $1"; }
 
-# ---- 0. 日志转发：全部服务日志同步到容器 stdout（docker logs 直接可看）----
+# ---- 0. 子进程登记 + 信号钩子（必须在启动任何子进程之前装好）----
+# ALL_PIDS 登记全部后台子进程；term_handler 处理 docker stop；
+# cleanup_children 由 EXIT 兜底触发 —— 无论正常退出还是 set -e 崩溃中止，
+# 都先杀干净子进程再退出，防止孤儿进程占端口（EADDRINUSE 崩溃循环根因）。
+ALL_PIDS=""
+MAIN_PID=""
+cleanup_children() {
+  # 幂等：对已退出 PID 的 kill 错误全部吞掉
+  for CP in $ALL_PIDS; do kill -TERM "$CP" 2>/dev/null || true; done
+  # 短等待让进程优雅退出，随后强杀残留
+  sleep 2
+  for CP in $ALL_PIDS; do kill -KILL "$CP" 2>/dev/null || true; done
+}
+term_handler() {
+  log "收到终止信号，停止全部服务..."
+  cleanup_children
+  if [ -n "$MAIN_PID" ]; then wait "$MAIN_PID" 2>/dev/null || true; fi
+  exit 0
+}
+# dash 兼容：信号名不带 SIG 前缀（带前缀在 dash 报 "bad trap" 且 trap 不生效）
+trap term_handler TERM INT
+trap cleanup_children EXIT
+
+# ---- 0.5 日志转发：全部服务日志同步到容器 stdout（docker logs 直接可看）----
 # 服务进程本身写各自日志文件（崩溃报告/持久留档），forward_log 用 tail -F 把
 # 追加内容实时回显到 stdout —— docker logs 与文件双通道，互不影响 PID 语义。
 forward_log() {
@@ -20,11 +50,10 @@ forward_log() {
   mkdir -p "$(dirname "$1")" 2>/dev/null || true
   touch "$1" 2>/dev/null || true
   tail -n 0 -F "$1" 2>/dev/null &
+  ALL_PIDS="$ALL_PIDS $!"
 }
-LOG_PIDS=""
 for LF in /app/storage/server.log /app/storage/ws-hub.log /app/storage/vnc-bridge.log /app/storage/gateway.log /app/storage/cron-ping.log; do
   forward_log "$LF"
-  LOG_PIDS="$LOG_PIDS $!"
 done
 log "日志双通道已启用：server/ws-hub/vnc-bridge/gateway/cron 输出同步至 docker logs"
 
@@ -88,6 +117,15 @@ if [ -z "${VNC_BRIDGE_SECRET:-}" ]; then
 fi
 # VNC 桥公网接入形态：gateway = 经统一入口网关嵌入网页端（默认，回环监听不对外）；port = 独立端口直连（需 -p 映射）
 export VNC_BRIDGE_PUBLIC="${VNC_BRIDGE_PUBLIC:-gateway}"
+# 跨域名部署：VNC_BRIDGE_URL 显式指定桥对外地址（如 wss://vnc.example.com），
+# 前端取票后按该地址建立 WebSocket（反代需透传 WS 升级头）
+if [ -n "${VNC_BRIDGE_URL:-}" ]; then
+  log "VNC 桥跨域名模式：$VNC_BRIDGE_URL（前端将直连该地址）"
+fi
+# r13c：平台公网域名配置透出（连接信息卡公网 CDP 端点 / 分享链接基准地址）
+if [ -n "${PUBLIC_BASE_URL:-}" ]; then
+  log "平台公网域名：$PUBLIC_BASE_URL（工作区详情将展示公网 CDP 网关端点）"
+fi
 
 # 内部调度密钥（未显式配置时随机生成；内置调度器与外部 cron 均用它触发 /api/cron）
 if [ -z "${CRON_SECRET:-}" ]; then
@@ -110,16 +148,17 @@ ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin@2026}" bun prisma/seed.ts 2>&1 | tail -3
 
 # ---- 4. WS 枢纽（回环端口 ${WS_HUB_PORT:-3003}，事件注入 3004；对外统一经网关 XTransformPort 透传）----
 log "启动 WebSocket 枢纽（回环）..."
-(cd mini-services/ws-hub && PORT=${WS_HUB_PORT:-3003} BIND_ADDR=127.0.0.1 bun index.ts >> /app/storage/ws-hub.log 2>&1) &
-WS_PID=$!
+(cd mini-services/ws-hub && PORT=${WS_HUB_PORT:-3003} BIND_ADDR=127.0.0.1 exec bun index.ts >> /app/storage/ws-hub.log 2>&1) &
+ALL_PIDS="$ALL_PIDS $!"
 
 # ---- 4.5 HelmPort VNC 网关桥（票据HMAC鉴权 + RFB TCP中转）----
 # 回环绑定（VNC_BRIDGE_PUBLIC=port 时对外 0.0.0.0 供独立端口直连）；默认 gateway 模式经统一网关嵌入网页端
+# 桥内部自带端口占用重试（EADDRINUSE 退避重绑，最多 30 次），不再一崩即溃
 BRIDGE_BIND="${VNC_BRIDGE_PUBLIC:-gateway}"
 if [ "$BRIDGE_BIND" = "port" ]; then BIND_HOST=0.0.0.0; else BIND_HOST=127.0.0.1; fi
 log "启动 VNC 网关桥（${BIND_HOST}，模式 $BRIDGE_BIND）..."
-(cd mini-services/vnc-bridge && VNC_BRIDGE_PORT=$VNC_BRIDGE_PORT BIND_HOST=$BIND_HOST bun index.ts >> /app/storage/vnc-bridge.log 2>&1) &
-BRIDGE_PID=$!
+(cd mini-services/vnc-bridge && VNC_BRIDGE_PORT=$VNC_BRIDGE_PORT BIND_HOST=$BIND_HOST exec bun index.ts >> /app/storage/vnc-bridge.log 2>&1) &
+ALL_PIDS="$ALL_PIDS $!"
 
 # ---- 4.6 内置定时任务调度器（默认开启；与外部 cron 可并存 —— 接口侧内存锁防重入）----
 # 环回 TCP 触发受保护 /api/cron（此前依赖用户手工配置外部 crontab，漏配时
@@ -136,9 +175,7 @@ if [ "${BUILTIN_CRON:-1}" = "1" ]; then
       sleep "$CRON_INTERVAL"
     done
   ) >> /app/storage/cron-ping.log 2>&1 &
-  CRON_PID=$!
-else
-  CRON_PID=""
+  ALL_PIDS="$ALL_PIDS $!"
 fi
 
 # ---- 5. Next.js 主服务（standalone）----
@@ -156,31 +193,23 @@ fi
 log "启动 Dockyard 主服务（回环）：http://127.0.0.1:${APP_INTERNAL_PORT}（server.js=${SERVER_JS}）"
 export HOSTNAME=127.0.0.1
 cd "$APP_DIR"
-term_handler() {
-  log "收到终止信号，停止全部服务..."
-  if [ -n "$GATEWAY_PID" ]; then kill "$GATEWAY_PID" 2>/dev/null || true; fi
-  if [ -n "$MAIN_PID" ]; then kill "$MAIN_PID" 2>/dev/null || true; fi
-  kill $WS_PID $BRIDGE_PID 2>/dev/null || true
-  if [ -n "$CRON_PID" ]; then kill "$CRON_PID" 2>/dev/null || true; fi
-  for LP in $LOG_PIDS; do kill "$LP" 2>/dev/null || true; done
-  if [ -n "$MAIN_PID" ]; then wait "$MAIN_PID" 2>/dev/null || true; fi
-  exit 0
-}
-trap term_handler SIGTERM SIGINT
 # Next 监听回环内部端口（对外流量统一由网关转发）
 PORT=$APP_INTERNAL_PORT bun "$SERVER_JS" >> /app/storage/server.log 2>&1 &
 MAIN_PID=$!
+ALL_PIDS="$ALL_PIDS $MAIN_PID"
 
 # ---- 6. 统一入口网关（对外唯一 UI 端口 $GATEWAY_PORT：Next/桥/HUB 全透传，含 WebSocket）----
 log "启动统一入口网关：http://0.0.0.0:${GATEWAY_PORT}（VNC/WS 经网关嵌入，对外仅 网页+CDP 两端口）..."
 (cd mini-services/gateway && GATEWAY_PORT=$GATEWAY_PORT APP_INTERNAL_PORT=$APP_INTERNAL_PORT \
   GATEWAY_TRANSFORM_PORTS="${GATEWAY_TRANSFORM_PORTS:-${WS_HUB_PORT:-3003},3004,${VNC_BRIDGE_PORT}}" \
-  bun index.ts >> /app/storage/gateway.log 2>&1) &
+  exec bun index.ts >> /app/storage/gateway.log 2>&1) &
 GATEWAY_PID=$!
+ALL_PIDS="$ALL_PIDS $GATEWAY_PID"
 
 # 健康探测：网关就绪后再进入主等待（网关就绪 = 全链路可用）
+# 镜像内只装 wget 不装 curl —— 旧版误用 curl 恒报超时（127 command-not-found）
 GATEWAY_WAIT=0
-until curl -sf "http://127.0.0.1:${GATEWAY_PORT}/__gateway/health" >/dev/null 2>&1 || [ $GATEWAY_WAIT -ge 60 ]; do
+until wget -q -O /dev/null --timeout=3 "http://127.0.0.1:${GATEWAY_PORT}/__gateway/health" 2>/dev/null || [ $GATEWAY_WAIT -ge 60 ]; do
   sleep 1; GATEWAY_WAIT=$((GATEWAY_WAIT + 1))
 done
 if [ $GATEWAY_WAIT -lt 60 ]; then
@@ -189,4 +218,5 @@ else
   log "警告：网关健康探测超时（进程仍在运行，可能启动缓慢或异常，查看 storage/gateway.log）"
 fi
 
-wait $MAIN_PID
+# 主等待：主服务退出（含崩溃）→ EXIT 钩子自动清理全部子进程 → guard 下一轮干净重启
+wait "$MAIN_PID"

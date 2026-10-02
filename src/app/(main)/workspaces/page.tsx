@@ -1,6 +1,7 @@
 import { db } from "@/lib/db"
 import { requireAuth, userGroupIds } from "@/lib/permissions"
 import { parseListQuery, pageSkipTake, safeOrderBy, fmtDate } from "@/lib/utils-server"
+import { resolveShareControl } from "@/lib/share-policy"
 import { WorkspacesTable } from "./workspaces-table"
 
 export const metadata = { title: "浏览器工作区" }
@@ -71,27 +72,45 @@ export default async function WorkspacesPage({
   const users = userIds.length > 0 ? await db.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true, displayName: true } }) : []
   const userMap = new Map(users.map((u) => [u.id, u]))
 
-  const data = rows.map((r) => ({
-    id: r.id,
-    uuid: r.uuid,
-    name: r.name,
-    mode: r.mode,
-    status: r.status,
-    ownerName: userMap.get(r.userId)?.displayName || userMap.get(r.userId)?.username || "-",
-    isOwner: r.userId === ctx.userId,
-    isShared: sharedIds.some((s) => s.workspaceId === r.id),
-    proxyNodeId: r.proxyNodeId,
-    singboxInstanceId: r.singboxInstanceId,
-    ttlMinutes: r.ttlMinutes,
-    idleTimeoutMinutes: r.idleTimeoutMinutes,
-    cdpCallCount: r.cdpCallCount,
-    novncConnCount: r.novncConnCount,
-    tags: (r.tags as string[]) || [],
-    createdAt: fmtDate(r.createdAt),
-    profileSnapshotId: r.profileSnapshotId,
-    steelSessionId: r.steelSessionId,
-    novncSessionId: r.novncSessionId,
-  }))
+  // r13c：四级共享管控解析（一次解析用户/组/全局层，沙箱级否决逐行叠加）
+  // 仅对自己的行计算（被共享行的共享入口在所有者侧）
+  const baseShareControl = await resolveShareControl({ userId: ctx.userId, role: ctx.role })
+
+  const data = rows.map((r) => {
+    const isOwner = r.userId === ctx.userId
+    let shareControl: { allowed: boolean; reason: string } | undefined
+    if (isOwner) {
+      if (!baseShareControl.allowed) {
+        shareControl = { allowed: false, reason: baseShareControl.reason }
+      } else if (r.shareDisabled) {
+        shareControl = { allowed: false, reason: "该工作区已被管理员禁止共享（沙箱级否决）" }
+      } else {
+        shareControl = { allowed: true, reason: "" }
+      }
+    }
+    return {
+      id: r.id,
+      uuid: r.uuid,
+      name: r.name,
+      mode: r.mode,
+      status: r.status,
+      ownerName: userMap.get(r.userId)?.displayName || userMap.get(r.userId)?.username || "-",
+      isOwner,
+      isShared: sharedIds.some((s) => s.workspaceId === r.id),
+      proxyNodeId: r.proxyNodeId,
+      singboxInstanceId: r.singboxInstanceId,
+      ttlMinutes: r.ttlMinutes,
+      idleTimeoutMinutes: r.idleTimeoutMinutes,
+      cdpCallCount: r.cdpCallCount,
+      novncConnCount: r.novncConnCount,
+      tags: (r.tags as string[]) || [],
+      createdAt: fmtDate(r.createdAt),
+      profileSnapshotId: r.profileSnapshotId,
+      steelSessionId: r.steelSessionId,
+      novncSessionId: r.novncSessionId,
+      shareControl,
+    }
+  })
 
   return (
     <div className="space-y-6">

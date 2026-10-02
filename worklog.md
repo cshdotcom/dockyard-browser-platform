@@ -522,3 +522,44 @@ Work Log:
 
 Stage Summary:
 - "全部都要继续"指令完整落地：13 项需求清单全部经真实浏览器走查验证（含生产等效环境）；三大实质缺陷修复（2FA 用户级登录链路缺失/会话中门控缺失/网关 gzip 双重解压）；单容器"仅 2 端口"架构从设计变为现实（统一网关 + 回环收敛 + 客户端零改动兼容）
+
+---
+Task ID: 20（r13c）
+Agent: 主 Agent（Super Z）
+Task: 生产启动崩溃根因修复（用户上传 docker logs 实证）+ 企业级共享权限四级管控 + VNC 跨域名连接 + CRX 批量策略下发
+
+Work Log:
+- 诊断用户上传的容器日志（4441 行）：定位三重根因——
+  ① docker/start.sh `trap term_handler SIGTERM SIGINT` 在 dash(/bin/sh) 下报 "bad trap"，且 set -e 直接中止脚本（exit=1）→ 主服务从未启动（v1.6.1 无限崩溃循环 = 用户 502 真凶）；本地 sh 复现实验证实
+  ② `socket.io` 不在 package.json（仅前端 socket.io-client）→ ws-hub 在容器内必崩 223 次
+  ③ 崩溃轮孤儿 vnc-bridge 进程残留占 3046 端口 → EADDRINUSE 222 次
+- P0 修复：
+  · start.sh：trap 改 `TERM INT`（dash 兼容）+ 前置到启动任何子进程之前 + EXIT 兜底清理（ALL_PIDS 登记，TERM→2s→KILL 幂等）+ 健康探测 curl→wget（镜像未装 curl，旧探测恒超时）
+  · entrypoint-guard.sh：同 trap 修复 + setsid 进程组启动 + 崩溃轮整组击杀（kill -TERM/-KILL -- -PGID）+ 崩溃线索补 ws-hub/vnc-bridge 日志尾
+  · bun add socket.io@4.8.4；实测 ws-hub/vnc-bridge/gateway 三服务启动成功
+  · 三服务 EADDRINUSE 重试退避（30 次 × 1.5s，非占用错误立即退出）
+  · 实测：sh -n 语法通过、setsid+组击杀清理验证、端口冲突重试日志验证
+- P1 企业级共享四级管控：
+  · Schema：Group.allowShare / User.shareAllowed（三态）/ BrowserWorkspace.shareDisabled + SystemConfig share.globalAllow
+  · src/lib/share-policy.ts：resolveShareControl（沙箱否决 > 用户 > 组 > 全局 > 遗留权限锁兼容）+ assertShareAllowed
+  · 动作门禁：shareWorkspace / createShareLink / redeemShareLink（兑换时同步校验发起人策略+沙箱否决，防旧链接复活）
+  · 管理端 4 个新 action：adminRevokeShare（单人）/ adminBatchRevokeShares（勾选批撤）/ adminRevokeAllWorkspaceShares（整工作区）/ adminSetWorkspaceShareDisabled（沙箱否决开关）
+  · 管理端 UI：工作区管控新增「共享关系总列表」视图（5 统计卡+状态/权限筛选+关键词跨表搜索+行内撤销/全撤+沙箱否决 Switch+批量撤销工具栏）
+  · 用户管理行菜单「共享权限」三态子菜单；用户组表单/树徽章「允许工作区共享」；setUserShareAllowed/setGroupAllowShare actions
+  · 用户端：列表行共享按钮（四级阻断禁用+原因 tooltip）+ 详情页共享按钮禁用态 + 共享面板否决横幅 + 共享弹窗抽成共用组件 share-dialogs.tsx（列表/详情复用）
+  · 顺手修复：admin-workspaces.ts requireRole/requireWritableMode 未导入（r13b 遗留运行时 bug）、transferred 类型
+- P2 VNC 跨域名：
+  · 详情页远程桌面新增「VNC 接入信息」卡（bridge 模式标签 + VNC_BRIDGE_URL 公网地址展示/配置引导）
+  · vnc-bridge /health 加 CORS + mode 字段（跨域部署诊断）；start.sh/Dockerfile env 文档化；README 新增「跨域名部署」三形态章节
+- P3 CRX 扩展：
+  · 新 action batchDeployCrxPolicyAction（多选插件×三级目标 N×M 幂等下发，逐对冲突/沙箱上限校验+汇总跳过）
+  · crx-panel 新「批量策略下发」对话框（插件多选/作用域三选/目标搜索多选/覆盖源版本/汇总预览/冲突报告）+ 库行「下发」快捷入口 + 引用关系图真实删除接线（原来只是 toast 占位）
+- QA（agent-browser 实走 + 10 张截图 qa/r13c → download/qa-r13c-screenshots.zip 405KB）：
+  总列表渲染/单人撤销/沙箱否决开关（禁共享徽章）/demo 行按钮禁用带原因/行内弹窗搜索点选提交落库/CRX 1 插件×1 组下发落库/VNC 卡/组表单开关/用户三态菜单
+- 质量门：eslint 改动文件零告警；tsc 本轮新增错误清零（存量 172 行为预存基线，next.config ignoreBuildErrors）；next build 生产构建通过；QA 种子数据清理复位（工作区 0/共享 0/插件 0，开关全复位）
+
+Stage Summary:
+- 关键交付：v1.6.1 生产崩溃循环根因三连修复（trap/socket.io/孤儿进程）——用户容器当前 20+ 轮循环将随 v1.6.3 镜像终结
+- 企业级共享权限体系完整落地：四级管控 + 总列表精确撤销（用户原话全部覆盖：用户端有按钮/后台精确到用户·组·沙箱·策略/取消共享/移除某个被共享者/总列表控制）
+- VNC 跨域名三形态（统一域名/独立域名/独立端口）全部可用 + 文档；CRX 三级批量下发补齐
+- 待办（下一轮）：502 健康检查细化、邮件配置保存、长列表滚动、Pids 面板、2FA 门控验证、全局搜索、内网穿透实测

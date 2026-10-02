@@ -71,6 +71,7 @@ function groupBrief(g: {
   policy?: unknown
   allowInternalNetwork?: boolean | null
   allowSecureLocationAccess?: boolean | null
+  allowShare?: boolean | null
   vncSessionMaxMinutes?: number | null
 }) {
   return {
@@ -87,6 +88,7 @@ function groupBrief(g: {
     policy: g.policy ?? null,
     allowInternalNetwork: g.allowInternalNetwork ?? null,
     allowSecureLocationAccess: g.allowSecureLocationAccess ?? null,
+    allowShare: g.allowShare ?? null,
     vncSessionMaxMinutes: g.vncSessionMaxMinutes ?? null,
   }
 }
@@ -105,6 +107,7 @@ const createGroupSchema = z.object({
   tags: z.array(z.string().max(32)).max(20).default([]),
   allowInternalNetwork: z.boolean().default(false), // 组级网络策略：允许访问内网
   allowSecureLocationAccess: z.boolean().default(false), // 组级网络策略：允许访问容器内安全位置
+  allowShare: z.boolean().default(true), // r13c：组级共享开关（false=组内成员默认禁止共享工作区）
   vncSessionMaxMinutes: z.number().int().min(0).max(43200).nullable().optional(), // 组级 VNC 连接总时长上限（分钟，null=继承全局，0=不限）
 })
 
@@ -134,6 +137,7 @@ export async function createGroupAction(input: unknown): Promise<ActionResult<{ 
         tags: p.tags.length > 0 ? p.tags : undefined,
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
+        allowShare: p.allowShare,
         vncSessionMaxMinutes: p.vncSessionMaxMinutes ?? null,
         createdByUserId: ctx.userId,
       },
@@ -193,6 +197,7 @@ export async function updateGroupAction(input: unknown): Promise<ActionResult<{ 
         tags: p.tags.length > 0 ? p.tags : Prisma.DbNull,
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
+        allowShare: p.allowShare,
         vncSessionMaxMinutes: p.vncSessionMaxMinutes ?? null,
       },
     })
@@ -731,5 +736,39 @@ export async function setGroupNetworkPolicyAction(
     })
 
     return { id: group.id, allowInternalNetwork: p.allowInternalNetwork, allowSecureLocationAccess: p.allowSecureLocationAccess, affectedMembers }
+  })
+}
+
+// ---- r13c：组级共享开关（快捷切换；组管理员仅限自己管理的组） ----
+export async function setGroupAllowShareAction(
+  input: unknown,
+): Promise<ActionResult<{ id: string; allowShare: boolean; affectedMembers: number }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAuth()
+    const isAdmin = ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN"
+    const isGroupAdmin = ctx.role === "GROUP_ADMIN"
+    if (!isAdmin && !isGroupAdmin) throw new Error("无权设置组级共享开关（需要管理员或组管理员权限）")
+
+    const p = zodValidate(z.object({ id: zId, allowShare: z.boolean() }), input)
+    const group = await db.group.findUnique({ where: { id: p.id } })
+    if (!group || group.deletedAt) throw new Error("用户组不存在或已删除")
+    if (isGroupAdmin && !isAdmin) {
+      const ga = await db.groupAdmin.findFirst({ where: { groupId: group.id, userId: ctx.userId } })
+      if (!ga) throw new Error("仅可为自己管理的用户组设置共享开关")
+    }
+
+    const before = group.allowShare
+    await db.group.update({ where: { id: group.id }, data: { allowShare: p.allowShare } })
+    const affectedMembers = await db.groupUser.count({ where: { groupId: group.id } })
+
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "GROUP_SHARE_SWITCH",
+      resourceType: "GROUP", resourceId: group.id, resourceName: group.name,
+      before: { allowShare: before }, after: { allowShare: p.allowShare, affectedMembers },
+      severity: "WARN",
+    })
+    return { id: group.id, allowShare: p.allowShare, affectedMembers }
   })
 }

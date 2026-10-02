@@ -41,6 +41,7 @@ interface GroupFormDialogProps {
     force2fa: boolean
     allowInternalNetwork: boolean
     allowSecureLocationAccess: boolean
+    allowShare: boolean
     vncSessionMaxMinutes: number | null
     tags: string[]
   } | null
@@ -96,6 +97,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
   const [inheritParentQuota, setInheritParentQuota] = React.useState(true)
   const [force2fa, setForce2fa] = React.useState(false)
   const [allowInternalNetwork, setAllowInternalNetwork] = React.useState(false)
+  const [allowShare, setAllowShare] = React.useState(true)
   const [vncLimitEnabled, setVncLimitEnabled] = React.useState(false)
   const [vncLimitMinutes, setVncLimitMinutes] = React.useState(120)
   const [allowSecureLocationAccess, setAllowSecureLocationAccess] = React.useState(false)
@@ -120,6 +122,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       setInheritParentQuota(group.inheritParentQuota)
       setForce2fa(group.force2fa)
       setAllowInternalNetwork(group.allowInternalNetwork)
+      setAllowShare(group.allowShare !== false)
       setVncLimitEnabled(group.vncSessionMaxMinutes != null && group.vncSessionMaxMinutes > 0)
       setVncLimitMinutes(group.vncSessionMaxMinutes && group.vncSessionMaxMinutes > 0 ? group.vncSessionMaxMinutes : 120)
       setAllowSecureLocationAccess(group.allowSecureLocationAccess)
@@ -183,6 +186,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       force2fa,
       allowInternalNetwork,
       allowSecureLocationAccess,
+      allowShare,
       vncSessionMaxMinutes: vncLimitEnabled ? vncLimitMinutes : 0,
       tags,
       quota: quotaEnabled ? { sessions: qSessions, novncSessions: qNovnc, diskMb: qDisk, proxyBandwidthMb: qBandwidth } : undefined,
@@ -283,6 +287,13 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
                 <p className="text-[10px] text-muted-foreground">CDP/VNC端口、file://、平台内部端点（默认拒绝）</p>
               </div>
               <Switch checked={allowSecureLocationAccess} onCheckedChange={setAllowSecureLocationAccess} />
+            </div>
+            <div className="flex items-center justify-between rounded-md border px-3 py-2">
+              <div className="min-w-0 pr-2">
+                <span className="text-sm">允许工作区共享</span>
+                <p className="text-[10px] text-muted-foreground">关闭后组内成员默认禁止共享工作区（用户级可覆盖；沙箱级否决优先级最高）</p>
+              </div>
+              <Switch checked={allowShare} onCheckedChange={setAllowShare} />
             </div>
             <div className="flex items-center justify-between rounded-md border px-3 py-2">
               <div className="min-w-0 pr-2">

@@ -462,3 +462,98 @@ export async function setSandboxCrxSettingsAction(input: unknown): Promise<Actio
     return { ok: true }
   })
 }
+
+// ============================================================
+// r13c：批量策略下发（三级：用户组/用户/单沙箱 × 多选插件）
+// 一次操作把 N 个插件下发到 M 个目标作用域（N×M 条策略条目），
+// 逐对校验（库存在性/黑名单冲突/沙箱数量上限），逐对 upsert（幂等，已有则覆盖更新），
+// 失败对跳过并汇总返回 —— 企业批量运维入口（对应 13 项清单「插件策略下发」）
+// ============================================================
+export async function batchDeployCrxPolicyAction(input: unknown): Promise<ActionResult<{
+  deployed: number
+  skipped: number
+  conflicts: string[]
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireRole(["SUPER_ADMIN", "ADMIN"])
+    const p = zodValidate(z.object({
+      crxIds: z.array(z.string().length(32)).min(1, "至少选择一个插件").max(50),
+      scopeType: z.enum(["GROUP", "USER", "SANDBOX"]),
+      scopeIds: z.array(z.string().min(1)).min(1, "至少选择一个目标").max(100),
+      updateUrl: z.string().max(300).optional().default(""),
+      backupUpdateUrl: z.string().max(300).optional().default(""),
+      lockedVersion: z.string().max(40).optional().default(""),
+      note: z.string().max(200).optional().default(""),
+    }), input)
+
+    if (p.updateUrl && !isValidUpdateUrl(p.updateUrl)) throw bizError(ErrorCode.PARAM_ERROR, "覆盖主源 update_url 格式非法")
+    if (p.lockedVersion && !isValidVersion(p.lockedVersion)) throw bizError(ErrorCode.PARAM_ERROR, "锁定版本号格式非法")
+
+    // 目标作用域存在性校验
+    if (p.scopeType === "GROUP") {
+      const groups = await db.group.findMany({ where: { id: { in: p.scopeIds }, deletedAt: null }, select: { id: true, name: true } })
+      if (groups.length !== p.scopeIds.length) throw bizError(ErrorCode.NOT_FOUND, "部分用户组不存在或已删除")
+    } else if (p.scopeType === "USER") {
+      const users = await db.user.findMany({ where: { id: { in: p.scopeIds }, deletedAt: null }, select: { id: true, username: true } })
+      if (users.length !== p.scopeIds.length) throw bizError(ErrorCode.NOT_FOUND, "部分用户不存在或已删除")
+    } else {
+      const wss = await db.browserWorkspace.findMany({ where: { id: { in: p.scopeIds }, deletedAt: null }, select: { id: true } })
+      if (wss.length !== p.scopeIds.length) throw bizError(ErrorCode.NOT_FOUND, "部分沙箱不存在或已删除")
+    }
+
+    // 插件库存在性（批量预取）
+    const plugins = await db.crxPlugin.findMany({ where: { crxId: { in: p.crxIds }, deletedAt: null }, select: { crxId: true, name: true } })
+    const pluginMap = new Map(plugins.map((x) => [x.crxId, x.name]))
+    for (const crxId of p.crxIds) {
+      if (!pluginMap.has(crxId)) throw bizError(ErrorCode.NOT_FOUND, `插件 ${crxId} 不在插件库中（必须先入库）`)
+    }
+
+    let deployed = 0
+    let skipped = 0
+    const conflicts: string[] = []
+
+    for (const crxId of p.crxIds) {
+      for (const scopeId of p.scopeIds) {
+        // 逐对冲突校验（forcelist × blocklist 交集）
+        const conflict = await checkForceBlocklistConflict({ scopeType: p.scopeType, scopeId, crxId })
+        if (!conflict.ok) {
+          skipped += 1
+          conflicts.push(`${pluginMap.get(crxId) || crxId} → ${scopeId.slice(0, 8)}：${conflict.message || "黑名单冲突"}`)
+          continue
+        }
+        // 沙箱级数量上限
+        if (p.scopeType === "SANDBOX") {
+          const existing = await db.crxPolicyEntry.count({ where: { scopeType: "SANDBOX", scopeId, deletedAt: null } })
+          const already = await db.crxPolicyEntry.findFirst({ where: { scopeType: "SANDBOX", scopeId, crxId, deletedAt: null }, select: { id: true } })
+          if (!already && existing >= MAX_FORCED_EXTENSIONS_PER_SANDBOX) {
+            skipped += 1
+            conflicts.push(`${pluginMap.get(crxId) || crxId} → 沙箱 ${scopeId.slice(0, 8)}：超出单沙箱上限 ${MAX_FORCED_EXTENSIONS_PER_SANDBOX}`)
+            continue
+          }
+        }
+        await db.crxPolicyEntry.upsert({
+          where: { scopeType_scopeId_crxId: { scopeType: p.scopeType, scopeId, crxId } },
+          create: {
+            scopeType: p.scopeType, scopeId, crxId,
+            updateUrl: p.updateUrl || null, backupUpdateUrl: p.backupUpdateUrl || null, lockedVersion: p.lockedVersion || null,
+            note: p.note || `批量下发（${pluginMap.get(crxId)}）`,
+            createdByUserId: ctx.userId, createdByName: ctx.username,
+          },
+          update: {
+            updateUrl: p.updateUrl || null, backupUpdateUrl: p.backupUpdateUrl || null, lockedVersion: p.lockedVersion || null,
+            note: p.note || null, deletedAt: null,
+          },
+        })
+        deployed += 1
+      }
+    }
+
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "CRX_POLICY_BATCH_DEPLOY",
+      resourceType: "CRX_POLICY", resourceId: `batch:${p.scopeType}`,
+      after: { scopeType: p.scopeType, targets: p.scopeIds.length, plugins: p.crxIds.length, deployed, skipped, conflicts: conflicts.slice(0, 10) },
+      severity: "WARN",
+    })
+    return { deployed, skipped, conflicts }
+  })
+}

@@ -731,13 +731,23 @@ interface WsData { v: string; ro: boolean; dur: number; tgt: DialTarget; sess: D
 // Bun 运行时全局服务接口（bun --hot 执行；类型宽松声明避免额外依赖）
 declare const Bun: { serve<T = unknown>(cfg: Record<string, unknown>): { stop(force?: boolean): void } }
 
-const server = Bun.serve<WsData>({
+// ---- r13c: 端口占用重试退避（EADDRINUSE 不再一崩即溃）----
+// 守护轮次切换瞬间可能出现短暂端口残留（旧轮孤儿进程退出中/上层清理竞态）：
+// 最多 30 次（约 45 秒）退避重绑，期间打点日志供 docker logs 观测；非占用类错误立即退出
+const serveOptions: Record<string, unknown> = {
   hostname: BIND_HOST,
   port: PORT,
   fetch(req, srv) {
     const u = new URL(req.url)
     if (u.pathname === "/health") {
-      return Response.json({ ok: true, port: PORT, uptimeSec: Math.round(process.uptime()), workspaces: statsByWs.size })
+      // r13c：跨域名部署诊断（CORS 放行 —— 健康探测无敏感信息；WS 接入本身经 HMAC 票据鉴权不受域限制）
+      return Response.json(
+        { ok: true, port: PORT, uptimeSec: Math.round(process.uptime()), workspaces: statsByWs.size, mode: process.env.VNC_BRIDGE_PUBLIC || "gateway" },
+        { headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS" } },
+      )
+    }
+    if (u.pathname === "/health" && req.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS" } })
     }
     if (u.pathname === "/stats") {
       const ws = u.searchParams.get("ws")
@@ -800,10 +810,28 @@ const server = Bun.serve<WsData>({
       d.sess = null
     },
   },
-})
+}
+
+let server: { stop(force?: boolean): void } | null = null
+for (let attempt = 1; attempt <= 30 && !server; attempt++) {
+  try {
+    server = Bun.serve<WsData>(serveOptions as never)
+  } catch (e) {
+    const msg = String((e as Error)?.message || e)
+    const inUse = /EADDRINUSE|address.*in use|port.*in use|Is port/i.test(msg)
+    console.error(`[vnc-bridge] 第 ${attempt} 次监听 ${BIND_HOST}:${PORT} 失败：${msg}`)
+    if (!inUse) break
+    console.error(`[vnc-bridge] 端口被占用，1.5 秒后重试（守护轮次切换的短暂残留会自动释放）`)
+    await new Promise((r) => setTimeout(r, 1500))
+  }
+}
+if (!server) {
+  console.error(`[vnc-bridge] 无法监听 ${BIND_HOST}:${PORT}（重试 30 次后放弃，进程退出交由守护重启）`)
+  process.exit(1)
+}
 
 console.log(`[vnc-bridge] HelmPort 桥已启动: ${BIND_HOST}:${PORT}（票据HMAC校验/单次防重放/只读服务端强制）`)
 
 // 优雅退出
-process.on("SIGTERM", () => { server.stop(true); process.exit(0) })
-process.on("SIGINT", () => { server.stop(true); process.exit(0) })
+process.on("SIGTERM", () => { server?.stop(true); process.exit(0) })
+process.on("SIGINT", () => { server?.stop(true); process.exit(0) })

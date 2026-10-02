@@ -5,11 +5,13 @@ import { effectiveRuntimeSec, fmtRuntime } from "@/lib/ws-lifecycle"
 import { inspectContainer } from "@/lib/external/docker"
 import { StatCard } from "@/components/shared/confirm"
 import { WorkspacesTable, type AdminWorkspaceRow, type UserOption } from "./workspaces-table"
-import { Globe, PlayCircle, MonitorCog, Terminal, TriangleAlert, Recycle, CalendarPlus } from "lucide-react"
+import { SharesTable, type AdminShareRow } from "./shares-table"
+import { Globe, PlayCircle, MonitorCog, Terminal, TriangleAlert, Recycle, CalendarPlus, Share2 } from "lucide-react"
 
 // 工作区管控（管理员强制操作核心页）
 // 增强列表：归属双用户 / 时间三列（创建·启动·最近活跃）/ 累计运行时长 / 容器健康 / 代理出口 /
 // 策略快照摘要 / 删除记录（回收站来源）/ 批量筛选（用户·状态·模式·创建时间范围·活跃/回收站视图）/ 列显隐配置
+// r13c：新增「共享关系」总列表视图 —— 全平台共享关系全景 + 精确撤销（单人/批量/整工作区）+ 沙箱级禁共享否决
 export const metadata = { title: "工作区管控" }
 
 export default async function AdminWorkspacesPage({
@@ -22,8 +24,134 @@ export default async function AdminWorkspacesPage({
   const q = parseListQuery(sp)
   const f = q.filters
 
-  // ---- 视图切换：活跃（默认） / 回收站（软删记录 + 删除来源） ----
-  const view = f.view === "deleted" ? "deleted" : "active"
+  // ---- 视图切换：活跃（默认） / 回收站（软删记录 + 删除来源）/ 共享关系（r13c 总列表） ----
+  const view = f.view === "deleted" ? "deleted" : f.view === "shares" ? "shares" : "active"
+
+  // ============================ 共享关系总列表视图（r13c） ============================
+  if (view === "shares") {
+    const kw = (q.keyword || "").trim()
+    const shareStatus = f.shareStatus || "all" // all | active | revoked | expired
+    const sharePermission = f.sharePermission || ""
+
+    // 关键词预筛（工作区名/uuid → id 集；用户名 → id 集；所有者名 → 其工作区 id 集）
+    let wsIdsByKw: string[] | null = null
+    let userIdsByKw: string[] | null = null
+    if (kw) {
+      const [kws, kusers] = await Promise.all([
+        db.browserWorkspace.findMany({ where: { OR: [{ name: { contains: kw } }, { uuid: { contains: kw } }] }, select: { id: true }, take: 800 }),
+        db.user.findMany({ where: { username: { contains: kw } }, select: { id: true }, take: 800 }),
+      ])
+      // 所有者用户名匹配 → 其名下工作区
+      let ownerWsIds: string[] = []
+      if (kusers.length) {
+        const owned = await db.browserWorkspace.findMany({ where: { userId: { in: kusers.map((u) => u.id) } }, select: { id: true }, take: 800 })
+        ownerWsIds = owned.map((w) => w.id)
+      }
+      wsIdsByKw = [...new Set([...kws.map((w) => w.id), ...ownerWsIds])]
+      userIdsByKw = kusers.map((u) => u.id)
+    }
+
+    const now = new Date()
+    const shareWhere: Record<string, unknown> = {}
+    if (shareStatus === "active") shareWhere.revokedAt = null
+    else if (shareStatus === "revoked") shareWhere.revokedAt = { not: null }
+    else if (shareStatus === "expired") { shareWhere.revokedAt = null; shareWhere.expireAt = { lt: now } }
+    if (sharePermission) shareWhere.permission = sharePermission
+    if (kw) {
+      const clauses: Record<string, unknown>[] = []
+      if (wsIdsByKw && wsIdsByKw.length) clauses.push({ workspaceId: { in: wsIdsByKw } })
+      if (userIdsByKw && userIdsByKw.length) clauses.push({ targetUserId: { in: userIdsByKw } })
+      shareWhere.AND = [{ OR: clauses.length ? clauses : [{ id: "__none__" }] }]
+    }
+
+    const [shareRowsRaw, shareTotal, statSharesActive, statSharesRevoked, statSharesExpired, statVeto, shareStatWorkspaces] =
+      await Promise.all([
+        db.workspaceShare.findMany({
+          where: shareWhere,
+          ...pageSkipTake(q),
+          orderBy: safeOrderBy(q, ["createdAt"], { createdAt: "desc" }) as Record<string, "asc" | "desc">,
+        }),
+        db.workspaceShare.count({ where: shareWhere }),
+        db.workspaceShare.count({ where: { revokedAt: null, OR: [{ expireAt: null }, { expireAt: { gt: now } }] } }),
+        db.workspaceShare.count({ where: { revokedAt: { not: null } } }),
+        db.workspaceShare.count({ where: { revokedAt: null, expireAt: { lt: now } } }),
+        db.browserWorkspace.count({ where: { deletedAt: null, shareDisabled: true } }),
+        db.workspaceShare.groupBy({ by: ["workspaceId"], where: { revokedAt: null }, _count: { _all: true } }),
+      ])
+
+    // 内存 join：工作区（名/uuid/所有者/否决开关/状态）+ 被共享者 + 共享发起人
+    const swsIds = [...new Set(shareRowsRaw.map((s) => s.workspaceId))]
+    const sws = swsIds.length
+      ? await db.browserWorkspace.findMany({ where: { id: { in: swsIds } }, select: { id: true, name: true, uuid: true, userId: true, shareDisabled: true, status: true, mode: true } })
+      : []
+    const tIds = [...new Set(shareRowsRaw.map((s) => s.targetUserId))]
+    const sTargets = tIds.length
+      ? await db.user.findMany({ where: { id: { in: tIds } }, select: { id: true, username: true, displayName: true } })
+      : []
+    const cIds = [...new Set(shareRowsRaw.map((s) => s.createdByUserId).filter(Boolean) as string[])]
+    const sCreators = cIds.length
+      ? await db.user.findMany({ where: { id: { in: cIds } }, select: { id: true, username: true } })
+      : []
+    const wsById = new Map(sws.map((w) => [w.id, w]))
+    const targetById = new Map(sTargets.map((u) => [u.id, u]))
+    const creatorById = new Map(sCreators.map((u) => [u.id, u]))
+    const ownerIds = [...new Set(sws.map((w) => w.userId))]
+    const owners = ownerIds.length ? await db.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, username: true } }) : []
+    const ownerById = new Map(owners.map((u) => [u.id, u]))
+
+    const shareRows: AdminShareRow[] = shareRowsRaw.map((s) => {
+      const w = wsById.get(s.workspaceId)
+      const t = targetById.get(s.targetUserId)
+      const expired = !s.revokedAt && !!s.expireAt && s.expireAt.getTime() < now.getTime()
+      const status = s.revokedAt ? "revoked" : expired ? "expired" : "active"
+      return {
+        id: s.id,
+        workspaceId: s.workspaceId,
+        workspaceName: w?.name || "（已删除工作区）",
+        workspaceUuid: w?.uuid || "",
+        workspaceStatus: w?.status || "",
+        workspaceMode: w?.mode || "",
+        ownerUsername: w ? ownerById.get(w.userId)?.username || "-" : "-",
+        targetUsername: t?.username || "-",
+        targetDisplayName: t?.displayName || null,
+        permission: s.permission,
+        status,
+        shareDisabled: w?.shareDisabled || false,
+        expireAt: s.expireAt ? fmtDate(s.expireAt) : "",
+        revokedAt: s.revokedAt ? fmtDate(s.revokedAt) : "",
+        createdAt: fmtDate(s.createdAt),
+        createdByUsername: s.createdByUserId ? creatorById.get(s.createdByUserId)?.username || "-" : "-",
+        activeSharesOfWs: shareStatWorkspaces.find((g) => g.workspaceId === s.workspaceId)?._count._all ?? 0,
+      }
+    })
+
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">共享关系总列表</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            全平台工作区共享关系全景：精确到「共享给谁」的撤销（单人/批量/整工作区）、沙箱级禁共享否决、四级管控（全局/用户组/用户/沙箱）状态一目了然
+          </p>
+        </div>
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+          <StatCard title="生效中共享" value={statSharesActive} sub="被共享者可访问" icon={<Share2 className="h-4 w-4" />} tone="success" />
+          <StatCard title="已撤销" value={statSharesRevoked} sub="审计保留" icon={<Recycle className="h-4 w-4" />} />
+          <StatCard title="已过期" value={statSharesExpired} sub="到期自动失效" icon={<CalendarPlus className="h-4 w-4" />} />
+          <StatCard title="禁共享沙箱" value={statVeto} sub="沙箱级否决" icon={<TriangleAlert className="h-4 w-4" />} tone={statVeto > 0 ? "warning" : "success"} />
+          <StatCard title="筛选结果" value={shareTotal} sub="当前条件匹配" icon={<Globe className="h-4 w-4" />} />
+        </div>
+        <SharesTable
+          rows={shareRows}
+          total={shareTotal}
+          page={q.page}
+          pageSize={q.pageSize}
+          keyword={q.keyword}
+          filters={f}
+        />
+      </div>
+    )
+  }
+  // ============================ /共享关系总列表视图 ============================
 
   const where: Record<string, unknown> = view === "deleted" ? { deletedAt: { not: null } } : { deletedAt: null }
   if (q.keyword) {
@@ -144,7 +272,7 @@ export default async function AdminWorkspacesPage({
       status: r.status,
       ownerUsername: usernameById.get(r.userId) || "-",
       creatorUsername: r.createdByUserId ? usernameById.get(r.createdByUserId) || "-" : "-",
-      transferred: r.createdByUserId && r.createdByUserId !== r.userId,
+      transferred: !!r.createdByUserId && r.createdByUserId !== r.userId,
       groupName: r.groupId ? groupNameById.get(r.groupId) || "-" : "-",
       proxyNodeName: proxy?.name || "-",
       proxyType: proxy?.type || "",

@@ -77,6 +77,7 @@ export default async function AdminGroupsPage() {
     force2fa: g.force2fa,
     allowInternalNetwork: g.allowInternalNetwork,
     allowSecureLocationAccess: g.allowSecureLocationAccess,
+    allowShare: g.allowShare !== false,
     vncSessionMaxMinutes: g.vncSessionMaxMinutes ?? null,
     policy: (g.policy as Record<string, unknown> | null) || null,
     userCount: (membersByGroup.get(g.id) || []).length,

@@ -40,6 +40,7 @@ model User {
   lastLoginCountry    String?
   frozen              Boolean   @default(false) // 永久冻结
   permissionLocks     Json? // 用户级权限锁覆盖
+  shareAllowed        Boolean? // r13c：用户级共享开关（null=继承用户组，true=强制允许，false=强制禁止）
   // —— 网络访问管控（管理员按用户覆盖；null=继承所属组，组缺失时用全局默认）——
   allowInternalNetwork      Boolean? // 允许浏览器会话访问内网（RFC1918/链路本地/云元数据）
   allowSecureLocationAccess Boolean? // 允许访问容器内安全位置（CDP/VNC本机端口、file://、平台内部端点）
@@ -187,6 +188,7 @@ model Group {
   tags             Json? // ["标签"]
   webhookUrl       String?
   force2fa         Boolean  @default(false) // 组级强制2FA
+  allowShare       Boolean  @default(true) // r13c：组级共享开关（false=组内成员默认禁止共享工作区；用户级可覆盖）
   allowInternalNetwork       Boolean  @default(false) // 组级：允许访问内网（成员默认继承）
   allowSecureLocationAccess  Boolean  @default(false) // 组级：允许访问容器内安全位置
   vncSessionMaxMinutes       Int? // 组级 VNC 会话时长上限（分钟，null=继承全局默认，0=不限）
@@ -558,6 +560,7 @@ model BrowserWorkspace {
   ttlMinutes         Float     @default(0) // 0=不限
   idleTimeoutMinutes Float     @default(60)
   vncSessionMaxMinutes Int? // 沙箱级 VNC 会话时长上限（分钟；null=继承用户/用户组，0=不限）
+  shareDisabled    Boolean   @default(false) // r13c：沙箱级共享否决（管理员总列表可设；true=该工作区禁止任何新共享/链接，既有共享可在总列表撤销）
   // —— 沙箱级网络访问策略覆盖（四层解析最高优先；null=继承用户/用户组/全局）——
   policyAllowInternalNetwork     Boolean? // 沙箱级：允许访问内网（非 null 即覆盖上层）
   policyAllowSecureLocationAccess Boolean? // 沙箱级：允许访问容器内安全位置（非 null 即覆盖上层）

@@ -7,7 +7,7 @@ import { toast } from "sonner"
 import {
   ArrowLeft, Globe, MonitorPlay, Share2, FileJson, Terminal, Clipboard, MousePointer2, Hand,
   RefreshCw, ShieldCheck, Wifi, Loader2, Trash2, Lock, Play, StopCircle, Copy, Anchor,
-  RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon, Network, FileLock2, Link2, Plus,
+  RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon, Network, FileLock2, Link2, Plus, Cable,
 } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -20,11 +20,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import {
-  stopWorkspaceAction, startWorkspaceAction, deleteWorkspaceAction, shareWorkspaceAction,
+  stopWorkspaceAction, startWorkspaceAction, deleteWorkspaceAction,
   revokeShareAction, exportWorkspaceConfigAction, exportHarAction, runScriptAction,
-  searchShareTargetUsersAction, createWorkspaceShareLinkAction, revokeWorkspaceShareLinkAction,
+  createWorkspaceShareLinkAction, revokeWorkspaceShareLinkAction,
   refreshVncKeyAction, updateWorkspaceAction, switchProxyAction, restartBrowserProcessAction,
 } from "@/server/actions/workspaces"
+import { WorkspaceShareDialog } from "../share-dialogs"
 import { setWorkspacePolicyOverrideAction, refreshWorkspacePolicyAction } from "@/server/actions/rules"
 import { HelmPortViewer } from "@/components/vnc/helmport-viewer"
 import { cn } from "@/lib/utils"
@@ -42,6 +43,9 @@ export interface WorkspaceDetailData {
   snapshotId: string | null; snapshotName: string | null; snapshotSize: number
   ownerName: string; ownerEmail: string | null; creatorName: string | null
   isOwner: boolean; mySharePermission: string | null; isAdmin: boolean
+  /** r13c：四级共享管控（沙箱否决/用户/组/全局解析结果，供共享按钮禁用态与提示） */
+  shareDisabled: boolean
+  shareBlockedReason: string
   crashCategory: string | null
   policyAllowInternalNetwork: boolean | null
   policyAllowSecureLocationAccess: boolean | null
@@ -63,7 +67,7 @@ interface HarRow { id: string; size: string; createdAt: string }
 interface RunLogRow { id: string; status: string; log: string; startedAt: string }
 
 export function WorkspaceDetail({
-  workspace, shares, shareLinks, scripts, harRecords, runLogs, publicCdpEndpoint,
+  workspace, shares, shareLinks, scripts, harRecords, runLogs, publicCdpEndpoint, vncBridge,
 }: {
   workspace: WorkspaceDetailData
   shares: ShareRow[]
@@ -72,6 +76,8 @@ export function WorkspaceDetail({
   harRecords: HarRow[]
   runLogs: RunLogRow[]
   publicCdpEndpoint?: string
+  /** r13c：VNC 桥接入模式与跨域名地址（VNC_BRIDGE_PUBLIC / VNC_BRIDGE_URL） */
+  vncBridge: { mode: string; url: string }
 }) {
   const router = useRouter()
   const [busy, setBusy] = React.useState<string | null>(null)
@@ -149,8 +155,13 @@ export function WorkspaceDetail({
             </Button>
           )}
           {workspace.isOwner && (
-            <Button variant="outline" size="sm" onClick={() => setShareOpen(true)}>
-              <Share2 className="mr-1 h-3.5 w-3.5" /> 共享管理
+            <Button
+              variant="outline" size="sm"
+              onClick={() => setShareOpen(true)}
+              disabled={!!workspace.shareBlockedReason}
+              title={workspace.shareBlockedReason ? `共享被管理员禁止：${workspace.shareBlockedReason}` : "共享给其他用户 / 创建分享链接"}
+            >
+              <Share2 className={`mr-1 h-3.5 w-3.5 ${workspace.shareBlockedReason ? "opacity-50" : "text-teal-600"}`} /> 共享管理
             </Button>
           )}
           {workspace.isOwner && (
@@ -213,7 +224,7 @@ export function WorkspaceDetail({
 
         {isVnc && (
           <TabsContent value="vnc" className="mt-4">
-            <VncPanel workspace={workspace} canOperate={canOperate} />
+            <VncPanel workspace={workspace} canOperate={canOperate} vncBridge={vncBridge} />
           </TabsContent>
         )}
         {!isVnc && (
@@ -243,14 +254,20 @@ export function WorkspaceDetail({
         onConfirm={del}
       />
 
-      <ShareDialog workspace={workspace} open={shareOpen} onOpenChange={setShareOpen} onDone={() => router.refresh()} />
+      <WorkspaceShareDialog
+        workspace={{ id: workspace.id, name: workspace.name }}
+        open={shareOpen}
+        onOpenChange={setShareOpen}
+        onDone={() => router.refresh()}
+        blockedReason={workspace.shareBlockedReason || undefined}
+      />
       <EditDialog workspace={workspace} open={editOpen} onOpenChange={setEditOpen} onDone={() => router.refresh()} />
     </div>
   )
 }
 
 // ================= NoVNC 远程桌面面板（HelmPort 品牌化查看器：自研 RFB 客户端） =================
-function VncPanel({ workspace, canOperate }: { workspace: WorkspaceDetailData; canOperate: boolean }) {
+function VncPanel({ workspace, canOperate, vncBridge }: { workspace: WorkspaceDetailData; canOperate: boolean; vncBridge: { mode: string; url: string } }) {
   const router = useRouter()
   const [busy, setBusy] = React.useState(false)
 
@@ -274,6 +291,16 @@ function VncPanel({ workspace, canOperate }: { workspace: WorkspaceDetailData; c
     } finally { setBusy(false) }
   }
 
+  // r13c：VNC 接入信息（跨域名部署可视化：VNC_BRIDGE_URL / VNC_BRIDGE_PUBLIC 模式透出）
+  const bridgeModeLabel = vncBridge.mode === "url"
+    ? "跨域名直连"
+    : vncBridge.mode === "port"
+      ? "独立端口直连"
+      : "统一网关嵌入"
+  const bridgeUrlShown = vncBridge.url
+    ? (vncBridge.url.startsWith("ws") ? vncBridge.url : `wss://${vncBridge.url.replace(/^https?:\/\//, "")}`)
+    : ""
+
   return (
     <div className="space-y-4">
       <HelmPortViewer
@@ -283,6 +310,35 @@ function VncPanel({ workspace, canOperate }: { workspace: WorkspaceDetailData; c
           mySharePermission: workspace.mySharePermission, isOwner: workspace.isOwner, isAdmin: workspace.isAdmin,
         }}
       />
+
+      {/* r13c：VNC 接入信息（跨域名部署可视化） */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex flex-wrap items-center gap-2">
+            <Cable className="h-4 w-4" /> VNC 接入信息
+          </CardTitle>
+          <CardDescription>当前接入形态：{bridgeModeLabel}（管理员可经 VNC_BRIDGE_PUBLIC / VNC_BRIDGE_URL 环境变量切换）</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          <div className="flex items-center justify-between rounded-md border p-2.5">
+            <span className="text-muted-foreground">接入模式</span>
+            <Badge variant={bridgeUrlShown ? "default" : "outline"} className="text-[11px]">{bridgeModeLabel}</Badge>
+          </div>
+          {bridgeUrlShown ? (
+            <div className="rounded-md border border-teal-200 bg-teal-50 dark:bg-teal-950/30 p-2.5">
+              <div className="text-xs text-muted-foreground mb-1">公网 VNC 桥地址（跨域名部署）</div>
+              <code className="text-xs font-mono break-all">{bridgeUrlShown}</code>
+              <p className="text-[11px] text-muted-foreground mt-1">VNC 部署在其他域名时，页面取票后经该地址建立 WebSocket（反代需透传 WS 升级头与长连接；票据 HMAC 单次防重放鉴权不受域限制）</p>
+            </div>
+          ) : (
+            <div className="rounded-md border p-2.5 text-xs text-muted-foreground">
+              VNC 画面经当前访问域名自动嵌入（统一网关透传，无需额外配置）。VNC 独立域名部署时，管理员设置环境变量
+              <code className="mx-1 px-1 py-0.5 rounded bg-muted font-mono">VNC_BRIDGE_URL=wss://vnc.example.com</code>
+              后此处将展示公网桥地址。
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader className="pb-3">
@@ -865,6 +921,11 @@ function SharesPanel({ workspace, shares, shareLinks }: { workspace: WorkspaceDe
 
   return (
     <div className="space-y-4">
+      {workspace.shareBlockedReason && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+          {workspace.shareBlockedReason} —— 既有共享继续生效，但不能再添加新共享/创建分享链接；管理员可在「工作区管控 → 共享关系总列表」撤销既有共享
+        </div>
+      )}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">共享授权列表（按用户）</CardTitle>
@@ -1038,109 +1099,6 @@ function ShareLinkCreateDialog({ workspace, open, onOpenChange, onCreated }: {
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
           <Button onClick={submit} disabled={busy}>{busy && <Loader2 className="mr-1 h-4 w-4 animate-spin" />} 创建链接</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// ---- 共享弹窗（用户名搜索建议：精确匹配优先置顶，点选填入，杜绝手输错字） ----
-function ShareDialog({ workspace, open, onOpenChange, onDone }: { workspace: WorkspaceDetailData; open: boolean; onOpenChange: (v: boolean) => void; onDone: () => void }) {
-  const [username, setUsername] = React.useState("")
-  const [permission, setPermission] = React.useState("VIEW")
-  const [hours, setHours] = React.useState(24)
-  const [busy, setBusy] = React.useState(false)
-  // 用户搜索建议（输入 ≥1 字符触发；服务端精确用户名优先 + 昵称/用户名包含）
-  const [suggests, setSuggests] = React.useState<{ id: string; username: string; displayName: string | null; shared: boolean }[]>([])
-  const [suggestBusy, setSuggestBusy] = React.useState(false)
-
-  React.useEffect(() => {
-    if (!open) return
-    const kw = username.trim()
-    if (!kw) { setSuggests([]); return }
-    let alive = true
-    setSuggestBusy(true)
-    const t = setTimeout(async () => {
-      try {
-        const res = await searchShareTargetUsersAction({ workspaceId: workspace.id, q: kw })
-        if (alive && res.code === 0) setSuggests(res.data?.items || [])
-        else if (alive) setSuggests([])
-      } catch { if (alive) setSuggests([]) } finally { if (alive) setSuggestBusy(false) }
-    }, 300)
-    return () => { alive = false; clearTimeout(t); setSuggestBusy(false) }
-  }, [username, open, workspace.id])
-
-  const exact = suggests.find((s) => s.username === username.trim())
-
-  const submit = async () => {
-    setBusy(true)
-    try {
-      const res = await shareWorkspaceAction({ workspaceId: workspace.id, targetUsername: username.trim(), permission, expireHours: hours })
-      if (res.code === 0) { toast.success("共享授权已创建"); onOpenChange(false); setUsername(""); setSuggests([]); onDone() }
-      else toast.error(res.msg)
-    } finally { setBusy(false) }
-  }
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader><DialogTitle>共享工作区</DialogTitle></DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label>目标用户名（输入即搜索，点选自动填入）</Label>
-            <div className="relative">
-              <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="输入精确用户名" autoComplete="off" />
-              {suggestBusy && <Loader2 className="absolute right-2.5 top-2.5 h-4 w-4 animate-spin text-muted-foreground" />}
-            </div>
-            {/* 搜索建议：精确匹配置顶 + 已共享标记 */}
-            {suggests.length > 0 && (
-              <div className="rounded-md border divide-y max-h-44 overflow-y-auto">
-                {suggests.map((s) => (
-                  <button
-                    key={s.id}
-                    type="button"
-                    className={cn(
-                      "flex w-full items-center justify-between gap-2 px-3 py-2 text-sm text-left hover:bg-muted/70 transition",
-                      s.username === username.trim() && "bg-teal-50/70 dark:bg-teal-950/30",
-                    )}
-                    onClick={() => setUsername(s.username)}
-                  >
-                    <span className="min-w-0 truncate">
-                      <span className="font-medium font-mono text-[13px]">{s.username}</span>
-                      {s.username === username.trim() && <Badge className="ml-1.5 bg-teal-600 hover:bg-teal-600 text-[9px]">精确匹配</Badge>}
-                      {s.displayName && <span className="ml-1.5 text-xs text-muted-foreground truncate">{s.displayName}</span>}
-                    </span>
-                    {s.shared && <Badge variant="secondary" className="text-[10px] shrink-0">已共享</Badge>}
-                  </button>
-                ))}
-              </div>
-            )}
-            {username.trim() && !suggestBusy && suggests.length === 0 && (
-              <p className="text-xs text-red-600">未找到匹配用户（共享按精确用户名匹配，请检查拼写）</p>
-            )}
-            {exact?.shared && (
-              <p className="text-xs text-amber-600">该用户已有有效共享；提交将更新其权限与有效期</p>
-            )}
-          </div>
-          <div className="space-y-1.5">
-            <Label>权限</Label>
-            <Select value={permission} onValueChange={setPermission}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="VIEW">只读（仅查看画面/数据）</SelectItem>
-                <SelectItem value="OPERATE">可操作（键鼠/剪贴板/CDP）</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label>有效期（小时，0=永久）</Label>
-            <PrecisionInput value={hours} onChange={setHours} min={0} max={8760} suffix="h" />
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={submit} disabled={busy || !username.trim()}>
-            {busy && <Loader2 className="mr-1 h-4 w-4 animate-spin" />} 确认共享
-          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
