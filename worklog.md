@@ -447,3 +447,27 @@ Work Log:
 Stage Summary:
 - 用户三项需求闭环：①API 创建可选权限（只读/读写/管理级）+功能范围控制（8 大功能面 scope 白名单，双重强制）；②管理员在用户管理内代管用户 API 密钥（创建/查看/修改/启停/吊销+明文一次展示+全程审计）；③登录成功不跳转根因修复（Secure Cookie 在 HTTP 部署被浏览器丢弃，环境驱动自动检测+生产构建三态实测）
 - 附带安全加固：封堵普通用户自助签发管理位令牌的提权漏洞
+
+---
+Task ID: 18
+Agent: main
+Task: r13 — 用户 13 项需求集中交付：公告系统全局层 + 审计权限分级与回滚 + 沙箱共享授权增强 + 备份/HAR 下载 404 修复
+
+Work Log:
+- 【上批遗留并入】e9b30a8（r13 第一批）：全站批量操作基础设施（batch.ts 18 action + batch-ui 套件 + DataTable 多选）、告警中心 4 表批量、用户/组批量删除恢复、邮件配置保存修复（config-panel）、模拟验证码日志（email-code route）、start.sh 日志双通道（server/ws-hub/vnc-bridge/cron tail -F 转发 stdout → docker logs 全可见）、长列表滚动（data-table max-h）、WorkspaceShareLink/Announcement 时效字段 schema
+- 【公告系统】announcements.ts schema 加 startAt/endAt/persistAfterRead/allowDismiss + parseDate 时效校验；/api/announcements/visible GET（目标+时间窗+已读+今日 dismiss 状态）/POST（read|dismiss，可见性越权防护 + allowDismiss 服务端强制）；GlobalAnnouncer 组件挂载 AppShell 顶栏正下方：跑马灯多条合并（首条滚动 + +N 折叠 Popover）→ 点条目详情弹窗（MD/HTML 渲染+已读按钮+今日不再提醒受控）；POPUP/FORCE_VIEW 队列所有页面生效；30s 轮询 + window focus 即刷（发布实时出现）；persistAfterRead 已读后每次刷新仍弹（sessionHidden 会话级隐藏修复关闭即重弹 bug）；管理表单 4 新字段（datetime-local ×2 + 持续显示/允许跳过开关）+ 行内时效徽章（定时/限时/持续显示/不可跳过）+ 批量停用/启用/删除接线（useBatch + BatchBar + 批量确认/失败清单弹窗）
+- 【审计权限分级】新页面 /audit（所有登录用户）：普通用户 server 端强制 where.operatorUserId=ctx.userId（任何筛选无法越权）；ADMIN+ 全量 + 目标操作人筛选 + 关键词；AuditTable 加 mine 模式（隔离提示卡 + 隐藏操作人筛选）+ showRollback；侧边栏普通用户菜单「最近操作审计」
+- 【审计回滚增强】audit-rollback.ts：16 类操作映射表（ANNOUNCEMENT/TASK/TOKEN/ALERT_RULE/WEBHOOK/CRX_PLUGIN 的 toggle 单+批量、USER_UPDATE/USER_BATCH_STATUS/USER_FORCE_2FA、GROUP_UPDATE）；before 快照白名单字段回写（唯一键永不回滚；role 仅超管可回滚防借回滚提权）；批量类 before.ids/enabled 数组逐条恢复；AUDIT_ROLLBACK 审计闭环（可逆）；详情弹窗琥珀色回滚区块 + 不可回滚类型说明（删除类引导回收站）
+- 【沙箱共享授权】workspaces.ts 4 新 action：searchShareTargetUsersAction（contains 建议 + 精确匹配置顶 + 已共享标记 + 排除自己）、createWorkspaceShareLinkAction（randomHex(32) token + permission + expireHours + maxUses + note）、revokeWorkspaceShareLinkAction、redeemWorkspaceShareLinkAction（撤销/过期/超次/自己 4 重校验 → upsert WorkspaceShare + useCount 计数 + 审计）；/workspaces/shared?token= 兑换页（成功/失败双态卡片 + 进入详情引导）；详情页 shares 页签双卡片：用户共享（ShareDialog 300ms 防抖搜索建议 + 精确匹配徽章 + 提交前错误提示）+ 临时链接管理（创建弹窗 4 字段 / freshLink 一次展示 / 列表 max-h-72 滚动 + 生效中/已失效/已撤销徽章 + 复制/撤销）
+- 【下载 404 根因修复】backups-table 下载按钮调用 /api/files/download 与 HAR 面板 /api/har/download 路由从未实现（API 目录缺失）→ 新建两路由：files/download（FileMeta 类别权限分级：BACKUP=超管；PROFILE=所有者；工作区附件=所有者/管理员/被共享/组管理员本组 + storageKey 路径穿越防护 + RFC5987 双文件名 + 30/min 限流 + FILE_DOWNLOAD 审计）；har/download（所有者/管理员/被共享三重校验 + HAR 1.2 附件 + 12/min 限流）
+- 【构建错误修复】alerts 双表（alert-rules-table/webhook-rules-table）重复 lucide-react import（上批截断遗留）→ Turbopack 4 错误 → 删除重复行；bin/ext 误提交移出 git（git rm --cached + .gitignore /bin/ext/，本地解压产物 Docker 构建自装）+ trace 缺失文件占位 → 构建全绿
+- 【QA 实测 14 截图】agent-browser dev 环境：公告创建（跑马灯+弹窗+时效+持续显示）→ dashboard 全局跑马灯+POPUP 并存 → 已读 → 刷新 persistAfterRead 重弹 → 今日不再提醒（弹窗+跑马灯双消失）→ DB 直插公告 32s 后实时出现 → +N 折叠展开列表 → 详情弹窗已读按钮 → 管理端全选+批量停用 → 用户端停用生效 → /audit admin 视角 3 记录 → 批量停用审计详情回滚（"已恢复 3 个资源" + AUDIT_ROLLBACK 落库 + 公告恢复 enabled）→ demo 登录隔离视角（仅自己 1 条 + 无回滚按钮/操作人筛选 + 菜单入口）→ 共享面板临时链接创建（token 落库 note/permission）→ admin 兑换链接（"共享授权已开通" + useCount=1 + 绑定 admin + REDEEM 审计）→ demo ShareDialog 搜"adm"建议列表（admin/超管/已共享）→ 完整"admin"精确匹配置顶徽章 → 立即备份（1.15MB 落盘）→ /api/files/download 200+attachment → /api/har/download 200+599B .har
+- 【QA 辅助脚本】qa-insert-announcement/qa-create-workspace/qa-create-har/qa-verify-redeem/qa-demo-pwd（bcryptjs 修正：原生 bcrypt 包 hash 与 bcryptjs compare 不兼容）/qa-cleanup-r13（全量清理：3 公告+工作区+链接+HAR+备份+操作类审计）
+- 【数据清理】QA 产物全清（公告 0/工作区 0/链接 0/HAR 0/备份 0，登录类审计保留属系统正常运行记录）
+- 【交付】download/qa-r13-screenshots.zip（14 张 JPEG / 663KB）；lint 零错误；next build 全绿（60 页）
+- 【git】e4a3161 推送 main（含上批 e9b30a8/64a912f/3fb8d4a）；tag v1.6.0
+
+Stage Summary:
+- 用户 13 项需求清单：公告系统（✅实时/跑马灯所有页/合并+N/弹窗/详情已读/MD+HTML/时效/持续显示/今日不提醒可控/批量停用删除/停用即消失）、审计分级（✅普通用户自己/管理员全量筛选/回滚映射表）、2FA 强制（✅前批已备 force2faSetup 门控+用户/组管理开关）、批量操作（✅全站含告警/备份/任务/公告）、长列表滚动（✅）、备份下载（✅路由新建）、HAR 下载（✅路由新建）、沙箱共享（✅精确用户名搜索+临时链接+权限+兑换）、插件策略下发（✅前批 crx 四级作用域+多选批量）、全局搜索（✅前批 /api/search+筛选）、单容器日志（✅start.sh 双通道）、内网穿透域名（前批 PUBLIC_BASE_URL 链路已备）全部落地
+- 新功能文件：global-announcer.tsx / audit-rollback.ts / /api/announcements/visible / /api/files/download / /api/har/download / /workspaces/shared / /audit
+- 已知边界：persistAfterRead 的"每次刷新仍弹"为会话级语义（同会话关闭后不重弹、刷新/新标签页重弹），符合"已读后仍持续显示"需求
