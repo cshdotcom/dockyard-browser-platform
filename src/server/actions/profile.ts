@@ -144,6 +144,76 @@ export async function revokeAllMyOtherSessionsAction(): Promise<ActionResult<{ r
   })
 }
 
+// ---- r23：下线（删除）已离线设备记录 ----
+// 用户语义：对已下线/已过期的会话执行「下线」= 数据库直接删除该 LoginSession 行，
+// 该设备cookie对应的 sessionHash 从此不被数据库承认（彻底踢出，而非仅软撤销标记）。
+// 在线会话必须先撤销再删除（防误操作踢掉自己正在使用的设备）。
+export async function deleteMySessionRecordAction(input: unknown): Promise<ActionResult<{ deleted: number }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const p = zodValidate(z.object({ sids: z.array(zId).min(1, "至少选择一条记录").max(100, "单次最多100条") }), input)
+
+    const sessions = await db.loginSession.findMany({ where: { id: { in: p.sids }, userId: ctx.userId } })
+    const current = sessions.find((s) => s.id === ctx.loginSessionId)
+    if (current && !current.revokedAt) {
+      throw bizError(ErrorCode.PARAM_ERROR, "不能删除当前在线会话（请先下线其他设备）")
+    }
+    // 在线会话不允许直接删除（须先撤销）
+    const active = sessions.filter((s) => !s.revokedAt && s.id !== ctx.loginSessionId && (!s.expiresAt || s.expiresAt > new Date()))
+    if (active.length > 0) {
+      throw bizError(ErrorCode.PARAM_ERROR, `${active.length} 条会话仍在线：请先「下线」再删除记录`)
+    }
+    const r = await db.loginSession.deleteMany({ where: { id: { in: p.sids }, userId: ctx.userId } })
+    await writeSecurityEvent({
+      userId: ctx.userId,
+      username: ctx.username,
+      eventType: "SESSION_RECORD_DELETE",
+      success: true,
+      detail: `删除 ${r.count} 条已下线/过期登录会话记录（cookie 彻底失效）`,
+    })
+    return { deleted: r.count }
+  })
+}
+
+// ---- r23：一键清理全部已下线/过期会话记录（列表瘦身） ----
+export async function deleteAllMyOfflineSessionsAction(): Promise<ActionResult<{ deleted: number }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const cutoff = new Date()
+    // 只删已撤销或已过期的（不含当前会话与任何在线会话）
+    const where = {
+      userId: ctx.userId,
+      AND: [
+        { id: { not: ctx.loginSessionId || "___none___" } },
+        { OR: [{ revokedAt: { not: null } }, { expiresAt: { lt: cutoff } }] },
+      ],
+    }
+    const r = await db.loginSession.deleteMany({ where })
+    if (r.count === 0) throw bizError(ErrorCode.PARAM_ERROR, "没有可清理的已下线/过期记录")
+    await writeSecurityEvent({
+      userId: ctx.userId,
+      username: ctx.username,
+      eventType: "SESSION_RECORD_DELETE",
+      success: true,
+      detail: `一键清理 ${r.count} 条已下线/过期登录会话记录`,
+    })
+    return { deleted: r.count }
+  })
+}
+
+// ---- r23：删除已撤销信任的受信任设备记录（列表瘦身） ----
+export async function deleteMyRevokedTrustedDevicesAction(input: unknown): Promise<ActionResult<{ deleted: number }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const p = zodValidate(z.object({ ids: z.array(zId).max(100).optional() }), input)
+    const where: Record<string, unknown> = { userId: ctx.userId, revokedAt: { not: null } }
+    if (p.ids && p.ids.length > 0) where.id = { in: p.ids }
+    const r = await db.trustedDevice.deleteMany({ where })
+    if (r.count === 0) throw bizError(ErrorCode.PARAM_ERROR, "没有可删除的已撤销信任设备记录")
+    return { deleted: r.count }
+  })
+}
+
 // ---- 受信任设备 ----
 export async function revokeMyTrustedDeviceAction(input: unknown): Promise<ActionResult<{ id: string }>> {
   return actionHandler(async () => {

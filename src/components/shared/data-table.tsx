@@ -4,7 +4,7 @@
 // 企业级列表页统一底座 —— 全站列表复用
 
 import * as React from "react"
-import { ChevronDown, ChevronUp, ChevronsUpDown, Inbox } from "lucide-react"
+import { ChevronDown, ChevronFirst, ChevronLast, ChevronUp, ChevronsUpDown, Inbox } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
@@ -289,16 +289,65 @@ export function DataTable<T extends { id: string }>({
       )}
 
       {totalPages > 1 && (
-        <div className="flex items-center justify-end gap-2">
-          <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => pushQuery({ page: String(page - 1) })}>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => pushQuery({ page: "1" })} title="跳到第一页">
+            <ChevronFirst className="h-4 w-4" />
+          </Button>
+          <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => pushQuery({ page: String(Math.max(1, page - 1)) })}>
             上一页
           </Button>
-          <span className="text-xs text-muted-foreground px-1">
-            {page} / {totalPages}
-          </span>
-          <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => pushQuery({ page: String(page + 1) })}>
+          {/* r23：页码组（当前页±2，长列表折叠为省略号；点击直达） */}
+          <div className="flex items-center gap-1">
+            {pageNumbers(page, totalPages).map((n, i) =>
+              n === -1 ? (
+                <span key={`gap-${i}`} className="px-1 text-xs text-muted-foreground select-none">…</span>
+              ) : (
+                <button
+                  key={n}
+                  type="button"
+                  className={cn(
+                    "h-8 min-w-8 px-2 rounded-md border text-xs transition-colors",
+                    n === page
+                      ? "bg-primary text-primary-foreground border-primary font-medium"
+                      : "bg-background hover:bg-muted border-input",
+                  )}
+                  onClick={() => pushQuery({ page: String(n) })}
+                  aria-label={`第 ${n} 页`}
+                  aria-current={n === page ? "page" : undefined}
+                >
+                  {n}
+                </button>
+              )
+            )}
+          </div>
+          <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => pushQuery({ page: String(Math.min(totalPages, page + 1)) })}>
             下一页
           </Button>
+          <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => pushQuery({ page: String(totalPages) })} title="跳到最后一页">
+            <ChevronLast className="h-4 w-4" />
+          </Button>
+          {/* r23：指定页跳转 */}
+          <form
+            className="flex items-center gap-1"
+            onSubmit={(e) => {
+              e.preventDefault()
+              const v = Number((e.currentTarget.elements.namedItem("jumpPage") as HTMLInputElement | null)?.value)
+              if (Number.isInteger(v) && v >= 1 && v <= totalPages && v !== page) pushQuery({ page: String(v) })
+            }}
+          >
+            <Input
+              name="jumpPage"
+              type="number"
+              min={1}
+              max={totalPages}
+              defaultValue={page}
+              key={`jump-${page}`}
+              className="h-8 w-16 text-xs"
+              title={`跳转到指定页（1-${totalPages}）`}
+              aria-label="跳转到指定页"
+            />
+            <Button type="submit" variant="outline" size="sm" className="h-8" title="跳转">跳转</Button>
+          </form>
           <Select
             value={String(pageSize)}
             onValueChange={(v) => pushQuery({ pageSize: v, page: "1" })}
@@ -318,6 +367,22 @@ export function DataTable<T extends { id: string }>({
       )}
     </div>
   )
+}
+
+// r23：分页页码组（当前页 ±2；总页数多时首尾保留 + 省略号折叠；-1 = 省略号占位）
+function pageNumbers(page: number, totalPages: number): number[] {
+  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1)
+  const out: number[] = []
+  const push = (n: number) => out.push(n)
+  const gap = () => out.push(-1)
+  const start = Math.max(2, page - 2)
+  const end = Math.min(totalPages - 1, page + 2)
+  push(1)
+  if (start > 2) gap()
+  for (let n = start; n <= end; n++) push(n)
+  if (end < totalPages - 1) gap()
+  push(totalPages)
+  return out
 }
 
 // 状态标签：颜色语义统一

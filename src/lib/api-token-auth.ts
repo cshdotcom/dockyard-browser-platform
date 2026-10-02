@@ -4,7 +4,9 @@ import { sha256 } from "./crypto"
 import { rateLimit } from "./rate-limit"
 import { checkIpRisk } from "./risk"
 import { trackBehavior } from "./risk"
-import { getConfigNumber } from "./config"
+import { getConfigNumber, getConfigBool } from "./config"
+import { checkIpBanned, recordIpLoginFail, clearIpFailCount } from "./ip-ban"
+import { resolveTokenRatePerMin } from "./token-policy"
 import {
   TOKEN_PERM,
   TOKEN_LEVELS,
@@ -66,6 +68,12 @@ export async function authenticateApiToken(
 
   if (!apiKey) return fail(40100, "缺少 API-Key（请求头 x-api-key）")
 
+  // ---- r23：IP 自动封禁检查（无效Key连续调用触发；封禁期间拒绝该IP的API调用） ----
+  const ban = await checkIpBanned(ip)
+  if (ban.banned) {
+    return fail(46002, `该IP已被临时封禁（剩余约${ban.remainMinutes}分钟）：连续失败触发自动防护`, 403)
+  }
+
   // ---- 风控黑白名单（外部通道：黑白名单都生效） ----
   const ipRisk = await checkIpRisk(ip)
   if (ipRisk.blocked) {
@@ -75,7 +83,14 @@ export async function authenticateApiToken(
   // ---- 密钥校验 ----
   const tokenHash = sha256(apiKey)
   const token = await db.apiToken.findFirst({ where: { tokenHash, deletedAt: null } })
-  if (!token) return fail(40100, "API-Key 无效")
+  if (!token) {
+    // r23：无效Key计入IP封禁计数（可配置；正常携带有效Key调用不计）
+    if (await getConfigBool("security.ipBanApiCountEnabled", true)) {
+      const r = await recordIpLoginFail(ip, "API_KEY", "无效API-Key调用")
+      if (r.banned) return fail(46002, `连续无效调用达到阈值，该IP已被封禁约${r.remainMinutes}分钟`, 403)
+    }
+    return fail(40100, "API-Key 无效")
+  }
 
   // wasExpired 检查（记录调用日志时标记）
   const expired = !!token.expireAt && token.expireAt < new Date()
@@ -129,10 +144,11 @@ export async function authenticateApiToken(
     return fail(42900, "Token QPS 超限", 429)
   }
   const perSec = await getConfigNumber("mcp.perKeyPerSecond", 20)
-  const perMin = await getConfigNumber("mcp.perKeyPerMinute", 300)
+  // r23：每分钟配额四级解析（每Key覆盖 > 用户级 > 组级 > 全局默认）
+  const perMin = await resolveTokenRatePerMin({ tokenId: token.id, userId: token.userId })
   const perHour = await getConfigNumber("mcp.perKeyPerHour", 5000)
   if (!rateLimit(`mcp-sec:${token.id}`, perSec, 1000).allowed) { await writeLog(429); return fail(42900, "单Key每秒配额超限", 429) }
-  if (!rateLimit(`mcp-min:${token.id}`, perMin, 60_000).allowed) { await writeLog(429); return fail(42900, "单Key每分钟配额超限", 429) }
+  if (perMin > 0 && !rateLimit(`mcp-min:${token.id}`, perMin, 60_000).allowed) { await writeLog(429); return fail(42900, `单Key每分钟配额超限（上限${perMin}/分钟，可在Token策略中调整）`, 429) }
   if (!rateLimit(`mcp-hour:${token.id}`, perHour, 3600_000).allowed) { await writeLog(429); return fail(42900, "单Key每小时配额超限", 429) }
 
   // ---- 权限位掩码（只读/读写级别） ----
@@ -157,6 +173,7 @@ export async function authenticateApiToken(
 
   // 调用计数
   await db.apiToken.update({ where: { id: token.id }, data: { lastCallAt: new Date(), callCount: { increment: 1 } } }).catch(() => {})
+  void clearIpFailCount(ip).catch(() => {}) // r23：有效Key调用清零失败计数（正常使用不受封禁影响）
   void trackBehavior(token.userId, "MCP_CALL").catch(() => {})
 
   return {

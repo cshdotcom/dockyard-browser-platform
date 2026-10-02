@@ -847,3 +847,67 @@ export async function setGroupIdleTimeoutAction(
     return { minutes: p.minutes, locked: p.locked, globalDefault: await getConfigNumber("workspace.defaultIdleTimeoutMin", 60), affectedMembers }
   })
 }
+
+// ---- r23：组级 API-Key 策略（组内成员默认基线；用户级可覆盖收紧） ----
+
+export async function setGroupTokenPolicyAction(input: unknown): Promise<ActionResult<{ id: string; tokenPolicy: Record<string, unknown> | null }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAdmin()
+    const p = zodValidate(
+      z.object({
+        id: zId,
+        // null=清除组级策略（成员完全走用户级/全局）；稀疏对象=仅设置出现的字段
+        tokenPolicy: z
+          .object({
+            allowCreate: z.boolean().optional(),
+            maxPerUser: z.number().int().min(0).max(10000).optional(),
+            allowPermanent: z.boolean().optional(),
+            maxLifetimeDays: z.number().int().min(0).max(3650).optional(),
+            rateLimitPerMin: z.number().int().min(0).max(1000000).optional(),
+            allowedScopes: z.array(z.string().max(32)).max(16).nullable().optional(),
+          })
+          .nullable(),
+      }),
+      input,
+    )
+    const group = await db.group.findUnique({ where: { id: p.id }, select: { id: true, name: true, tokenPolicy: true, deletedAt: true } })
+    if (!group || group.deletedAt) throw new Error("用户组不存在或已删除")
+
+    const sanitized = p.tokenPolicy === null ? null : (Object.keys(p.tokenPolicy).length === 0 ? null : (p.tokenPolicy as Record<string, unknown>))
+    await db.group.update({
+      where: { id: group.id },
+      data: { tokenPolicy: sanitized ? (JSON.parse(JSON.stringify(sanitized)) as Prisma.InputJsonValue) : Prisma.DbNull },
+    })
+    const affectedMembers = await db.groupUser.count({ where: { groupId: group.id } })
+
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "GROUP_TOKEN_POLICY",
+      resourceType: "GROUP",
+      resourceId: group.id,
+      resourceName: group.name,
+      before: { tokenPolicy: group.tokenPolicy ?? null },
+      after: { tokenPolicy: sanitized, affectedMembers },
+      severity: "WARN",
+    })
+    return { id: group.id, tokenPolicy: sanitized }
+  })
+}
+
+export async function getGroupTokenPolicyAction(input: unknown): Promise<ActionResult<{
+  id: string
+  name: string
+  groupPolicy: Record<string, unknown> | null
+  affectedMembers: number
+}>> {
+  return actionHandler(async () => {
+    await requireAdmin()
+    const p = zodValidate(z.object({ id: zId }), input)
+    const group = await db.group.findUnique({ where: { id: p.id }, select: { id: true, name: true, tokenPolicy: true, deletedAt: true } })
+    if (!group || group.deletedAt) throw new Error("用户组不存在或已删除")
+    const affectedMembers = await db.groupUser.count({ where: { groupId: group.id } })
+    return { id: group.id, name: group.name, groupPolicy: (group.tokenPolicy as Record<string, unknown> | null) ?? null, affectedMembers }
+  })
+}

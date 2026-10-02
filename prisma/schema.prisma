@@ -49,6 +49,8 @@ model User {
   // —— 闲置超时四级策略链（分钟；沙箱>用户>用户组>全局默认；0=无限即永不闲置回收）——
   idleTimeoutMinutes     Int? // null=继承用户组
   idleTimeoutLocked      Boolean @default(false) // true=管理员锁定：用户创建/编辑沙箱时不可自行调整闲置超时
+  // —— r23：API-Key 精确管控（用户级覆盖，null=继承所属组；组也未设置时用全局默认）——
+  tokenPolicy            Json? // { allowCreate, maxPerUser, allowPermanent, maxLifetimeDays, rateLimitPerMin, allowedScopes }（null字段=继承）
   loginSessionCount   Int       @default(0)
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -198,6 +200,8 @@ model Group {
   idleTimeoutMinutes         Int? // 组级闲置超时（分钟，null=继承全局默认，0=无限）
   idleTimeoutLocked          Boolean @default(false) // true=组内成员不可自行调整闲置超时（沙箱级仍可由管理员改）
   policy           Json? // 组级权限锁 / 生命周期默认策略
+  // —— r23：API-Key 精确管控（组级基线；用户级 tokenPolicy 可覆盖，均未设置时用全局默认）——
+  tokenPolicy      Json? // { allowCreate, maxPerUser, allowPermanent, maxLifetimeDays, rateLimitPerMin, allowedScopes }（null字段=继承）
   createdByUserId  String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -304,6 +308,7 @@ model ApiToken {
   scopes         Json?
   ipWhitelist    Json?
   qpsLimit       Float     @default(0) // 0 = 全局默认
+  rateLimitPerMin Int? // r23：每Key每分钟调用上限覆盖（null=继承策略链：用户/组/全局 mcp.perKeyPerMinute）
   expireAt       DateTime? // null = 永久
   enabled        Boolean   @default(true)
   lastCallAt     DateTime?
@@ -376,6 +381,13 @@ model ScheduleTask {
   lastExecuteAt    DateTime?
   lastResult       String?
   avgDurationMs    Int      @default(0)
+  // —— r23：自定时任务（管理员可创建/编辑/删除的自定义调度，基于内置任务类型注册表）——
+  isCustom         Boolean  @default(false) // true=自定义任务（code 形如 custom:<cuid>）
+  taskType         String?  // 执行的任务类型（TASKS 注册表键；内置任务=null 即用 code 本身）
+  paramsJson       String?  // 任务参数（预留，目前注册表任务无参数）
+  description      String?  // 自定义任务备注说明
+  createdByUserId  String?  // 创建人（自定义任务审计追溯）
+  nextRunAt        DateTime? // r23：按 cron 表达式计算的下次到期时间（到期调度器/接口据此触发）
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 }
@@ -393,6 +405,30 @@ model ScheduleTaskLog {
   itemsProcessed Int  @default(0)
 
   @@index([taskCode, startAt])
+  @@index([status])
+  @@index([startAt])
+}
+
+// —— r23：IP 自动封禁（登录/API-Key 连续失败计数 → 定时封禁；与手工 RiskListRule 黑名单互补）——
+model IpBanRecord {
+  id            String    @id @default(cuid())
+  ip            String
+  source        String    @default("LOGIN") // LOGIN | API_KEY | MANUAL
+  failCount     Int       @default(0) // 窗口内累计失败次数
+  firstFailAt   DateTime?
+  lastFailAt    DateTime?
+  bannedUntil   DateTime? // null=当前未封禁（仅计数）；非空=封禁生效中
+  reason        String?   // 封禁原因
+  note          String?   // 管理员备注（手动封禁/解封说明）
+  createdByUserId String? // 手动封禁操作人
+  unbannedByUserId String? // 手动解封操作人
+  unbannedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([ip])
+  @@index([bannedUntil])
+  @@index([lastFailAt])
 }
 
 model IdempotencyRecord {

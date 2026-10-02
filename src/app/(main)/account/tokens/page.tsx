@@ -2,6 +2,7 @@ import { db } from "@/lib/db"
 import { requireAuth } from "@/lib/permissions"
 import { getConfigBool, getConfigNumber } from "@/lib/config"
 import { normalizeScopes } from "@/lib/token-scopes"
+import { resolveTokenPolicy } from "@/lib/token-policy"
 import { parseListQuery, pageSkipTake, safeOrderBy, fmtDate } from "@/lib/utils-server"
 import { StatCard } from "@/components/shared/confirm"
 import { KeyRound, Clock, ShieldAlert, Infinity as InfinityIcon } from "lucide-react"
@@ -39,6 +40,12 @@ export default async function TokensPage({
   const allowPermanent = await getConfigBool("token.allowPermanent", true)
   const maxLifetimeDays = await getConfigNumber("token.maxLifetimeDays", 0)
 
+  // r23-d：四级链解析账号级生效分钟限流（仅展示；SUPER_ADMIN 豁免走全局默认）
+  const effPolicy = await resolveTokenPolicy(ctx.userId)
+  const effectiveRatePerMin =
+    effPolicy.rateLimitPerMin > 0 ? effPolicy.rateLimitPerMin : await getConfigNumber("mcp.perKeyPerMinute", 300)
+  const effectiveRateSource = effPolicy.sources.rateLimitPerMin || "global"
+
   // ---- 令牌列表 ----
   const where: Record<string, unknown> = { userId: ctx.userId, deletedAt: null }
   if (f.enabled) where.enabled = f.enabled === "true"
@@ -67,6 +74,7 @@ export default async function TokensPage({
     status: tokenStatusOf(t.expireAt, warnDays),
     enabled: t.enabled,
     qpsLimit: t.qpsLimit,
+    rateLimitPerMin: t.rateLimitPerMin,
     ipWhitelist: Array.isArray(t.ipWhitelist) ? (t.ipWhitelist as string[]) : [],
     lastCallAt: fmtDate(t.lastCallAt),
     callCount: t.callCount,
@@ -155,6 +163,8 @@ export default async function TokensPage({
             sortOrder={q.sortOrder}
             filters={f}
             role={ctx.role}
+            effectiveRatePerMin={effectiveRatePerMin}
+            effectiveRateSource={effectiveRateSource}
           />
         ) : (
           <CallLogsTable

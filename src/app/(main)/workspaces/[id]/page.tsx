@@ -4,6 +4,7 @@ import { db } from "@/lib/db"
 import { requireAuth, userGroupIds } from "@/lib/permissions"
 import { fmtDate, fmtBytes } from "@/lib/utils-server"
 import { ENV } from "@/lib/env"
+import { getConfig, getConfigBool } from "@/lib/config"
 import { resolveIdlePolicyForWorkspace } from "@/lib/idle-policy"
 import { WorkspaceDetail } from "./detail-tabs"
 
@@ -128,6 +129,13 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
               lockSourceLabel: idlePolicyWs.ownerPolicy.lockSourceLabel,
             }
           : null,
+        // r23：VNC 全局策略（workspace.vncDefaultMode/vncForceMode/vncWatermark/vncAutoQuality 真实生效）
+        vncPolicy: {
+          defaultMode: await getConfig<string>("workspace.vncDefaultMode", "auto"),
+          forceMode: await getConfig<string>("workspace.vncForceMode", ""),
+          watermark: await getConfigBool("workspace.vncWatermark", true),
+          autoQuality: await getConfigBool("workspace.vncAutoQuality", true),
+        },
       }}
       shares={shares.map((s) => ({
         id: s.id, targetName: shareMap.get(s.targetUserId)?.displayName || shareMap.get(s.targetUserId)?.username || "-",

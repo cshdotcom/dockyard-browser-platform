@@ -674,6 +674,59 @@ export async function listWorkspaceShareRecipientsAction(input: unknown): Promis
   })
 }
 
+// ---- r23：批量移除接收者（共享弹窗多选踢出；仅发起人/管理员；逐个撤销不影响其他接收者） ----
+export async function batchRevokeShareRecipientsAction(input: unknown): Promise<ActionResult<{
+  revoked: number
+  skipped: number
+  failures: { username: string; reason: string }[]
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { workspaceId, shareIds } = zodValidate(
+      z.object({
+        workspaceId: z.string(),
+        shareIds: z.array(z.string().min(1)).min(1, "请至少选择一个接收者").max(100, "单次最多移除 100 个接收者"),
+      }),
+      input
+    )
+    const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null }, select: { id: true, userId: true, name: true } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") {
+      throw new Error("只有所有者或管理员可以移除接收者")
+    }
+
+    const failures: { username: string; reason: string }[] = []
+    let revoked = 0
+    let skipped = 0
+    const now = new Date()
+    for (const shareId of shareIds) {
+      try {
+        const share = await db.workspaceShare.findUnique({ where: { id: shareId } })
+        if (!share || share.workspaceId !== workspaceId) {
+          skipped++
+          continue
+        }
+        if (share.revokedAt) {
+          skipped++
+          continue
+        }
+        await db.workspaceShare.update({ where: { id: shareId }, data: { revokedAt: now } })
+        revoked++
+      } catch (e) {
+        failures.push({ username: shareId, reason: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_SHARE_BATCH_REVOKE",
+      resourceType: "WORKSPACE", resourceId: workspaceId, resourceName: ws.name,
+      ownerUserId: ws.userId,
+      after: { shareIds, revoked, skipped, failCount: failures.length },
+      severity: "WARN",
+    })
+    return { revoked, skipped, failures }
+  })
+}
+
 // ---- 临时分享链接（带有效期 + 权限 + 次数上限；已登录用户访问即自动绑定共享） ----
 export async function createWorkspaceShareLinkAction(input: unknown): Promise<ActionResult<{
   linkId: string; token: string; url: string; permission: string; expireAt: string | null; maxUses: number

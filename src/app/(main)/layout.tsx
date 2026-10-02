@@ -6,7 +6,7 @@ import { AppShell, type MenuGroup } from "@/components/layout/app-shell"
 import {
   LayoutDashboard, Globe, FileCode2, KeyRound, ShieldCheck, Megaphone,
   Users, FolderTree, ScrollText, Settings2, Timer, FolderOpen, DatabaseBackup,
-  Server, Network, Recycle, ShieldAlert, MessageSquareCode, SlidersHorizontal, Puzzle,
+  Server, Network, Recycle, ShieldAlert, MessageSquareCode, SlidersHorizontal, Puzzle, ShieldBan,
 } from "lucide-react"
 
 // 主应用布局（RSC）：深度会话校验 + 强制2FA策略拦截 + 权限菜单过滤
@@ -82,6 +82,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
       items: [
         { key: "a-audit", label: "审计日志", href: "/admin/audit", icon: <ScrollText className="h-4 w-4" /> },
         { key: "a-alerts", label: "告警中心", href: "/admin/alerts", icon: <Megaphone className="h-4 w-4" /> },
+        { key: "a-ipban", label: "IP 封禁", href: "/admin/ipban", icon: <ShieldBan className="h-4 w-4" /> },
         { key: "a-recycle", label: "回收站", href: "/admin/recycle", icon: <Recycle className="h-4 w-4" /> },
         { key: "a-risk", label: "风控与画像", href: "/admin/risk", icon: <ShieldAlert className="h-4 w-4" /> },
         { key: "a-announcements", label: "公告管理", href: "/admin/announcements", icon: <Megaphone className="h-4 w-4" /> },

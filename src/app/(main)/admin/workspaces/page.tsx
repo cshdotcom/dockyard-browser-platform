@@ -58,6 +58,16 @@ export default async function AdminWorkspacesPage({
     else if (shareStatus === "revoked") shareWhere.revokedAt = { not: null }
     else if (shareStatus === "expired") { shareWhere.revokedAt = null; shareWhere.expireAt = { lt: now } }
     if (sharePermission) shareWhere.permission = sharePermission
+    // 23-a：共享创建时间范围筛选（YYYY-MM-DD；非法格式直接忽略）
+    const shareDateRe = /^\d{4}-\d{2}-\d{2}$/
+    const shareFrom = shareDateRe.test((f.shareFrom || "").trim()) ? (f.shareFrom || "").trim() : ""
+    const shareTo = shareDateRe.test((f.shareTo || "").trim()) ? (f.shareTo || "").trim() : ""
+    if (shareFrom || shareTo) {
+      const createdAtRange: Record<string, unknown> = {}
+      if (shareFrom) createdAtRange.gte = new Date(`${shareFrom}T00:00:00`)
+      if (shareTo) createdAtRange.lte = new Date(`${shareTo}T23:59:59`)
+      shareWhere.createdAt = createdAtRange
+    }
     if (kw) {
       const clauses: Record<string, unknown>[] = []
       if (wsIdsByKw && wsIdsByKw.length) clauses.push({ workspaceId: { in: wsIdsByKw } })

@@ -3,6 +3,7 @@
 // 用户管理 Server Actions：全部写操作 requireWritableMode + requireAdmin + zod + 审计 + 行为画像
 
 import { z } from "zod"
+import { Prisma } from "@prisma/client"
 import { db } from "@/lib/db"
 import { actionHandler, type ActionResult } from "@/lib/api"
 import { requireWritableMode, requireAdmin, requireAuth } from "@/lib/permissions"
@@ -570,6 +571,78 @@ export async function setForce2faAction(input: unknown): Promise<ActionResult<{ 
     })
 
     return { id: user.id, force2faSetup: p.force2faSetup }
+  })
+}
+
+// ---- 10b. r23：用户级 API-Key 策略（精确管控：允许创建/数量/永久/时长/限流/范围） ----
+
+export async function setUserTokenPolicyAction(input: unknown): Promise<ActionResult<{ id: string; tokenPolicy: Record<string, unknown> | null }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAdmin()
+    const p = zodValidate(
+      z.object({
+        id: zId,
+        // null=清除用户级覆盖（完全继承组/全局）；稀疏对象=仅覆盖出现的字段
+        tokenPolicy: z
+          .object({
+            allowCreate: z.boolean().optional(),
+            maxPerUser: z.number().int().min(0).max(10000).optional(),
+            allowPermanent: z.boolean().optional(),
+            maxLifetimeDays: z.number().int().min(0).max(3650).optional(),
+            rateLimitPerMin: z.number().int().min(0).max(1000000).optional(),
+            allowedScopes: z.array(z.string().max(32)).max(16).nullable().optional(),
+          })
+          .nullable(),
+      }),
+      input
+    )
+
+    const user = await db.user.findUnique({ where: { id: p.id } })
+    if (!user || user.deletedAt) throw new Error("用户不存在或已删除")
+
+    const sanitized = p.tokenPolicy === null ? null : (Object.keys(p.tokenPolicy).length === 0 ? null : (p.tokenPolicy as unknown as Record<string, unknown>))
+    await db.user.update({ where: { id: p.id }, data: { tokenPolicy: sanitized ? (JSON.parse(JSON.stringify(sanitized)) as Prisma.InputJsonValue) : Prisma.DbNull } })
+
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "USER_TOKEN_POLICY",
+      resourceType: "USER",
+      resourceId: user.id,
+      resourceName: user.username,
+      ownerUserId: user.id,
+      before: { tokenPolicy: user.tokenPolicy ?? null },
+      after: { tokenPolicy: sanitized },
+      severity: "WARN",
+    })
+    return { id: user.id, tokenPolicy: sanitized }
+  })
+}
+
+// ---- 10c. r23：查询用户 Token 策略生效值（四级链解析 + 来源标注） ----
+export async function getUserTokenPolicyAction(input: unknown): Promise<ActionResult<{
+  id: string
+  username: string
+  userPolicy: Record<string, unknown> | null
+  effective: Record<string, unknown>
+  sources: Record<string, string>
+}>> {
+  return actionHandler(async () => {
+    await requireAdmin()
+    const { id } = zodValidate(z.object({ id: zId }), input)
+    const user = await db.user.findUnique({ where: { id } })
+    if (!user || user.deletedAt) throw new Error("用户不存在或已删除")
+    const { resolveTokenPolicy } = await import("@/lib/token-policy")
+    const policy = await resolveTokenPolicy(id)
+    const { sources, ...effective } = policy
+    return {
+      id,
+      username: user.username,
+      userPolicy: (user.tokenPolicy as Record<string, unknown> | null) ?? null,
+      effective: effective as unknown as Record<string, unknown>,
+      sources: (sources ?? {}) as Record<string, string>,
+    }
   })
 }
 

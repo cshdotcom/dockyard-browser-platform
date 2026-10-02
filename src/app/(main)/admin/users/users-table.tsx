@@ -35,6 +35,7 @@ import { adminEvictUserSharesAction, adminShareEvictPreviewAction } from "@/serv
 import { BatchFailuresDialog } from "@/components/shared/batch-ui"
 import { UserFormDialog, type GroupOption } from "./user-form"
 import { UserApiTokensDialog } from "./user-api-tokens"
+import { UserTokenPolicyDialog } from "./token-policy-dialog"
 
 export interface AdminUserRow {
   id: string
@@ -136,6 +137,9 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
 
   // API 密钥代管
   const [apiTokenUser, setApiTokenUser] = React.useState<AdminUserRow | null>(null)
+
+  // r23-d：用户级 API-Key 策略（四级链覆盖）
+  const [tokenPolicyUser, setTokenPolicyUser] = React.useState<AdminUserRow | null>(null)
 
   const [importOpen, setImportOpen] = React.useState(false)
   const [importMode, setImportMode] = React.useState<"skip" | "update">("skip")
@@ -511,6 +515,13 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
         >
           <KeyRound className="mr-1.5 h-4 w-4" /> API 密钥（查看/创建/修改）
         </DropdownMenuItem>
+        <DropdownMenuItem
+          onClick={() => {
+            setTokenPolicyUser(row)
+          }}
+        >
+          <KeyRound className="mr-1.5 h-4 w-4 text-amber-500" /> API-Key 策略（创建/数量/限流）
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={() => callAction(row.id, () => kickUserSessionsAction({ ids: [row.id] }))}>
           强制下线全部会话
         </DropdownMenuItem>
@@ -649,6 +660,13 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
         open={!!apiTokenUser}
         onOpenChange={(v) => !v && setApiTokenUser(null)}
         viewerRole={viewerRole}
+      />
+
+      {/* r23-d：用户级 API-Key 策略（四级链：每Key>用户>组>全局） */}
+      <UserTokenPolicyDialog
+        user={tokenPolicyUser ? { id: tokenPolicyUser.id, username: tokenPolicyUser.username, displayName: tokenPolicyUser.displayName, role: tokenPolicyUser.role } : null}
+        open={!!tokenPolicyUser}
+        onOpenChange={(v) => !v && setTokenPolicyUser(null)}
       />
 
       {/* 删除确认 */}

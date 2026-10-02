@@ -533,3 +533,149 @@ export async function hostInfo(): Promise<{ cpuCores: number; memTotalMb: number
   }
   return { cpuCores: 8, memTotalMb: 16384, simulated: true }
 }
+
+// r23：宿主机真实资源采集（CPU%/内存/磁盘）—— 用于 host_probe 水位预警
+// · CPU：两次采样 /proc/stat 差分（250ms 间隔）得出真实使用率；无 /proc 时回退 loadavg 近似
+// · 内存：/proc/meminfo（容器内非 namespaced 时即宿主机真实值）；回退 os 模块
+// · 磁盘：优先 Docker data-root（容器存储所在文件系统 —— 用户明确要求识别容器存储位置磁盘用量）；
+//   无 Docker 时回退平台数据目录所在文件系统
+export interface HostRealMetrics {
+  cpuCores: number
+  cpuUsedPct: number
+  memTotalMb: number
+  memUsedMb: number
+  diskTotalMb: number
+  diskUsedPct: number
+  diskPath: string
+  diskSource: "docker-data-root" | "storage-path" | "root"
+  memSource: "meminfo" | "os"
+  cpuSource: "proc-stat" | "loadavg"
+  simulated: boolean
+}
+
+export async function hostRealMetrics(opts?: { storageFallbackPath?: string }): Promise<HostRealMetrics> {
+  const os = await import("os")
+
+  // ---- 基础信息（优先 Docker API：宿主机真实核数/内存；容器视角一致） ----
+  let cpuCores = os.cpus().length
+  let memTotalMb = Math.round(os.totalmem() / 1048576)
+  let simulated = false
+  let dockerRootDir: string | null = null
+  if (externalAvailable.docker) {
+    try {
+      const res = await dockerFetch("/info")
+      if (res.ok) {
+        const json = (await res.json()) as { NCPU?: number; MemTotal?: number; DockerRootDir?: string; Driver?: string }
+        if (json.NCPU) cpuCores = json.NCPU
+        if (json.MemTotal) memTotalMb = Math.round(json.MemTotal / 1048576)
+        dockerRootDir = json.DockerRootDir || null
+      }
+    } catch {
+      // Docker API 不可达 → 用 os 数据 + 存储路径磁盘
+    }
+  } else {
+    simulated = true
+  }
+
+  // ---- CPU：/proc/stat 差分 ----
+  const readProcStat = async (): Promise<number[] | null> => {
+    try {
+      const fs = await import("fs/promises")
+      const txt = await fs.readFile("/proc/stat", "utf8")
+      const line = txt.split("\n")[0]
+      const parts = line.split(/\s+/).slice(1).map(Number)
+      if (parts.length < 4) return null
+      return parts
+    } catch {
+      return null
+    }
+  }
+  let cpuUsedPct = 0
+  let cpuSource: HostRealMetrics["cpuSource"] = "loadavg"
+  const stat1 = await readProcStat()
+  if (stat1) {
+    await new Promise((r) => setTimeout(r, 250))
+    const stat2 = await readProcStat()
+    if (stat2) {
+      const idle1 = stat1[3] + (stat1[4] || 0)
+      const idle2 = stat2[3] + (stat2[4] || 0)
+      const total1 = stat1.reduce((a, b) => a + b, 0)
+      const total2 = stat2.reduce((a, b) => a + b, 0)
+      const dTotal = total2 - total1
+      const dIdle = idle2 - idle1
+      if (dTotal > 0) {
+        cpuUsedPct = Math.max(0, Math.min(100, ((dTotal - dIdle) / dTotal) * 100))
+        cpuSource = "proc-stat"
+      }
+    }
+  }
+  if (cpuSource === "loadavg") {
+    // 回退：1 分钟负载 / 核数（粗略上限截断 100%）
+    const load = os.loadavg()[0]
+    cpuUsedPct = Math.max(0, Math.min(100, (load / Math.max(1, cpuCores)) * 100))
+  }
+
+  // ---- 内存：/proc/meminfo ----
+  let memUsedMb = 0
+  let memSource: HostRealMetrics["memSource"] = "os"
+  try {
+    const fs = await import("fs/promises")
+    const txt = await fs.readFile("/proc/meminfo", "utf8")
+    const map = new Map<string, number>()
+    for (const line of txt.split("\n")) {
+      const m = /^(\w+):\s+(\d+)\s*kB$/.exec(line.trim())
+      if (m) map.set(m[1], Number(m[2]))
+    }
+    const totalKb = map.get("MemTotal")
+    const availKb = map.get("MemAvailable") ?? map.get("MemFree")
+    if (totalKb && availKb !== undefined) {
+      memTotalMb = Math.round(totalKb / 1024)
+      memUsedMb = Math.round((totalKb - availKb) / 1024)
+      memSource = "meminfo"
+    }
+  } catch {
+    // 回退 os
+  }
+  if (memSource === "os") {
+    memUsedMb = Math.round((os.totalmem() - os.freemem()) / 1048576)
+  }
+
+  // ---- 磁盘：Docker data-root 优先（容器存储位置的真实文件系统用量） ----
+  const statfsOf = async (p: string): Promise<{ totalMb: number; usedPct: number } | null> => {
+    try {
+      const fs = await import("fs/promises")
+      const st = await (fs as unknown as { statfs?: (p: string) => Promise<{ blocks: number; bsize: number; bfree: number; bavail: number }> }).statfs?.(p)
+      if (!st || !st.blocks || !st.bsize) return null
+      const total = st.blocks * st.bsize
+      const free = st.bfree * st.bsize
+      return { totalMb: Math.round(total / 1048576), usedPct: total > 0 ? ((total - free) / total) * 100 : 0 }
+    } catch {
+      return null
+    }
+  }
+  let diskPath = dockerRootDir || opts?.storageFallbackPath || "/"
+  let diskSource: HostRealMetrics["diskSource"] = dockerRootDir ? "docker-data-root" : opts?.storageFallbackPath ? "storage-path" : "root"
+  let disk = await statfsOf(diskPath)
+  if (!disk && diskSource !== "root") {
+    // data-root 不可读（权限/不存在）→ 回退根文件系统
+    disk = await statfsOf("/")
+    diskPath = "/"
+    diskSource = "root"
+  }
+  const diskTotalMb = disk?.totalMb ?? 0
+  const diskUsedPct = disk ? Math.round(disk.usedPct * 1000) / 1000 : 0
+
+  return {
+    cpuCores,
+    cpuUsedPct: Math.round(cpuUsedPct * 1000) / 1000,
+    memTotalMb,
+    memUsedMb,
+    diskTotalMb,
+    diskUsedPct,
+    diskPath,
+    diskSource,
+    memSource,
+    cpuSource,
+    simulated,
+  }
+}

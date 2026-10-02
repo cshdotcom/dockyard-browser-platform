@@ -15,6 +15,17 @@ export function TaskTabs({ tab, children }: { tab: "list" | "logs"; children: Re
     const params = new URLSearchParams(searchParams.toString())
     params.set("tab", v)
     params.delete("page")
+    params.delete("focus") // r23-b：切页签撤销任务行 focus 高亮（仅任务列表使用）
+    if (v === "logs") {
+      // 切到日志页签时清除任务列表专属筛选，避免无效参数残留
+      params.delete("taskEnabled")
+      params.delete("taskKind")
+      params.delete("taskStatus")
+    } else {
+      params.delete("logFrom")
+      params.delete("logTo")
+      params.delete("triggerType")
+    }
     router.push(`${pathname}?${params.toString()}`)
   }
 

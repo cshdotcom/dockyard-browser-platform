@@ -4,6 +4,9 @@
 // 用户端共享入口统一组件：工作区列表行内「共享」按钮与详情页「共享管理」共用同一弹窗。
 // · 接收者名单：当前已共享给谁（用户名/权限/到期/状态），支持单个「移除」（撤销该接收者的共享，
 //   不影响其他接收者；仅发起人/管理员可操作，服务端二次校验）
+//   23-a：名单增强 —— 客户端实时搜索（用户名/昵称）+ 状态筛选（全部/生效中/已移除/已过期）
+//   + 行多选批量移除（batchRevokeShareRecipientsAction；已移除行不可勾；r22b 语义：
+//   blockedReason 仅阻断新增共享，名单查看/移除不受影响）
 // · 多选共享：搜索建议列表带勾选，可连续选择多个用户（胶囊展示可单个移除），
 //   一次提交批量授权（shareWorkspaceBatchAction：逐个校验 + 部分失败汇总提示）
 // · 权限（只读/可操作）+ 有效期（0=永久）
@@ -11,7 +14,7 @@
 
 import * as React from "react"
 import { toast } from "sonner"
-import { Loader2, Share2, Check, X, UserX } from "lucide-react"
+import { Loader2, Share2, Check, X, UserX, Search } from "lucide-react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
@@ -24,6 +27,7 @@ import { cn } from "@/lib/utils"
 import {
   shareWorkspaceBatchAction, searchShareTargetUsersAction,
   listWorkspaceShareRecipientsAction, revokeShareAction,
+  batchRevokeShareRecipientsAction,
 } from "@/server/actions/workspaces"
 
 export interface WorkspaceShareDialogProps {
@@ -79,6 +83,13 @@ export function WorkspaceShareDialog({ workspace, open, onOpenChange, onDone, bl
   const [revoking, setRevoking] = React.useState<string | null>(null) // 正在移除的 shareId
   const [removeTarget, setRemoveTarget] = React.useState<RecipientRow | null>(null)
 
+  // ---- 23-a：名单搜索 / 状态筛选 / 多选批量移除 ----
+  const [recipientSearch, setRecipientSearch] = React.useState("")
+  const [recipientStatusFilter, setRecipientStatusFilter] = React.useState<"all" | "active" | "revoked" | "expired">("all")
+  const [selectedRecipientIds, setSelectedRecipientIds] = React.useState<string[]>([])
+  const [batchRemoveConfirm, setBatchRemoveConfirm] = React.useState(false)
+  const [batchRemoving, setBatchRemoving] = React.useState(false)
+
   const loadRecipients = React.useCallback(async () => {
     setRecipientsBusy(true)
     try {
@@ -117,6 +128,8 @@ export function WorkspaceShareDialog({ workspace, open, onOpenChange, onDone, bl
     if (open) {
       setUsername(""); setSuggests([]); setSelected([]); setPermission("VIEW"); setHours(24); setBatchFailures(null)
       setRecipients(null)
+      setRecipientSearch(""); setRecipientStatusFilter("all")
+      setSelectedRecipientIds([]); setBatchRemoveConfirm(false)
     }
   }, [open, workspace.id])
 
@@ -171,9 +184,63 @@ export function WorkspaceShareDialog({ workspace, open, onOpenChange, onDone, bl
 
   const activeRecipients = (recipients || []).filter((r) => r.status === "active").length
 
+  // 23-a：客户端实时过滤（状态筛选 + 用户名/昵称包含匹配）
+  const visibleRecipients = React.useMemo(() => {
+    const list = recipients || []
+    const kw = recipientSearch.trim().toLowerCase()
+    return list.filter((r) => {
+      if (recipientStatusFilter !== "all" && r.status !== recipientStatusFilter) return false
+      if (kw) {
+        const hit = r.targetUsername.toLowerCase().includes(kw) || (r.targetDisplayName || "").toLowerCase().includes(kw)
+        if (!hit) return false
+      }
+      return true
+    })
+  }, [recipients, recipientSearch, recipientStatusFilter])
+
+  // 可勾选集合：仅当前筛选可见且未处于「已移除」状态的行（隐藏行/已移除行不可勾）
+  const selectableRecipientIds = React.useMemo(
+    () => new Set(visibleRecipients.filter((r) => r.status !== "revoked").map((r) => r.id)),
+    [visibleRecipients]
+  )
+
+  // 筛选/搜索/数据刷新后，被隐藏或已移除的勾选项自动剔除（「已选 N」始终反映真实可选集）
+  React.useEffect(() => {
+    setSelectedRecipientIds((prev) => prev.filter((id) => selectableRecipientIds.has(id)))
+  }, [selectableRecipientIds])
+
+  const toggleRecipient = (id: string) => {
+    setSelectedRecipientIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }
+
+  const selectedRecipientRows = (recipients || []).filter((r) => selectedRecipientIds.includes(r.id))
+
+  const doBatchRemove = async () => {
+    if (selectedRecipientIds.length === 0) return
+    setBatchRemoving(true)
+    try {
+      const res = await batchRevokeShareRecipientsAction({ workspaceId: workspace.id, shareIds: selectedRecipientIds })
+      if (res.code === 0 && res.data) {
+        const { revoked, skipped, failures } = res.data
+        if (failures.length === 0) {
+          toast.success(`批量移除完成：已撤销 ${revoked} 个接收者${skipped > 0 ? `，跳过 ${skipped} 个（已移除/不存在）` : ""}`)
+        } else {
+          toast.warning(`批量移除完成：撤销 ${revoked} 个，跳过 ${skipped} 个，失败 ${failures.length} 个：${failures.map((f) => f.username).join("、")}`)
+        }
+        setSelectedRecipientIds([])
+        await loadRecipients()
+        onDone()
+      } else {
+        toast.error(res.msg)
+      }
+    } finally {
+      setBatchRemoving(false)
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-1.5">
             <Share2 className="h-4 w-4" /> 共享工作区「{workspace.name}」
@@ -186,7 +253,7 @@ export function WorkspaceShareDialog({ workspace, open, onOpenChange, onDone, bl
         )}
 
         <div className="space-y-3">
-          {/* ---- 接收者名单（共享给了谁 / 单个移除） ---- */}
+          {/* ---- 接收者名单（共享给了谁 / 搜索 + 状态筛选 + 多选批量移除 + 单个移除） ---- */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
               <Label>接收者名单{recipients ? `（生效中 ${activeRecipients} / 共 ${recipients.length}）` : ""}</Label>
@@ -201,44 +268,104 @@ export function WorkspaceShareDialog({ workspace, open, onOpenChange, onDone, bl
             ) : !recipients || recipients.length === 0 ? (
               <p className="py-4 text-center text-xs text-muted-foreground border border-dashed rounded-md">尚未共享给任何用户</p>
             ) : (
-              <div className="rounded-md border divide-y max-h-56 overflow-y-auto">
-                {recipients.map((r) => (
-                  <div key={r.id} className="flex items-center justify-between gap-2 px-3 py-2 text-sm">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="font-medium font-mono text-[13px]">{r.targetUsername}</span>
-                        <Badge variant={r.permission === "OPERATE" ? "default" : "outline"} className={cn("text-[9px]", r.permission === "OPERATE" && "bg-teal-600 hover:bg-teal-600")}>
-                          {r.permission === "OPERATE" ? "可操作" : "只读"}
-                        </Badge>
-                        {r.status === "active" ? (
-                          <Badge variant="secondary" className="text-[9px] text-teal-600">生效中</Badge>
-                        ) : r.status === "revoked" ? (
-                          <Badge variant="secondary" className="text-[9px] text-red-600">已移除</Badge>
-                        ) : (
-                          <Badge variant="secondary" className="text-[9px] text-amber-600">已过期</Badge>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
-                        {r.targetDisplayName ? `${r.targetDisplayName} · ` : ""}创建 {fmtDT(r.createdAt)?.slice(0, 16)}
-                        {r.expireAt ? ` · 过期 ${fmtDT(r.expireAt)?.slice(0, 16)}` : " · 永久有效"}
-                      </p>
-                    </div>
-                    {r.status !== "revoked" ? (
-                      <Button
-                        variant="ghost" size="sm"
-                        className="h-7 px-2 text-xs text-destructive hover:text-destructive shrink-0"
-                        disabled={revoking === r.id}
-                        onClick={() => setRemoveTarget(r)}
-                        title={`移除「${r.targetUsername}」对该工作区的访问权（不影响其他接收者）`}
-                      >
-                        {revoking === r.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <UserX className="h-3 w-3" />} 移除
-                      </Button>
-                    ) : (
-                      <span className="text-[11px] text-muted-foreground shrink-0">—</span>
-                    )}
+              <>
+                {/* 搜索 + 状态筛选（客户端实时过滤） */}
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
+                    <Input
+                      value={recipientSearch}
+                      onChange={(e) => setRecipientSearch(e.target.value)}
+                      placeholder="搜索用户名 / 昵称"
+                      autoComplete="off"
+                      className="pl-8 h-9 text-xs"
+                      aria-label="搜索接收者（用户名/昵称）"
+                    />
                   </div>
-                ))}
-              </div>
+                  <Select value={recipientStatusFilter} onValueChange={(v) => setRecipientStatusFilter(v as typeof recipientStatusFilter)}>
+                    <SelectTrigger className="w-[96px] h-9 text-xs" aria-label="按状态筛选接收者">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">全部状态</SelectItem>
+                      <SelectItem value="active">生效中</SelectItem>
+                      <SelectItem value="revoked">已移除</SelectItem>
+                      <SelectItem value="expired">已过期</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {(recipientSearch.trim() || recipientStatusFilter !== "all") && (
+                  <p className="text-[11px] text-muted-foreground">匹配 {visibleRecipients.length} / {recipients.length} 条</p>
+                )}
+                {/* 已选计数 + 批量移除（r22b：blockedReason 不阻断查看/移除既有接收者） */}
+                <div className="flex items-center justify-between gap-2 rounded-md border bg-muted/30 px-2.5 py-1.5">
+                  <span className="text-[11px] text-muted-foreground">已选 {selectedRecipientIds.length} 个</span>
+                  <Button
+                    variant="destructive" size="sm"
+                    className="h-7 px-2.5 text-xs"
+                    disabled={selectedRecipientIds.length === 0 || batchRemoving}
+                    onClick={() => setBatchRemoveConfirm(true)}
+                    title="批量撤销所选接收者的共享（其他接收者不受影响）"
+                  >
+                    {batchRemoving ? <Loader2 className="h-3 w-3 animate-spin" /> : <UserX className="h-3 w-3" />}
+                    批量移除所选{selectedRecipientIds.length > 0 ? `（${selectedRecipientIds.length}）` : ""}
+                  </Button>
+                </div>
+                {visibleRecipients.length === 0 ? (
+                  <p className="py-4 text-center text-xs text-muted-foreground border border-dashed rounded-md">无匹配接收者（调整搜索词或状态筛选）</p>
+                ) : (
+                  <div className="rounded-md border divide-y max-h-56 overflow-y-auto">
+                    {visibleRecipients.map((r) => {
+                      const checkable = selectableRecipientIds.has(r.id)
+                      return (
+                        <div key={r.id} className="flex items-center justify-between gap-2 px-3 py-2 text-sm">
+                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                            <Checkbox
+                              checked={selectedRecipientIds.includes(r.id)}
+                              onCheckedChange={() => toggleRecipient(r.id)}
+                              disabled={!checkable}
+                              aria-label={`选择接收者 ${r.targetUsername}`}
+                              className="shrink-0"
+                            />
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-medium font-mono text-[13px]">{r.targetUsername}</span>
+                                <Badge variant={r.permission === "OPERATE" ? "default" : "outline"} className={cn("text-[9px]", r.permission === "OPERATE" && "bg-teal-600 hover:bg-teal-600")}>
+                                  {r.permission === "OPERATE" ? "可操作" : "只读"}
+                                </Badge>
+                                {r.status === "active" ? (
+                                  <Badge variant="secondary" className="text-[9px] text-teal-600">生效中</Badge>
+                                ) : r.status === "revoked" ? (
+                                  <Badge variant="secondary" className="text-[9px] text-red-600">已移除</Badge>
+                                ) : (
+                                  <Badge variant="secondary" className="text-[9px] text-amber-600">已过期</Badge>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
+                                {r.targetDisplayName ? `${r.targetDisplayName} · ` : ""}创建 {fmtDT(r.createdAt)?.slice(0, 16)}
+                                {r.expireAt ? ` · 过期 ${fmtDT(r.expireAt)?.slice(0, 16)}` : " · 永久有效"}
+                              </p>
+                            </div>
+                          </div>
+                          {r.status !== "revoked" ? (
+                            <Button
+                              variant="ghost" size="sm"
+                              className="h-7 px-2 text-xs text-destructive hover:text-destructive shrink-0"
+                              disabled={revoking === r.id}
+                              onClick={() => setRemoveTarget(r)}
+                              title={`移除「${r.targetUsername}」对该工作区的访问权（不影响其他接收者）`}
+                            >
+                              {revoking === r.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <UserX className="h-3 w-3" />} 移除
+                            </Button>
+                          ) : (
+                            <span className="text-[11px] text-muted-foreground shrink-0">—</span>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </>
             )}
           </div>
 
@@ -342,6 +469,22 @@ export function WorkspaceShareDialog({ workspace, open, onOpenChange, onDone, bl
         destructive
         confirmText="确认移除"
         onConfirm={doRemove}
+      />
+
+      {/* 23-a：批量移除所选接收者确认（列出用户名；其他接收者不受影响） */}
+      <ConfirmDialog
+        open={batchRemoveConfirm}
+        onOpenChange={(v) => { if (!batchRemoving) setBatchRemoveConfirm(v) }}
+        title="批量移除接收者"
+        description={
+          selectedRecipientRows.length > 0
+            ? `确定批量移除以下 ${selectedRecipientRows.length} 个接收者对工作区「${workspace.name}」的共享？\n· ${selectedRecipientRows.map((r) => r.targetUsername).slice(0, 20).join("、")}${selectedRecipientRows.length > 20 ? ` 等 ${selectedRecipientRows.length} 个` : ""}\n· 仅所选接收者立即失去访问权，其他接收者不受影响\n· 审计记录保留，可重新共享恢复`
+            : ""
+        }
+        destructive
+        confirmText={`确认批量移除${selectedRecipientRows.length > 0 ? `（${selectedRecipientRows.length}）` : ""}`}
+        loading={batchRemoving}
+        onConfirm={doBatchRemove}
       />
     </Dialog>
   )

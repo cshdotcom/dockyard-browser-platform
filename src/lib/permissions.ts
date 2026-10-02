@@ -1,8 +1,8 @@
 import { getServerSession } from "next-auth"
 import { authOptions } from "./auth"
 import { db } from "./db"
-import { bizError, ErrorCode } from "./errors"
-import { getConfig, getConfigBool } from "./config"
+import { BizError, bizError, ErrorCode } from "./errors"
+import { getConfig, getConfigBool, getConfigNumber } from "./config"
 
 // 统一权限校验：RSC / Server Action / Route Handler 三层均可调用
 // 角色模型：SUPER_ADMIN > ADMIN > GROUP_ADMIN > USER
@@ -26,6 +26,20 @@ export async function getAuthContext(): Promise<AuthContext | null> {
   if (session?.user?.id) {
     // LoginSession 已撤销/过期/闲置 → 视为未登录
     if ((session.user as Record<string, unknown>).sessionValid === false) return null
+    // r23：登录用户全局限流（rate.userQps 真实生效；内存桶，按 userId 计数）
+    // 放在会话确认后：匿名请求走 apiHandler 的 anonymousQps；API-Key 走自身 QPS 体系
+    try {
+      const userQps = await getConfigNumber("rate.userQps", 30)
+      if (userQps > 0) {
+        const { rateLimit } = await import("./rate-limit")
+        if (!rateLimit(`uqps:${session.user.id}`, userQps, 1000).allowed) {
+          throw bizError(ErrorCode.RATE_LIMITED, "请求过于频繁（用户级限流），请稍后再试")
+        }
+      }
+    } catch (e) {
+      if (e instanceof BizError) throw e
+      // 限流基础设施异常 → 放行
+    }
     return {
       userId: session.user.id as string,
       username: (session.user.name as string) || "",
@@ -68,6 +82,29 @@ export async function needs2faSetup(): Promise<boolean> {
   return (session?.user as Record<string, unknown> | undefined)?.needs2faSetup === true
 }
 
+// ============================================================
+// r23：强制 2FA 后端门控（真拦截，不仅前端提示）
+// · requireWritableMode / requireAdmin / requireRole 均先行拦截：
+//   未开通 2FA 且命中强制策略（用户级/组级/全局）时，除账号安全通道外全部拒绝
+// · 管理员可配置 security.force2faAdminExempt 豁免 ADMIN/SUPER_ADMIN（保证后台可正常管理策略）
+// · API-Key（MCP/OpenAPI）通道不受影响：机器调用无会话概念，用户要求 API/MCP 完整可用
+// ============================================================
+export async function enforce2faCompliance(): Promise<void> {
+  const pending = await needs2faSetup()
+  if (!pending) return
+  // 管理员豁免开关（默认关闭：管理员同样被强制）
+  const exempt = await getConfigBool("security.force2faAdminExempt", false)
+  if (exempt) {
+    const session = await getServerSession(authOptions)
+    const role = (session?.user as Record<string, unknown> | undefined)?.role as string | undefined
+    if (role === "SUPER_ADMIN" || role === "ADMIN") return
+  }
+  throw bizError(
+    ErrorCode.FORBIDDEN,
+    "管理员已强制要求开启双因素认证（2FA）：请先前往「账号安全」完成绑定后再使用平台功能（API-Key 机器调用不受影响）"
+  )
+}
+
 // 必须登录，否则抛出
 export async function requireAuth(): Promise<AuthContext> {
   const ctx = await getAuthContext()
@@ -82,11 +119,15 @@ export async function requireRole(roles: Role[]): Promise<AuthContext> {
 }
 
 export async function requireAdmin(): Promise<AuthContext> {
-  return requireRole(["SUPER_ADMIN", "ADMIN"])
+  const ctx = await requireRole(["SUPER_ADMIN", "ADMIN"])
+  await enforce2faCompliance() // r23：管理员读/写通道同样被 2FA 门控拦截
+  return ctx
 }
 
 export async function requireSuperAdmin(): Promise<AuthContext> {
-  return requireRole(["SUPER_ADMIN"])
+  const ctx = await requireRole(["SUPER_ADMIN"])
+  await enforce2faCompliance()
+  return ctx
 }
 
 // ---- 用户归属组 ----
@@ -158,6 +199,7 @@ export async function requirePermission(userId: string, lockKey: PermissionLockK
 
 // ---- 维护模式 / 只读模式 ----
 export async function requireWritableMode() {
+  await enforce2faCompliance() // r23：强制2FA未完成时禁止一切写操作（后端真拦截；仅账号安全链路不调用本函数）
   const readonly = await getConfigBool("readonly.enabled", false)
   if (readonly) throw bizError(ErrorCode.MAINTENANCE, "系统处于只读模式，禁止写入操作")
   const maintenance = await getConfigBool("maintenance.enabled", false)

@@ -4,9 +4,49 @@ import { writeAudit } from "./audit"
 import { hubEmit } from "./ws-emitter"
 
 // 告警系统：写告警表 + 审计 + 站内通知 + webhook（内存队列/重试/静默窗口/抑制合并/级别过滤）
+// r23：+邮件通道（alert.emailEnabled 开启后，达到最低级别的告警同步发邮件；收件人可显式配置或自动取管理员邮箱）
 
 // 告警级别：INFO / WARNING（WARN 同义，CRX 灰度等场景）/ WARN / ERROR（介于 WARN 与 CRITICAL：自愈失败等不可人工忽略的异常）/ CRITICAL
 export type AlertLevel = "INFO" | "WARNING" | "WARN" | "ERROR" | "CRITICAL"
+
+// 级别排序（邮件最低级别过滤用）
+const LEVEL_ORDER: Record<AlertLevel, number> = { INFO: 1, WARNING: 2, WARN: 2, ERROR: 3, CRITICAL: 4 }
+
+// r23：邮件告警通道（异步 fire-and-forget；抑制窗口内不重发；静默窗口对邮件同样生效）
+async function sendAlertEmail(params: { title: string; level: AlertLevel; content: string; suppressed: boolean }): Promise<void> {
+  try {
+    if (params.suppressed) return
+    const enabled = await getConfigBool("alert.emailEnabled", false)
+    if (!enabled) return
+    const minLevel = (await getConfig<string>("alert.emailMinLevel", "ERROR")) as AlertLevel
+    if ((LEVEL_ORDER[params.level] ?? 0) < (LEVEL_ORDER[minLevel] ?? 3)) return
+    if (await inSilenceWindow()) return
+
+    // 收件人：显式配置优先；留空 = 全部管理员（有邮箱的）
+    let recipients: string[] = []
+    const configured = (await getConfig<string>("alert.emailRecipients", "")).trim()
+    if (configured) {
+      recipients = configured.split(",").map((s) => s.trim()).filter((s) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s))
+    } else {
+      const admins = await db.user.findMany({
+        where: { role: { in: ["SUPER_ADMIN", "ADMIN"] }, deletedAt: null, enabled: true, email: { not: null } },
+        select: { email: true },
+      })
+      recipients = admins.map((a) => a.email!).filter(Boolean)
+    }
+    if (recipients.length === 0) return
+
+    const { sendMail, alertEmailTemplate } = await import("./email")
+    const subject = `[${params.level}] ${params.title}`
+    const html = alertEmailTemplate(params.level, params.title, params.content)
+    // 逐个发送（失败不影响其他收件人；sendMail 内部自带模拟模式降级）
+    for (const to of recipients.slice(0, 20)) {
+      await sendMail(to, subject, html, params.content).catch(() => {})
+    }
+  } catch (e) {
+    console.error("[alert] email notify failed", e)
+  }
+}
 
 const g = globalThis as unknown as {
   __dyWebhookQueue?: { url: string; event: string; payload: Record<string, unknown>; attempts: number }[]
@@ -150,6 +190,10 @@ export async function raiseAlert(params: {
         void processWebhookQueue()
       }
     }
+
+    // r23：邮件通道（异步，不阻塞告警主链路）
+    void sendAlertEmail({ title: params.title, level: params.level, content: params.content, suppressed })
+
     return alert
   } catch (e) {
     console.error("[alert] raise failed", e)

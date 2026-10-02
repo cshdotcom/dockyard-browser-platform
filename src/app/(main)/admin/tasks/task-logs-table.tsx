@@ -1,15 +1,24 @@
 "use client"
 
-// 定时任务执行日志：分页表格（任务/状态筛选/时间排序）+ 详情弹窗（errorStack 完整堆栈）
+// r23-b：定时任务执行日志（增强）
+// - 筛选：任务 / 状态 / 触发类型（CRON/MANUAL）+ 日期范围（开始时间起/止）
+// - 清理旧日志弹窗（天数 / 状态 / 可选限定任务）→ cleanupTaskLogsAction
+// - 详情弹窗（errorStack 完整堆栈）保持
 
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
-import { Eye } from "lucide-react"
+import { toast } from "sonner"
+import { CalendarRange, Eye, Loader2, Trash2, X } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
+import { PrecisionInput } from "@/components/shared/confirm"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { cleanupTaskLogsAction } from "@/server/actions/tasks"
 
 export interface TaskLogRow {
   id: string
@@ -53,6 +62,19 @@ export function TaskLogsTable({ rows, total, page, pageSize, keyword, sortField,
   const pathname = usePathname()
   const searchParams = useSearchParams()
 
+  const [detail, setDetail] = React.useState<TaskLogRow | null>(null)
+
+  // ---- 清理旧日志弹窗状态 ----
+  const [cleanupOpen, setCleanupOpen] = React.useState(false)
+  const [cleanDays, setCleanDays] = React.useState(30)
+  const [cleanStatus, setCleanStatus] = React.useState<string>("ALL")
+  const [cleanTaskCode, setCleanTaskCode] = React.useState<string>("__all__")
+  const [cleaning, setCleaning] = React.useState(false)
+
+  React.useEffect(() => {
+    if (cleanupOpen) setCleanTaskCode(filters.taskCode || "__all__") // 默认限定当前筛选任务
+  }, [cleanupOpen, filters.taskCode])
+
   const pushQuery = (patch: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString())
     for (const [k, v] of Object.entries(patch)) {
@@ -62,10 +84,72 @@ export function TaskLogsTable({ rows, total, page, pageSize, keyword, sortField,
     router.push(`${pathname}?${params.toString()}`)
   }
 
-  const [detail, setDetail] = React.useState<TaskLogRow | null>(null)
+  const runCleanup = async () => {
+    if (!Number.isInteger(cleanDays) || cleanDays < 1 || cleanDays > 3650) {
+      toast.error("保留天数必须在 1 - 3650 之间")
+      return
+    }
+    setCleaning(true)
+    try {
+      const res = await cleanupTaskLogsAction({
+        days: Math.round(cleanDays),
+        status: cleanStatus,
+        taskCode: cleanTaskCode === "__all__" ? undefined : cleanTaskCode,
+      })
+      if (res.code === 0 && res.data) {
+        toast.success(`已清理 ${res.data.deleted} 条执行日志`)
+        setCleanupOpen(false)
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "清理失败")
+    } finally {
+      setCleaning(false)
+    }
+  }
 
   return (
     <div className="space-y-3">
+      {/* 工具栏：开始时间范围筛选（起/止）+ 清理旧日志入口 */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex items-center gap-1.5" title="按执行开始时间范围筛选">
+          <CalendarRange className="h-3.5 w-3.5 text-muted-foreground" />
+          <Input
+            type="date"
+            value={filters.logFrom || ""}
+            onChange={(e) => pushQuery({ page: "1", logFrom: e.target.value || undefined })}
+            className="w-36"
+            aria-label="开始时间起（YYYY-MM-DD）"
+          />
+          <span className="text-xs text-muted-foreground">至</span>
+          <Input
+            type="date"
+            value={filters.logTo || ""}
+            onChange={(e) => pushQuery({ page: "1", logTo: e.target.value || undefined })}
+            className="w-36"
+            aria-label="开始时间止（YYYY-MM-DD）"
+          />
+          {(filters.logFrom || filters.logTo) && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 text-xs"
+              onClick={() => pushQuery({ page: "1", logFrom: undefined, logTo: undefined })}
+              title="清空时间范围筛选"
+            >
+              <X className="h-3.5 w-3.5" /> 清空
+            </Button>
+          )}
+        </div>
+        <div className="ml-auto">
+          <Button variant="outline" size="sm" onClick={() => setCleanupOpen(true)} title="按天数/状态/任务批量删除旧执行日志">
+            <Trash2 className="mr-1 h-3.5 w-3.5" /> 清理旧日志
+          </Button>
+        </div>
+      </div>
+
       <DataTable
         rows={rows}
         total={total}
@@ -85,6 +169,14 @@ export function TaskLogsTable({ rows, total, page, pageSize, keyword, sortField,
               { label: "成功", value: "SUCCESS" },
               { label: "失败", value: "FAILED" },
               { label: "超时", value: "TIMEOUT" },
+            ],
+          },
+          {
+            key: "triggerType",
+            placeholder: "触发类型",
+            options: [
+              { label: "定时触发", value: "CRON" },
+              { label: "手动触发", value: "MANUAL" },
             ],
           },
         ]}
@@ -144,7 +236,7 @@ export function TaskLogsTable({ rows, total, page, pageSize, keyword, sortField,
         )}
       />
 
-      {/* 详情弹窗：含完整 errorStack */}
+      {/* 详情弹窗：含完整 errorStack（可展开查看） */}
       <Dialog open={!!detail} onOpenChange={(v) => !v && setDetail(null)}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
@@ -175,13 +267,79 @@ export function TaskLogsTable({ rows, total, page, pageSize, keyword, sortField,
             </div>
             <div className="space-y-1">
               <p className="text-xs text-muted-foreground">错误堆栈（errorStack）</p>
-              <ScrollArea className="h-56 rounded-md border bg-muted p-3">
-                <pre className="text-xs font-mono whitespace-pre-wrap break-all">
-                  {detail?.errorStack || "（无错误堆栈）"}
-                </pre>
-              </ScrollArea>
+              {detail?.errorStack ? (
+                <ScrollArea className="h-56 rounded-md border bg-muted p-3">
+                  <pre className="text-xs font-mono whitespace-pre-wrap break-all">{detail.errorStack}</pre>
+                </ScrollArea>
+              ) : (
+                <div className="rounded-md border bg-muted/50 p-3 text-xs text-muted-foreground">（无错误堆栈）</div>
+              )}
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 清理旧日志弹窗：天数 / 状态 / 可选限定任务 */}
+      <Dialog open={cleanupOpen} onOpenChange={(v) => !cleaning && setCleanupOpen(v)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Trash2 className="h-4 w-4 text-red-500" />
+              清理旧执行日志
+            </DialogTitle>
+            <DialogDescription>
+              删除指定天数之前的执行日志（物理删除，不可恢复）；不清理当天及保留期内的日志。默认清理全部任务的旧日志。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <Label>保留最近（天数）</Label>
+              <PrecisionInput value={cleanDays} onChange={setCleanDays} min={1} max={3650} step={1} suffix="天" />
+              <p className="text-xs text-muted-foreground">清理 N 天前（不含最近 N 天）的日志，1 - 3650</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label>限定执行状态</Label>
+              <Select value={cleanStatus} onValueChange={setCleanStatus}>
+                <SelectTrigger aria-label="清理的日志状态">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ALL">全部状态</SelectItem>
+                  <SelectItem value="SUCCESS">仅成功（SUCCESS）</SelectItem>
+                  <SelectItem value="FAILED">仅失败（FAILED）</SelectItem>
+                  <SelectItem value="TIMEOUT">仅超时（TIMEOUT）</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>限定任务（可选）</Label>
+              <Select value={cleanTaskCode} onValueChange={setCleanTaskCode}>
+                <SelectTrigger aria-label="清理的任务范围">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="max-h-72">
+                  <SelectItem value="__all__">全部任务</SelectItem>
+                  {taskOptions.map((o) => (
+                    <SelectItem key={o.value} value={o.value} className="font-mono text-xs">
+                      {o.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {filters.taskCode && (
+                <p className="text-xs text-muted-foreground">已按当前筛选预选任务 {filters.taskCode}</p>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCleanupOpen(false)} disabled={cleaning}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={runCleanup} disabled={cleaning}>
+              {cleaning && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+              清理旧日志
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

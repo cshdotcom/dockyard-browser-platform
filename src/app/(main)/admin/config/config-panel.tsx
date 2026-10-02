@@ -2,11 +2,12 @@
 
 // 系统配置交互面板：分类 Tabs + valueType 控件渲染（Switch/PrecisionInput/Input/Textarea）
 // 逐项保存 / 分组整体保存 / 版本历史回滚；管理员只读（无保存按钮）
+// r23-C：预警中心卡（ALERT）+ 安全防护卡（SECURITY）+ 底部配置生效自检（仅超级管理员）
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Save, RotateCcw, History, Wrench, Lock, ShieldAlert, Mail } from "lucide-react"
+import { Loader2, Save, RotateCcw, History, Wrench, Lock, ShieldAlert, Mail, Siren, ShieldBan, ListChecks, ChevronDown } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -15,6 +16,9 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { setConfigAction, rollbackConfigAction, setSmtpConfigAction, testSmtpAction } from "@/server/actions/config"
 import { cn } from "@/lib/utils"
@@ -39,6 +43,19 @@ export interface ConfigVersionRow {
   currentVersion: number
 }
 
+// 配置生效自检行（r23-C）：由 server 端 page 计算后下发，仅 SUPER_ADMIN 可见
+export interface SelfCheckRow {
+  key: string
+  value: string // 已脱敏的展示值（smtp.pass 等）
+  status: "active" | "reserved"
+  description: string
+}
+export interface SelfCheckData {
+  rows: SelfCheckRow[]
+  activeCount: number
+  reservedCount: number
+}
+
 const CATEGORY_ORDER = ["SECURITY", "SESSION", "STORAGE", "ALERT", "MAIL", "NETWORK", "UI", "GENERAL", "MCP"] as const
 
 const CATEGORY_LABEL: Record<string, string> = {
@@ -56,6 +73,20 @@ const CATEGORY_LABEL: Record<string, string> = {
 // 长文本配置项用 Textarea（维护公告 / 登录页公告等）
 const LONG_TEXT_KEYS = new Set(["maintenance.message", "ui.loginAnnouncement"])
 
+// 预警中心卡托管的键（不再重复渲染通用行）
+const ALERT_CARD_KEYS = new Set([
+  "alert.emailEnabled", "alert.emailMinLevel", "alert.emailRecipients",
+  "alert.hostEnabled", "alert.cpuThresholdPct", "alert.memThresholdPct", "alert.diskThresholdPct",
+  "alert.sessionQuotaEnabled", "alert.singboxTrafficEnabled", "alert.proxyFailEnabled", "alert.backupFailEnabled",
+  "alert.tokenExpireEnabled", "alert.zombieReclaimEnabled", "alert.configDriftEnabled", "alert.taskFailEnabled", "alert.quotaUserEnabled",
+])
+
+// 安全防护卡托管的键（不再重复渲染通用行）
+const SECURITY_CARD_KEYS = new Set([
+  "security.ipBanEnabled", "security.ipBanThreshold", "security.ipBanWindowMinutes", "security.ipBanMinutes",
+  "security.ipBanApiCountEnabled", "security.ipBanAlertEnabled", "security.force2faAdminExempt",
+])
+
 function jsonPreview(v: unknown, max = 90): string {
   const s = JSON.stringify(v)
   return s.length > max ? s.slice(0, max) + "…" : s
@@ -65,10 +96,12 @@ export function ConfigPanel({
   items,
   versions,
   canEdit,
+  selfCheck,
 }: {
   items: ConfigItem[]
   versions: ConfigVersionRow[]
   canEdit: boolean
+  selfCheck?: SelfCheckData
 }) {
   const router = useRouter()
 
@@ -364,7 +397,12 @@ export function ConfigPanel({
         {CATEGORY_ORDER.filter((c) => byCategory.has(c)).map((c) => {
           const allList = byCategory.get(c) || []
           // MAIL 分类：smtp.* 由专属卡片管理，通用行仅渲染其余项
-          const list = c === "MAIL" ? allList.filter((i) => !i.key.startsWith("smtp.")) : allList
+          // ALERT / SECURITY：r23 专属卡片（预警中心 / 安全防护）托管的键不再重复渲染
+          const list =
+            c === "MAIL" ? allList.filter((i) => !i.key.startsWith("smtp."))
+              : c === "ALERT" ? allList.filter((i) => !ALERT_CARD_KEYS.has(i.key))
+                : c === "SECURITY" ? allList.filter((i) => !SECURITY_CARD_KEYS.has(i.key))
+                  : allList
           const dirtyInCategory = list.filter((i) => dirty.has(i.key))
           return (
             <TabsContent key={c} value={c} className="space-y-3 mt-4">
@@ -387,6 +425,26 @@ export function ConfigPanel({
               </div>
               <div className="grid gap-3 grid-cols-1 lg:grid-cols-2">
                 {c === "MAIL" && <SmtpCard canEdit={canEdit} initial={smtpInitial} />}
+                {c === "ALERT" && (
+                  <AlertCard
+                    canEdit={canEdit}
+                    values={values}
+                    dirtyKeys={dirty}
+                    busyKey={busyKey}
+                    setLocal={setLocal}
+                    saveItems={saveItems}
+                  />
+                )}
+                {c === "SECURITY" && (
+                  <SecurityCard
+                    canEdit={canEdit}
+                    values={values}
+                    dirtyKeys={dirty}
+                    busyKey={busyKey}
+                    setLocal={setLocal}
+                    saveItems={saveItems}
+                  />
+                )}
                 {list.map(renderItemRow)}
               </div>
             </TabsContent>
@@ -456,6 +514,9 @@ export function ConfigPanel({
           )}
         </TabsContent>
       </Tabs>
+
+      {/* ---- r23-C：配置生效自检（仅 SUPER_ADMIN，server 端计算后下发） ---- */}
+      {selfCheck && <SelfCheckBlock data={selfCheck} />}
 
       {/* 回滚确认 */}
       <ConfirmDialog
@@ -637,6 +698,350 @@ function SmtpCard({ canEdit, initial }: { canEdit: boolean; initial: SmtpInitial
           <span className={cn("text-xs", testResult.ok ? "text-emerald-600" : "text-red-600")}>{testResult.message}</span>
         )}
       </div>
+    </div>
+  )
+}
+
+
+// ============================================================
+// r23-C：预警中心卡（ALERT 分类）—— 邮件通道 / 宿主机水位 / 9 项分功能预警
+// 复用主面板 values/dirty/setLocal/saveItems（setConfigAction 批量保存）
+// ============================================================
+interface CardFieldCtx {
+  canEdit: boolean
+  values: Record<string, unknown>
+  dirtyKeys: Set<string>
+  busyKey: string
+  setLocal: (key: string, v: unknown) => void
+  saveItems: (keys: string[], label: string) => Promise<void>
+}
+
+const ALERT_FEATURE_SWITCHES: { key: string; label: string; desc: string }[] = [
+  { key: "alert.sessionQuotaEnabled", label: "会话配额水位预警", desc: "会话数接近配额上限时产生告警" },
+  { key: "alert.singboxTrafficEnabled", label: "SingBox 流量超限预警", desc: "实例流量超出限额时告警" },
+  { key: "alert.proxyFailEnabled", label: "代理节点故障预警", desc: "代理探测失败 / 异常下线时告警" },
+  { key: "alert.backupFailEnabled", label: "备份异常预警", desc: "备份任务失败或产物异常时告警" },
+  { key: "alert.tokenExpireEnabled", label: "Token 到期预警", desc: "API 令牌临期自动提醒" },
+  { key: "alert.zombieReclaimEnabled", label: "僵死会话回收预警", desc: "僵死会话被自动回收时告警" },
+  { key: "alert.configDriftEnabled", label: "配置漂移预警", desc: "运行参数偏离基线时告警" },
+  { key: "alert.taskFailEnabled", label: "定时任务连续失败预警", desc: "任务连续失败达到阈值时告警" },
+  { key: "alert.quotaUserEnabled", label: "用户磁盘配额水位预警", desc: "用户存储配额接近上限时告警" },
+]
+
+function AlertCard({ canEdit, values, dirtyKeys, busyKey, setLocal, saveItems }: CardFieldCtx) {
+  const emailEnabled = values["alert.emailEnabled"] === true
+  const hostEnabled = values["alert.hostEnabled"] === true
+  const cardKeys = [...ALERT_CARD_KEYS]
+  const dirtyCount = cardKeys.filter((k) => dirtyKeys.has(k)).length
+  const saving = busyKey === "alert-card"
+
+  return (
+    <div className="lg:col-span-2 rounded-lg border border-amber-200 bg-amber-50/30 dark:border-amber-900/50 dark:bg-amber-950/10 p-4 space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Siren className="h-4 w-4 text-amber-600" />
+          <span className="font-medium">预警中心</span>
+          {emailEnabled ? (
+            <Badge className="bg-emerald-500 hover:bg-emerald-500">邮件通道开启</Badge>
+          ) : (
+            <Badge variant="secondary">邮件通道关闭</Badge>
+          )}
+          {hostEnabled ? (
+            <Badge className="bg-emerald-500 hover:bg-emerald-500">水位预警开启</Badge>
+          ) : (
+            <Badge variant="secondary">水位预警关闭</Badge>
+          )}
+        </div>
+        {canEdit && (
+          <Button
+            size="sm"
+            variant={dirtyCount > 0 ? "default" : "outline"}
+            disabled={dirtyCount === 0 || saving}
+            onClick={() => saveItems(cardKeys.filter((k) => dirtyKeys.has(k)), "alert-card")}
+          >
+            {saving && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+            <Save className="mr-1 h-3.5 w-3.5" />
+            保存预警设置（{dirtyCount} 项变更）
+          </Button>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        告警邮件通道 + 宿主机资源水位 + 各业务分功能预警的统一开关；低于 alert.emailMinLevel 的告警不发送邮件（含静默窗口抑制）。
+      </p>
+
+      {/* ---- 邮件通道 ---- */}
+      <div className="rounded-md border bg-card p-3 space-y-3">
+        <p className="text-sm font-medium flex items-center gap-2">
+          <Mail className="h-3.5 w-3.5 text-teal-600" /> 告警邮件通道（alert.email*）
+        </p>
+        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 items-end">
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">告警邮件开关（alert.emailEnabled）</Label>
+            <div className="flex h-9 items-center gap-2">
+              <Switch checked={emailEnabled} onCheckedChange={(b) => setLocal("alert.emailEnabled", b)} disabled={!canEdit} aria-label="告警邮件开关" />
+              <span className="text-xs text-muted-foreground">{emailEnabled ? "开启" : "关闭"}</span>
+            </div>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">邮件最低级别（alert.emailMinLevel）</Label>
+            <Select
+              value={String(values["alert.emailMinLevel"] ?? "ERROR")}
+              onValueChange={(v) => setLocal("alert.emailMinLevel", v)}
+              disabled={!canEdit}
+            >
+              <SelectTrigger className="w-36" aria-label="邮件最低级别">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ERROR">ERROR</SelectItem>
+                <SelectItem value="CRITICAL">CRITICAL</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1 sm:col-span-2">
+            <Label className="text-xs text-muted-foreground">收件人（alert.emailRecipients，逗号分隔）</Label>
+            <Input
+              value={String(values["alert.emailRecipients"] ?? "")}
+              onChange={(e) => setLocal("alert.emailRecipients", e.target.value)}
+              placeholder="留空=自动发给全部管理员邮箱"
+              disabled={!canEdit}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* ---- 宿主机资源水位 ---- */}
+      <div className="rounded-md border bg-card p-3 space-y-3">
+        <p className="text-sm font-medium flex items-center gap-2">
+          <Siren className="h-3.5 w-3.5 text-amber-600" /> 宿主机资源水位预警（alert.hostEnabled / 阈值）
+        </p>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <span className="text-xs text-muted-foreground">水位预警总开关（alert.hostEnabled）：宿主机指标超阈值时产生告警</span>
+          <Switch checked={hostEnabled} onCheckedChange={(b) => setLocal("alert.hostEnabled", b)} disabled={!canEdit} aria-label="宿主机水位预警开关" />
+        </div>
+        <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">CPU 阈值 %（alert.cpuThresholdPct）</Label>
+            <PrecisionInput
+              value={Number(values["alert.cpuThresholdPct"] ?? 80)}
+              onChange={(n) => setLocal("alert.cpuThresholdPct", n)}
+              min={1} max={100} step={1} suffix="%" className="w-32"
+              disabled={!canEdit}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">内存阈值 %（alert.memThresholdPct）</Label>
+            <PrecisionInput
+              value={Number(values["alert.memThresholdPct"] ?? 85)}
+              onChange={(n) => setLocal("alert.memThresholdPct", n)}
+              min={1} max={100} step={1} suffix="%" className="w-32"
+              disabled={!canEdit}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">磁盘阈值 %（alert.diskThresholdPct）</Label>
+            <PrecisionInput
+              value={Number(values["alert.diskThresholdPct"] ?? 85)}
+              onChange={(n) => setLocal("alert.diskThresholdPct", n)}
+              min={1} max={100} step={1} suffix="%" className="w-32"
+              disabled={!canEdit}
+            />
+            <p className="text-[10px] text-muted-foreground">磁盘按 Docker 容器存储位置统计（DockerRootDir 优先）</p>
+          </div>
+        </div>
+      </div>
+
+      {/* ---- 分功能预警开关（两列） ---- */}
+      <div className="rounded-md border bg-card p-3 space-y-3">
+        <p className="text-sm font-medium">分功能预警开关（9 项）</p>
+        <div className="grid gap-2.5 grid-cols-1 sm:grid-cols-2">
+          {ALERT_FEATURE_SWITCHES.map((s) => {
+            const on = values[s.key] === true
+            return (
+              <div key={s.key} className="flex items-start gap-2.5 rounded-md border bg-muted/20 px-3 py-2">
+                <Switch checked={on} onCheckedChange={(b) => setLocal(s.key, b)} disabled={!canEdit} aria-label={s.label} className="mt-0.5" />
+                <div className="min-w-0 space-y-0.5">
+                  <p className="text-sm leading-tight">{s.label}</p>
+                  <p className="text-xs text-muted-foreground leading-snug">{s.desc}</p>
+                </div>
+                {dirtyKeys.has(s.key) && <Badge className="bg-amber-500 hover:bg-amber-500 text-[10px] shrink-0 ml-auto">未保存</Badge>}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+// ============================================================
+// r23-C：安全防护卡（SECURITY 分类）—— IP 自动封禁参数 + 2FA 管理员豁免
+// ============================================================
+function SecurityCard({ canEdit, values, dirtyKeys, busyKey, setLocal, saveItems }: CardFieldCtx) {
+  const ipBanEnabled = values["security.ipBanEnabled"] === true
+  const apiCountEnabled = values["security.ipBanApiCountEnabled"] === true
+  const alertEnabled = values["security.ipBanAlertEnabled"] === true
+  const exempt2fa = values["security.force2faAdminExempt"] === true
+  const cardKeys = [...SECURITY_CARD_KEYS]
+  const dirtyCount = cardKeys.filter((k) => dirtyKeys.has(k)).length
+  const saving = busyKey === "security-card"
+
+  return (
+    <div className="lg:col-span-2 rounded-lg border border-red-200 bg-red-50/30 dark:border-red-900/50 dark:bg-red-950/10 p-4 space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <ShieldBan className="h-4 w-4 text-red-500" />
+          <span className="font-medium">安全防护（IP封禁与2FA策略）</span>
+          {ipBanEnabled ? (
+            <Badge className="bg-emerald-500 hover:bg-emerald-500">IP封禁开启</Badge>
+          ) : (
+            <Badge variant="destructive">IP封禁关闭</Badge>
+          )}
+        </div>
+        {canEdit && (
+          <Button
+            size="sm"
+            variant={dirtyCount > 0 ? "default" : "outline"}
+            disabled={dirtyCount === 0 || saving}
+            onClick={() => saveItems(cardKeys.filter((k) => dirtyKeys.has(k)), "security-card")}
+          >
+            {saving && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+            <Save className="mr-1 h-3.5 w-3.5" />
+            保存安全防护设置（{dirtyCount} 项变更）
+          </Button>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        登录失败 / API-Key 无效调用按 IP 计数，窗口内超阈值自动封禁；封禁期内拒绝该 IP 的一切登录与 Key 调用。实时处置见「IP 封禁」管理页。
+      </p>
+
+      <div className="rounded-md border bg-card p-3 space-y-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <span className="text-sm font-medium">IP 自动封禁（security.ipBanEnabled）</span>
+          <Switch checked={ipBanEnabled} onCheckedChange={(b) => setLocal("security.ipBanEnabled", b)} disabled={!canEdit} aria-label="IP自动封禁开关" />
+        </div>
+        <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">封禁阈值（次）</Label>
+            <PrecisionInput
+              value={Number(values["security.ipBanThreshold"] ?? 10)}
+              onChange={(n) => setLocal("security.ipBanThreshold", n)}
+              min={1} max={1000} step={1} suffix="次" className="w-32"
+              disabled={!canEdit}
+            />
+            <p className="text-[10px] text-muted-foreground">security.ipBanThreshold：窗口内失败达到该次数即封禁</p>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">计数窗口（分钟）</Label>
+            <PrecisionInput
+              value={Number(values["security.ipBanWindowMinutes"] ?? 15)}
+              onChange={(n) => setLocal("security.ipBanWindowMinutes", n)}
+              min={1} max={1440} step={1} suffix="分" className="w-32"
+              disabled={!canEdit}
+            />
+            <p className="text-[10px] text-muted-foreground">security.ipBanWindowMinutes：失败计数的时间窗口</p>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">封禁时长（分钟）</Label>
+            <PrecisionInput
+              value={Number(values["security.ipBanMinutes"] ?? 30)}
+              onChange={(n) => setLocal("security.ipBanMinutes", n)}
+              min={1} max={10080} step={1} suffix="分" className="w-32"
+              disabled={!canEdit}
+            />
+            <p className="text-[10px] text-muted-foreground">security.ipBanMinutes：自动封禁持续时长（手动封禁不受限）</p>
+          </div>
+        </div>
+        <div className="grid gap-2.5 grid-cols-1 sm:grid-cols-2">
+          <div className="flex items-start gap-2.5 rounded-md border bg-muted/20 px-3 py-2">
+            <Switch checked={apiCountEnabled} onCheckedChange={(b) => setLocal("security.ipBanApiCountEnabled", b)} disabled={!canEdit} aria-label="API无效调用计数" className="mt-0.5" />
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-sm leading-tight">API-Key 无效调用计入封禁</p>
+              <p className="text-xs text-muted-foreground leading-snug">security.ipBanApiCountEnabled：无效 Key 访问同样累计失败计数</p>
+            </div>
+          </div>
+          <div className="flex items-start gap-2.5 rounded-md border bg-muted/20 px-3 py-2">
+            <Switch checked={alertEnabled} onCheckedChange={(b) => setLocal("security.ipBanAlertEnabled", b)} disabled={!canEdit} aria-label="封禁告警开关" className="mt-0.5" />
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-sm leading-tight">封禁产生安全告警</p>
+              <p className="text-xs text-muted-foreground leading-snug">security.ipBanAlertEnabled：触发封禁时产生 SECURITY 告警</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-md border bg-card p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1">
+            <p className="text-sm font-medium">强制 2FA 管理员豁免（security.force2faAdminExempt）</p>
+            <p className="text-xs text-muted-foreground">开启后管理员（SUPER_ADMIN/ADMIN）不受强制 2FA 门控；普通用户门控不受影响。</p>
+          </div>
+          <Switch checked={exempt2fa} onCheckedChange={(b) => setLocal("security.force2faAdminExempt", b)} disabled={!canEdit} aria-label="2FA管理员豁免" />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+// ============================================================
+// r23-C：配置生效自检 —— 键清单 + 当前值（脱敏）+ 生效状态徽章
+// 数据由 server 端 page.tsx 计算（内置接线清单），仅 SUPER_ADMIN 下发
+// ============================================================
+function SelfCheckBlock({ data }: { data: SelfCheckData }) {
+  return (
+    <div className="rounded-lg border bg-card">
+      <Collapsible>
+        <div className="flex flex-wrap items-center justify-between gap-2 p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <ListChecks className="h-4 w-4 text-teal-600" />
+            <span className="font-medium">配置生效自检</span>
+            <span className="text-xs text-muted-foreground">
+              共 {data.rows.length} 项 · 生效 {data.activeCount} · 预留 {data.reservedCount}
+            </span>
+          </div>
+          <CollapsibleTrigger asChild>
+            <Button variant="outline" size="sm">
+              <ChevronDown className="mr-1 h-3.5 w-3.5" />
+              展开键清单
+            </Button>
+          </CollapsibleTrigger>
+        </div>
+        <CollapsibleContent>
+          <div className="max-h-[60vh] overflow-y-auto border-t">
+            <Table>
+              <TableHeader className="sticky top-0 bg-card z-10">
+                <TableRow>
+                  <TableHead className="w-[30%]">配置键</TableHead>
+                  <TableHead className="w-[18%]">当前值</TableHead>
+                  <TableHead className="w-[12%]">生效状态</TableHead>
+                  <TableHead>说明</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.rows.map((r) => (
+                  <TableRow key={r.key}>
+                    <TableCell className="font-mono text-xs break-all">{r.key}</TableCell>
+                    <TableCell className="font-mono text-xs max-w-48 truncate" title={r.value}>{r.value}</TableCell>
+                    <TableCell>
+                      {r.status === "active" ? (
+                        <Badge className="bg-emerald-500 hover:bg-emerald-500 text-[10px]">✅ 生效中</Badge>
+                      ) : (
+                        <Badge variant="secondary" className="text-[10px]">⏸️ 功能预留</Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{r.description || (r.status === "reserved" ? "功能预留：尚无运行时读取点" : "")}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+          <p className="px-4 py-2 border-t text-[11px] text-muted-foreground">
+            「生效中」= 存在真实读取点（任务调度 / 请求链路 / 策略门控等）；「功能预留」= 已落库但暂无运行时读取点，调整后不改变当前行为。
+          </p>
+        </CollapsibleContent>
+      </Collapsible>
     </div>
   )
 }

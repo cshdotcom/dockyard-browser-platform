@@ -14,7 +14,9 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
+import { Checkbox } from "@/components/ui/checkbox"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { ConfirmDialog } from "@/components/shared/confirm"
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
@@ -72,6 +74,10 @@ export const LOCK_LABELS: Record<string, string> = {
 
 // ============ 组员管理弹窗 ============
 
+// 23-a：批量操作增强 ——
+// · 左列「当前成员」：实时搜索（用户名包含）+ 行 Checkbox 多选 + 底部「已选 N」+「批量移除」（ConfirmDialog 确认）
+// · 右列「添加用户」：候选行 Checkbox 多选（可跨搜索连续勾选累积）+「添加所选（N）」批量添加，成功后清空已选
+// · 单个添加/移除按钮保留；后端 setGroupUsersAction 原生支持 userIds 数组批量
 export function MembersDialog({
   open, onOpenChange, group, members, userOptions,
 }: {
@@ -83,7 +89,13 @@ export function MembersDialog({
 }) {
   const router = useRouter()
   const [search, setSearch] = React.useState("")
+  const [memberSearch, setMemberSearch] = React.useState("")
   const [busy, setBusy] = React.useState(false)
+
+  // ---- 23-a：批量多选状态 ----
+  const [selectedMemberIds, setSelectedMemberIds] = React.useState<string[]>([])
+  const [selectedCandidateIds, setSelectedCandidateIds] = React.useState<string[]>([])
+  const [batchRemoveConfirm, setBatchRemoveConfirm] = React.useState(false)
 
   const memberIds = React.useMemo(() => new Set(members.map((m) => m.userId)), [members])
   const candidates = React.useMemo(() => {
@@ -95,39 +107,117 @@ export function MembersDialog({
       .slice(0, 30)
   }, [userOptions, memberIds, search])
 
-  const act = async (fn: () => Promise<{ code: number; msg: string }>) => {
+  // 左列：成员实时过滤（用户名包含匹配）
+  const filteredMembers = React.useMemo(() => {
+    const kw = memberSearch.trim().toLowerCase()
+    if (!kw) return members
+    return members.filter((m) => m.username.toLowerCase().includes(kw))
+  }, [members, memberSearch])
+
+  // 数据刷新后剔除失效勾选：已移出的成员 / 已加入组的候选（批量添加后自动清空）
+  React.useEffect(() => {
+    setSelectedMemberIds((prev) => prev.filter((id) => memberIds.has(id)))
+    setSelectedCandidateIds((prev) => prev.filter((id) => !memberIds.has(id)))
+  }, [memberIds])
+
+  // 弹窗打开时重置本地状态（按 group.id 依赖：父组件每次渲染会新建 group 对象，避免误重置）
+  React.useEffect(() => {
+    if (open) {
+      setSearch(""); setMemberSearch("")
+      setSelectedMemberIds([]); setSelectedCandidateIds([])
+      setBatchRemoveConfirm(false)
+    }
+  }, [open, group?.id])
+
+  const act = async (fn: () => Promise<{ code: number; msg: string }>): Promise<boolean> => {
     setBusy(true)
     try {
       const res = await fn()
       if (res.code === 0) {
         toast.success(res.msg || "操作成功")
         router.refresh()
-      } else toast.error(res.msg)
+        return true
+      } else {
+        toast.error(res.msg)
+        return false
+      }
     } finally {
       setBusy(false)
     }
   }
+
+  const toggleMember = (id: string) => {
+    setSelectedMemberIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }
+  const toggleCandidate = (id: string) => {
+    setSelectedCandidateIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }
+
+  const doBatchRemove = async () => {
+    if (!group || selectedMemberIds.length === 0) return
+    const ok = await act(() => setGroupUsersAction({ groupId: group.id, userIds: selectedMemberIds, op: "remove" }))
+    if (ok) setSelectedMemberIds([])
+  }
+
+  const doBatchAdd = async () => {
+    if (!group || selectedCandidateIds.length === 0) return
+    const ok = await act(() => setGroupUsersAction({ groupId: group.id, userIds: selectedCandidateIds, op: "add" }))
+    if (ok) setSelectedCandidateIds([])
+  }
+
+  const selectedMemberNames = members.filter((m) => selectedMemberIds.includes(m.userId)).map((m) => m.username)
+  const selectedMemberNameText =
+    selectedMemberNames.length > 20
+      ? `${selectedMemberNames.slice(0, 20).join("、")} 等 ${selectedMemberNames.length} 名`
+      : selectedMemberNames.join("、")
 
   return (
     <Dialog open={open} onOpenChange={(v) => !busy && onOpenChange(v)}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>组员管理 · {group?.name}</DialogTitle>
-          <DialogDescription>当前 {members.length} 名成员（展示前500）；搜索用户加入或移出现有成员</DialogDescription>
+          <DialogDescription>
+            当前 {members.length} 名成员（展示前500）；支持搜索后单个或勾选批量添加/移出
+          </DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-4 md:grid-cols-2">
+          {/* ---- 左列：当前成员（搜索 + 多选 + 批量移除） ---- */}
           <div className="space-y-2">
             <p className="text-sm font-medium flex items-center gap-2">当前成员</p>
+            <div className="relative">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input
+                value={memberSearch}
+                onChange={(e) => setMemberSearch(e.target.value)}
+                placeholder="搜索成员用户名..."
+                className="pl-8"
+                aria-label="搜索当前成员（用户名包含匹配）"
+              />
+            </div>
             <ScrollArea className="h-64 rounded-md border">
               <div className="p-2 space-y-1">
                 {members.length === 0 && <p className="text-xs text-muted-foreground py-6 text-center">暂无成员</p>}
-                {members.map((m) => (
-                  <div key={m.userId} className="flex items-center justify-between rounded px-2 py-1.5 hover:bg-muted">
-                    <span className="text-sm truncate">{m.username}</span>
+                {members.length > 0 && filteredMembers.length === 0 && (
+                  <p className="text-xs text-muted-foreground py-6 text-center">无匹配成员（调整搜索词）</p>
+                )}
+                {filteredMembers.map((m) => (
+                  <div key={m.userId} className="flex items-center justify-between gap-2 rounded px-2 py-1.5 hover:bg-muted">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Checkbox
+                        checked={selectedMemberIds.includes(m.userId)}
+                        onCheckedChange={() => toggleMember(m.userId)}
+                        disabled={busy}
+                        aria-label={`选择成员 ${m.username}`}
+                        className="shrink-0"
+                      />
+                      <span className="text-sm truncate">{m.username}</span>
+                    </div>
                     <Button
                       size="sm" variant="ghost" disabled={busy}
                       onClick={() => act(() => setGroupUsersAction({ groupId: group!.id, userIds: [m.userId], op: "remove" }))}
+                      aria-label={`移除成员 ${m.username}`}
+                      title={`将 ${m.username} 移出本组`}
                     >
                       <Trash2 className="h-3.5 w-3.5 text-red-500" />
                     </Button>
@@ -135,8 +225,23 @@ export function MembersDialog({
                 ))}
               </div>
             </ScrollArea>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-muted-foreground">
+                已选 {selectedMemberIds.length} 人{memberSearch.trim() ? ` · 匹配 ${filteredMembers.length}/${members.length}` : ""}
+              </span>
+              <Button
+                size="sm" variant="destructive"
+                disabled={busy || selectedMemberIds.length === 0}
+                onClick={() => setBatchRemoveConfirm(true)}
+                title="将勾选的成员批量移出本组"
+              >
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                批量移除{selectedMemberIds.length > 0 ? `（${selectedMemberIds.length}）` : ""}
+              </Button>
+            </div>
           </div>
 
+          {/* ---- 右列：添加用户（候选多选可跨搜索累积 + 批量添加） ---- */}
           <div className="space-y-2">
             <p className="text-sm font-medium flex items-center gap-2"><UserPlus className="h-4 w-4" /> 添加用户</p>
             <div className="relative">
@@ -148,12 +253,21 @@ export function MembersDialog({
                 {candidates.length === 0 && <p className="text-xs text-muted-foreground py-6 text-center">无匹配用户</p>}
                 {candidates.map((u) => (
                   <div key={u.id} className="flex items-center justify-between gap-2 rounded px-2 py-1.5 hover:bg-muted">
-                    <div className="min-w-0">
-                      <p className="text-sm truncate">
-                        {u.username}
-                        {!u.enabled && <Badge variant="outline" className="ml-1 text-[10px]">禁用</Badge>}
-                      </p>
-                      <p className="text-xs text-muted-foreground truncate">{u.email || u.displayName || "-"}</p>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Checkbox
+                        checked={selectedCandidateIds.includes(u.id)}
+                        onCheckedChange={() => toggleCandidate(u.id)}
+                        disabled={busy}
+                        aria-label={`选择用户 ${u.username}`}
+                        className="shrink-0"
+                      />
+                      <div className="min-w-0">
+                        <p className="text-sm truncate">
+                          {u.username}
+                          {!u.enabled && <Badge variant="outline" className="ml-1 text-[10px]">禁用</Badge>}
+                        </p>
+                        <p className="text-xs text-muted-foreground truncate">{u.email || u.displayName || "-"}</p>
+                      </div>
                     </div>
                     <Button
                       size="sm" variant="outline" disabled={busy}
@@ -165,9 +279,38 @@ export function MembersDialog({
                 ))}
               </div>
             </ScrollArea>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-muted-foreground">已选 {selectedCandidateIds.length} 人（可连续搜索勾选累积）</span>
+              <Button
+                size="sm"
+                className="bg-teal-600 hover:bg-teal-700"
+                disabled={busy || selectedCandidateIds.length === 0}
+                onClick={() => void doBatchAdd()}
+                title="将勾选的用户批量加入本组"
+              >
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UserPlus className="h-3.5 w-3.5" />}
+                添加所选{selectedCandidateIds.length > 0 ? `（${selectedCandidateIds.length}）` : ""}
+              </Button>
+            </div>
           </div>
         </div>
       </DialogContent>
+
+      {/* 23-a：批量移除确认（仅移出所选成员，组内其他成员不受影响） */}
+      <ConfirmDialog
+        open={batchRemoveConfirm}
+        onOpenChange={(v) => { if (!busy) setBatchRemoveConfirm(v) }}
+        title="批量移除组成员"
+        description={
+          selectedMemberNames.length > 0
+            ? `确定将以下 ${selectedMemberNames.length} 名成员移出用户组「${group?.name || ""}」？\n· ${selectedMemberNameText}\n· 仅移出所选成员，组内其他成员不受影响`
+            : ""
+        }
+        destructive
+        confirmText={`确认移出${selectedMemberNames.length > 0 ? `（${selectedMemberNames.length}）` : ""}`}
+        loading={busy}
+        onConfirm={doBatchRemove}
+      />
     </Dialog>
   )
 }

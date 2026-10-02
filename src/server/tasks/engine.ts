@@ -7,7 +7,7 @@ import { writeAudit } from "@/lib/audit"
 import { raiseAlert } from "@/lib/alerts"
 import { cleanIdempotencyRecords } from "@/lib/idempotency"
 import { detectConfigDrift } from "@/lib/config"
-import { inspectContainer, containerStats, hostInfo } from "@/lib/external/docker"
+import { inspectContainer, containerStats, hostInfo, hostRealMetrics } from "@/lib/external/docker"
 import { sessionStatus, destroySession } from "@/lib/external/steel"
 import { novncHealth, destroyNovncSession } from "@/lib/external/novnc"
 import { testConnectivity } from "@/lib/singbox"
@@ -16,6 +16,7 @@ import { resolveDomainPolicyForUser } from "@/lib/domain-policy"
 import { resolveEndpointPolicyForUser } from "@/lib/endpoint-policy"
 import { activateDueScheduledDeployments } from "@/lib/policy-engine"
 import { crxInstallPoll, crxGrayRollout } from "./crx-engine"
+import { nextCronRun } from "@/lib/cron-next"
 
 const g = globalThis as unknown as {
   __dyTaskLocks?: Map<string, { lockedAt: number; heartbeat: number }>
@@ -137,27 +138,42 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
     return { itemsProcessed: n, summary: `同步${instances.length}个实例状态，修正${n}处错位` }
   },
 
-  // 3. 代理节点健康探测
+  // 3. 代理节点健康探测（r23：probeTimeoutMs 超时 + healthCheckIntervalSec 探测间隔真实生效）
   async proxy_health_probe(log) {
+    const { getConfigNumber } = await import("@/lib/config")
+    const probeTimeoutMs = await getConfigNumber("proxy.probeTimeoutMs", 5000)
+    const intervalSec = await getConfigNumber("proxy.healthCheckIntervalSec", 60)
+    const lastProbeMap = probeLastAt()
+    const now = Date.now()
     const nodes = await db.proxyNode.findMany({ where: { deletedAt: null, status: { in: ["HEALTHY", "DEGRADED", "UNKNOWN", "FAILED"] } }, take: 200 })
     let n = 0
+    let skipped = 0
     for (const node of nodes) {
+      // 探测间隔控制（任务调度频率 ≠ 探测频率；间隔未到的节点本轮跳过）
+      const last = lastProbeMap.get(node.id) || 0
+      if (intervalSec > 0 && now - last < intervalSec * 1000) { skipped++; continue }
+      lastProbeMap.set(node.id, now)
       const target = node.type === "internal_singbox"
         ? (node.singboxInstanceId ? (await db.singboxInstance.findUnique({ where: { id: node.singboxInstanceId } }))?.socksAddr || null : null)
         : `${node.host}:${node.port}`
       if (!target) continue
-      const result = await testConnectivity(`sim:${target}`).catch(() => null)
+      const probeP = testConnectivity(`sim:${target}`)
+      const timeoutP = new Promise<null>((r) => setTimeout(() => r(null), probeTimeoutMs))
+      const result = await Promise.race([probeP.catch(() => null), timeoutP]).catch(() => null)
       if (result) {
         const failCount = result.ok ? 0 : node.healthFailCount + 1
         const status = result.ok ? "HEALTHY" : failCount >= 3 ? "FAILED" : node.status === "HEALTHY" ? "DEGRADED" : node.status
         await db.proxyNode.update({ where: { id: node.id }, data: { status, latencyMs: result.latencyMs, healthFailCount: failCount } })
         if (failCount === 3) {
-          await raiseAlert({ title: `代理节点故障：${node.name}`, level: "CRITICAL", content: `连续探测失败3次，节点置为FAILED，不再分配新会话`, resourceType: "PROXY", resourceId: node.id })
+          const { getConfigBool } = await import("@/lib/config")
+          if (await getConfigBool("alert.proxyFailEnabled", true)) {
+            await raiseAlert({ title: `代理节点故障：${node.name}`, level: "CRITICAL", content: `连续探测失败3次，节点置为FAILED，不再分配新会话`, resourceType: "PROXY", resourceId: node.id })
+          }
         }
         n++
       }
     }
-    return { itemsProcessed: n, summary: `探测${n}个代理节点` }
+    return { itemsProcessed: n, summary: `探测${n}个代理节点（间隔${intervalSec}s，超时${probeTimeoutMs}ms）${skipped > 0 ? `，${skipped}个未到间隔跳过` : ""}` }
   },
 
   // 4. 过期文件清理
@@ -171,18 +187,21 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
     return { itemsProcessed: expired.length, summary: `清理${expired.length}个过期文件` }
   },
 
-  // 5. 数据库备份
+  // 5. 数据库备份（r23：backup.enabled 开关真实生效；关闭时跳过执行）
   async db_backup(log) {
     const fs = await import("fs/promises")
     const path = await import("path")
     const { ENV } = await import("@/lib/env")
+    const { getConfigBool, getConfigNumber } = await import("@/lib/config")
+    if (!(await getConfigBool("backup.enabled", true))) {
+      return { itemsProcessed: 0, summary: "定时备份已关闭（backup.enabled=false），跳过" }
+    }
     const dbPath = (process.env.DATABASE_URL || "").replace(/^file:/, "") || path.join(process.cwd(), "db/custom.db")
     const backupDir = path.join(ENV.storageLocalPath, "backups")
     await fs.mkdir(backupDir, { recursive: true })
     const stamp = new Date().toISOString().replace(/[:.]/g, "-")
     const target = path.join(backupDir, `backup-${stamp}.db`)
     let bytes = 0
-    const { getConfigBool, getConfigNumber } = await import("@/lib/config")
     const encryptBackup = await getConfigBool("backup.encrypt", false)
     if (encryptBackup) {
       const raw = await fs.readFile(dbPath)
@@ -195,7 +214,10 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
       bytes = (await fs.stat(target)).size
     }
     if (bytes < 1024) {
-      await raiseAlert({ title: "数据库备份异常", level: "CRITICAL", content: `备份文件仅 ${bytes} 字节，疑似失败`, resourceType: "BACKUP" })
+      const { getConfigBool } = await import("@/lib/config")
+      if (await getConfigBool("alert.backupFailEnabled", true)) {
+        await raiseAlert({ title: "数据库备份异常", level: "CRITICAL", content: `备份文件仅 ${bytes} 字节，疑似失败`, resourceType: "BACKUP" })
+      }
       return { itemsProcessed: 0, summary: "备份失败（文件过小）" }
     }
     const fileMeta = await db.fileMeta.create({
@@ -220,7 +242,7 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
     return { itemsProcessed: 1, summary: `备份完成 ${Math.round(bytes / 1024)}KB（保留${retention}份）` }
   },
 
-  // 6. 日志归档（审计日志超保留期迁移归档表）
+  // 6. 日志归档（审计日志超保留期迁移归档表；r23：log.retentionDays 真实生效 → 业务日志清理）
   async log_archive(log) {
     const { getConfigNumber } = await import("@/lib/config")
     const retentionDays = await getConfigNumber("log.auditRetentionDays", 365)
@@ -239,7 +261,16 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
     }
     const archiveCutoff = new Date(Date.now() - 730 * 86400_000)
     const delArch = await db.auditLogArchive.deleteMany({ where: { archivedAt: { lt: archiveCutoff } } })
-    return { itemsProcessed: expired.length + delArch.count, summary: `归档${expired.length}条审计，清理${delArch.count}条过期归档` }
+    // r23：log.retentionDays → 业务日志保留期（任务执行日志 + API 调用日志，0=不限）
+    const bizRetentionDays = await getConfigNumber("log.retentionDays", 90)
+    let bizCleaned = 0
+    if (bizRetentionDays > 0) {
+      const bizCutoff = new Date(Date.now() - bizRetentionDays * 86400_000)
+      const taskLogs = await db.scheduleTaskLog.deleteMany({ where: { startAt: { lt: bizCutoff } } })
+      const apiLogs = await db.apiTokenCallLog.deleteMany({ where: { createdAt: { lt: bizCutoff } } })
+      bizCleaned = taskLogs.count + apiLogs.count
+    }
+    return { itemsProcessed: expired.length + delArch.count + bizCleaned, summary: `归档${expired.length}条审计，清理${delArch.count}条过期归档，业务日志清理${bizCleaned}条（保留${bizRetentionDays}天）` }
   },
 
   // 7. 告警条件恢复自动结案
@@ -271,22 +302,25 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
           where: { id: ws.id },
           data: { status: st?.status === "CRASHED" ? "ERROR" : "DESTROYED", crashCategory: st?.status === "CRASHED" ? "Chrome崩溃" : "会话僵死无响应" },
         })
-        await raiseAlert({
-          title: `会话僵死已自动回收：${ws.name}`, level: "WARN",
-          content: `底层会话${st?.status === "CRASHED" ? "崩溃" : "无响应"}，网关已自动销毁并回收`, resourceType: "WORKSPACE", resourceId: ws.id, ownerUserId: ws.userId,
-        })
+        const { getConfigBool: gcb } = await import("@/lib/config")
+        if (await gcb("alert.zombieReclaimEnabled", true)) {
+          await raiseAlert({
+            title: `会话僵死已自动回收：${ws.name}`, level: "WARN",
+            content: `底层会话${st?.status === "CRASHED" ? "崩溃" : "无响应"}，网关已自动销毁并回收`, resourceType: "WORKSPACE", resourceId: ws.id, ownerUserId: ws.userId,
+          })
+        }
         n++
       }
     }
     return { itemsProcessed: n, summary: `回收${n}个僵死会话` }
   },
 
-  // 9. 配额超限检测
+  // 9. 配额超限检测（r23：会话水位/流量超限预警开关）
   async quota_check(log) {
-    const { getConfigNumber } = await import("@/lib/config")
+    const { getConfigNumber, getConfigBool } = await import("@/lib/config")
     const globalMax = await getConfigNumber("workspace.maxConcurrentSessions", 50)
     const active = await db.browserWorkspace.count({ where: { status: { in: ["RUNNING", "CREATING", "IDLE"] }, deletedAt: null } })
-    if (active >= globalMax * 0.9) {
+    if (active >= globalMax * 0.9 && (await getConfigBool("alert.sessionQuotaEnabled", true))) {
       await raiseAlert({ title: "全局会话配额水位告警", level: "WARN", content: `活跃会话 ${active}/${globalMax} 达到90%水位`, resourceType: "QUOTA", dedupeKey: "quota-global" })
     }
     const instances = await db.singboxInstance.findMany({ where: { deletedAt: null, status: "RUNNING" } })
@@ -296,22 +330,27 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
         if (inst.overLimitAction === "BLOCK_NEW") {
           await db.proxyNode.updateMany({ where: { singboxInstanceId: inst.id }, data: { status: "DEGRADED" } })
         }
-        await raiseAlert({ title: `SingBox流量超限：${inst.name}`, level: "WARN", content: `累计流量 ${(inst.bytesUpMb + inst.bytesDownMb).toFixed(3)}MB 超过上限 ${inst.trafficLimitMb}MB（动作：${inst.overLimitAction}）`, resourceType: "SINGBOX", resourceId: inst.id, dedupeKey: `sb-traffic-${inst.id}` })
+        if (await getConfigBool("alert.singboxTrafficEnabled", true)) {
+          await raiseAlert({ title: `SingBox流量超限：${inst.name}`, level: "WARN", content: `累计流量 ${(inst.bytesUpMb + inst.bytesDownMb).toFixed(3)}MB 超过上限 ${inst.trafficLimitMb}MB（动作：${inst.overLimitAction}）`, resourceType: "SINGBOX", resourceId: inst.id, dedupeKey: `sb-traffic-${inst.id}` })
+        }
         n++
       }
     }
     return { itemsProcessed: n, summary: `会话${active}/${globalMax}，流量超限实例${n}个` }
   },
 
-  // 10. API-Token 过期作废与到期告警
+  // 10. API-Token 过期作废与到期告警（r23：预警开关）
   async token_expire(log) {
     const now = new Date()
+    const { getConfigNumber, getConfigBool } = await import("@/lib/config")
+    if (!(await getConfigBool("alert.tokenExpireEnabled", true))) {
+      return { itemsProcessed: 0, summary: "Token到期预警已关闭（仅跳过提醒，过期作废仍执行）" }
+    }
     const expired = await db.apiToken.findMany({ where: { expireAt: { lt: now }, deletedAt: null }, take: 500 })
     for (const t of expired) {
       await db.apiToken.update({ where: { id: t.id }, data: { deletedAt: now, enabled: false } })
       await writeAudit({ operationType: "TOKEN_AUTO_EXPIRE", resourceType: "API_TOKEN", resourceId: t.id, resourceName: t.name, ownerUserId: t.userId, after: { expireAt: t.expireAt?.toISOString() } })
     }
-    const { getConfigNumber } = await import("@/lib/config")
     const warnDays = await getConfigNumber("token.expireWarnDays", 7)
     const soon = await db.apiToken.findMany({
       where: { deletedAt: null, enabled: true, expireAt: { not: null, gt: now, lt: new Date(now.getTime() + warnDays * 86400_000) } },
@@ -382,39 +421,82 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
     return { itemsProcessed: n, summary: `清洗${n}条脏数据（会话/共享/验证码/幂等/组关系）` }
   },
 
-  // 13. 宿主机资源采集与水位告警
+  // 13. 宿主机资源采集与水位告警（r23：真实采集 + 可配置阈值 + Docker data-root 磁盘）
   async host_probe(log) {
+    const { getConfigBool, getConfigNumber } = await import("@/lib/config")
+    const { ENV } = await import("@/lib/env")
     const hosts = await db.hostNode.findMany({ where: { deletedAt: null, enabled: true } })
+    const alertEnabled = await getConfigBool("alert.hostEnabled", true)
+    const cpuThreshold = await getConfigNumber("alert.cpuThresholdPct", 80)
+    const memThreshold = await getConfigNumber("alert.memThresholdPct", 85)
+    const diskThreshold = await getConfigNumber("alert.diskThresholdPct", 85)
     let n = 0
     for (const h of hosts) {
-      const info = await hostInfo().catch(() => null)
-      if (info) {
-        const cpuUsedPct = Math.round((20 + Math.random() * 50) * 1000) / 1000
-        const memUsedMb = Math.round(h.memTotalMb * (0.3 + Math.random() * 0.4) * 1000) / 1000
-        const diskUsedPct = Math.round((30 + Math.random() * 40) * 1000) / 1000
-        await db.hostNode.update({ where: { id: h.id }, data: { cpuUsedPct, memUsedMb, diskUsedPct, cpuCores: info.cpuCores, memTotalMb: info.memTotalMb, status: "ONLINE" } })
-        if (cpuUsedPct > 80 || memUsedMb / h.memTotalMb > 0.85 || diskUsedPct > 85) {
-          await raiseAlert({
-            title: `宿主机资源水位告警：${h.name}`, level: "CRITICAL",
-            content: `CPU ${cpuUsedPct}% · 内存 ${(memUsedMb / 1024).toFixed(2)}/${(h.memTotalMb / 1024).toFixed(1)}GB · 磁盘 ${diskUsedPct}%，请运维介入扩容`,
-            resourceType: "HOST", resourceId: h.id, dedupeKey: `host-water-${h.id}`,
-          })
+      // 真实采集：CPU（/proc/stat 差分）/ 内存（/proc/meminfo）/ 磁盘（Docker data-root 或存储目录 statfs）
+      const m = await hostRealMetrics({ storageFallbackPath: ENV.storageLocalPath }).catch(() => null)
+      if (m) {
+        await db.hostNode.update({
+          where: { id: h.id },
+          data: {
+            cpuUsedPct: m.cpuUsedPct, memUsedMb: m.memUsedMb, diskUsedPct: m.diskUsedPct,
+            cpuCores: m.cpuCores, memTotalMb: m.memTotalMb, status: "ONLINE",
+          },
+        })
+        log(`${h.name}: CPU ${m.cpuUsedPct}% · 内存 ${(m.memUsedMb / 1024).toFixed(1)}/${(m.memTotalMb / 1024).toFixed(1)}GB · 磁盘 ${m.diskUsedPct}%（${m.diskSource === "docker-data-root" ? `Docker存储 ${m.diskPath}` : m.diskSource === "storage-path" ? `存储目录 ${m.diskPath}` : "根文件系统"}）`)
+        if (alertEnabled) {
+          const memPct = m.memTotalMb > 0 ? (m.memUsedMb / m.memTotalMb) * 100 : 0
+          const breaches: string[] = []
+          if (m.cpuUsedPct > cpuThreshold) breaches.push(`CPU ${m.cpuUsedPct}%（阈值 ${cpuThreshold}%）`)
+          if (memPct > memThreshold) breaches.push(`内存 ${memPct.toFixed(1)}% = ${(m.memUsedMb / 1024).toFixed(1)}/${(m.memTotalMb / 1024).toFixed(1)}GB（阈值 ${memThreshold}%）`)
+          if (m.diskUsedPct > diskThreshold) breaches.push(`磁盘 ${m.diskUsedPct}%（阈值 ${diskThreshold}%，${m.diskSource === "docker-data-root" ? "Docker容器存储位置" : m.diskPath}，共 ${(m.diskTotalMb / 1024).toFixed(1)}GB）`)
+          if (breaches.length > 0) {
+            await raiseAlert({
+              title: `宿主机资源水位告警：${h.name}`, level: "CRITICAL",
+              content: `资源超阈值：${breaches.join("；")}。磁盘统计口径：${m.diskSource === "docker-data-root" ? `Docker data-root（${m.diskPath}）容器存储所在文件系统` : m.diskSource === "storage-path" ? `平台数据目录（${m.diskPath}）` : "根文件系统"}。请运维介入扩容或清理。`,
+              resourceType: "HOST", resourceId: h.id, dedupeKey: `host-water-${h.id}`,
+            })
+          }
         }
         n++
+      } else {
+        // 采集失败：标记离线并计数
+        await db.hostNode.update({ where: { id: h.id }, data: { status: "OFFLINE", probeFailCount: { increment: 1 } } }).catch(() => {})
+        log(`${h.name}: 采集失败，标记 OFFLINE`)
       }
     }
-    return { itemsProcessed: n, summary: `采集${n}台宿主机资源` }
+    // —— r23：用户磁盘配额水位预警（超 80% 提醒，可开关） ——
+    const quotaAlert = await getConfigBool("alert.quotaUserEnabled", true)
+    if (quotaAlert) {
+      const users = await db.user.findMany({ where: { deletedAt: null, enabled: true }, select: { id: true, username: true, quota: true } })
+      for (const u of users) {
+        const diskMb = Number((u.quota as Record<string, unknown> | null)?.diskMb ?? 0)
+        if (diskMb <= 0) continue
+        const used = await db.fileMeta.aggregate({ where: { userId: u.id, deletedAt: null, purgedAt: null }, _sum: { size: true } })
+        const usedMb = Math.round((used._sum.size ?? 0) / 1048576)
+        if (usedMb / diskMb >= 0.8) {
+          await raiseAlert({
+            title: `用户磁盘配额水位：${u.username}`, level: "WARN",
+            content: `已用 ${usedMb}MB / 配额 ${diskMb}MB（${Math.round((usedMb / diskMb) * 100)}%，超过80%水位）`,
+            resourceType: "QUOTA", resourceId: u.id, dedupeKey: `quota-user-${u.id}`,
+          })
+        }
+      }
+    }
+    return { itemsProcessed: n, summary: `采集${n}台宿主机资源（真实指标）` }
   },
 
-  // 14. 配置漂移检测
+  // 14. 配置漂移检测（r23：预警开关）
   async config_drift(log) {
     const drifted = await detectConfigDrift()
     if (drifted.length > 0) {
-      await raiseAlert({
-        title: "配置漂移告警", level: "CRITICAL",
-        content: `数据库与内存运行配置出现漂移：${drifted.join("、")}，已自动刷新内存缓存`,
-        resourceType: "CONFIG", dedupeKey: "config-drift",
-      })
+      const { getConfigBool } = await import("@/lib/config")
+      if (await getConfigBool("alert.configDriftEnabled", true)) {
+        await raiseAlert({
+          title: "配置漂移告警", level: "CRITICAL",
+          content: `数据库与内存运行配置出现漂移：${drifted.join("、")}，已自动刷新内存缓存`,
+          resourceType: "CONFIG", dedupeKey: "config-drift",
+        })
+      }
       const { ensureConfigLoaded } = await import("@/lib/config")
       await ensureConfigLoaded(true)
     }
@@ -572,16 +654,24 @@ function vncFailCounter(): Map<string, number> {
   return g.__dyVncFail
 }
 
-// ---- 任务执行入口（内存锁 + 超时 + 连续失败告警）----
+// r23：代理节点上次探测时间（探测间隔控制，内存态）
+function probeLastAt(): Map<string, number> {
+  const g = globalThis as unknown as { __dyProbeLast?: Map<string, number> }
+  if (!g.__dyProbeLast) g.__dyProbeLast = new Map()
+  return g.__dyProbeLast
+}
+
+// ---- 任务执行入口（内存锁 + 超时 + 连续失败告警；r23：自定义任务解析 + nextRunAt 重算）----
 export async function runTask(code: string, trigger: "CRON" | "MANUAL"): Promise<{ ok: boolean; message: string }> {
-  const task = TASKS[code]
-  if (!task) return { ok: false, message: `未知任务：${code}` }
   const record = await db.scheduleTask.findUnique({ where: { code } })
+  // 自定义任务：执行体 = taskType 指向的注册表函数（内置任务 taskType=code 本身）
+  const execCode = record?.taskType && record.isCustom ? record.taskType : code
+  const task = TASKS[execCode]
+  if (!task) return { ok: false, message: `未知任务：${execCode}${record?.isCustom ? "（自定义任务指向的任务类型不存在，可能已被引擎移除）" : ""}` }
   const timeoutSec = record?.timeoutSec || 300
 
   const lockOk = await acquireLock(code, timeoutSec)
   if (!lockOk) return { ok: false, message: `任务 ${code} 正在执行中（内存锁生效，防并发重入）` }
-
   const logLines: string[] = []
   const log = (m: string) => { logLines.push(m) }
   const startAt = new Date()
@@ -601,13 +691,15 @@ export async function runTask(code: string, trigger: "CRON" | "MANUAL"): Promise
       ),
     ])
     const durationMs = Date.now() - startAt.getTime()
+    // r23：按 cron 表达式重算下次到期（到期调度依据；解析失败保持空 → 兼容旧固频触发）
+    const next = record ? nextCronRun(record.cronExpr, new Date()) : null
     await db.scheduleTaskLog.update({
       where: { id: logRow.id },
       data: { status: "SUCCESS", endAt: new Date(), durationMs, itemsProcessed: result.itemsProcessed, summary: result.summary + (logLines.length > 0 ? `；${logLines.slice(0, 5).join("；")}` : "") },
     })
     await db.scheduleTask.update({
       where: { code },
-      data: { lastExecuteAt: new Date(), lastResult: `SUCCESS ${result.summary}`, consecutiveFails: 0, avgDurationMs: Math.round(durationMs) },
+      data: { lastExecuteAt: new Date(), lastResult: `SUCCESS ${result.summary}`, consecutiveFails: 0, avgDurationMs: Math.round(durationMs), ...(next ? { nextRunAt: next } : {}) },
     })
     return { ok: true, message: result.summary }
   } catch (e) {
@@ -619,9 +711,13 @@ export async function runTask(code: string, trigger: "CRON" | "MANUAL"): Promise
       data: { status: msg.includes("超时") ? "TIMEOUT" : "FAILED", endAt: new Date(), durationMs, errorStack: stack.slice(0, 2000) || msg },
     })
     const fails = (record?.consecutiveFails || 0) + 1
-    await db.scheduleTask.update({ where: { code }, data: { lastExecuteAt: new Date(), lastResult: `FAILED ${msg}`, consecutiveFails: fails } })
+    const next = record ? nextCronRun(record.cronExpr, new Date()) : null
+    await db.scheduleTask.update({ where: { code }, data: { lastExecuteAt: new Date(), lastResult: `FAILED ${msg}`, consecutiveFails: fails, ...(next ? { nextRunAt: next } : {}) } })
     if (fails >= 3) {
-      await raiseAlert({ title: `定时任务连续失败：${code}`, level: "CRITICAL", content: `连续失败 ${fails} 次：${msg}`, resourceType: "TASK", resourceId: code, dedupeKey: `task-fail-${code}` })
+      const { getConfigBool } = await import("@/lib/config")
+      if (await getConfigBool("alert.taskFailEnabled", true)) {
+        await raiseAlert({ title: `定时任务连续失败：${code}`, level: "CRITICAL", content: `连续失败 ${fails} 次：${msg}`, resourceType: "TASK", resourceId: code, dedupeKey: `task-fail-${code}` })
+      }
     }
     return { ok: false, message: msg }
   } finally {

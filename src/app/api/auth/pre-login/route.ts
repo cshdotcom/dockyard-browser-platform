@@ -5,6 +5,7 @@ import { issueLoginTicket, force2faRequired } from "@/lib/auth"
 import { writeSecurityEvent } from "@/lib/audit"
 import { trackLoginFailure, clearLoginFailure, getLoginFailure, rateLimit } from "@/lib/rate-limit"
 import { checkIpBlack, checkUaRisk } from "@/lib/risk"
+import { checkIpBanned, recordIpLoginFail, clearIpFailCount } from "@/lib/ip-ban"
 import { getConfigBool, getConfigNumber } from "@/lib/config"
 import { sendMail, emailCodeTemplate } from "@/lib/email"
 import { verifyCaptcha } from "@/lib/captcha"
@@ -39,6 +40,13 @@ export async function POST(req: NextRequest) {
   const respond = (body: Record<string, unknown>) => Response.json({ ...body, traceId })
 
   try {
+    // ---- r23：IP 自动封禁检查（登录密码连续错误触发；封禁期间拒绝登录） ----
+    const ban = await checkIpBanned(ip)
+    if (ban.banned) {
+      await writeSecurityEvent({ eventType: "LOGIN_IP_BANNED", success: false, detail: `IP处于封禁中（剩余${ban.remainMinutes}分钟）：${ban.reason}`, ip, userAgent: ua })
+      return respond({ code: 46002, msg: `该IP已被临时封禁（剩余约${ban.remainMinutes}分钟）：连续登录失败触发自动防护` })
+    }
+
     // ---- 风控前置：IP黑白名单 / UA黑名单 ----
     const ipRisk = await checkIpBlack(ip)
     if (ipRisk.blocked) {
@@ -73,6 +81,7 @@ export async function POST(req: NextRequest) {
       })
       const genericFail = { code: 41002, msg: "邮箱或验证码错误" }
       if (!codeRow || codeRow.expiresAt < new Date()) {
+        await recordIpLoginFail(ip, "LOGIN", "邮箱验证码登录失败（验证码不存在/过期）")
         await writeSecurityEvent({ username: input.email, eventType: "LOGIN_FAILED", success: false, detail: "邮箱验证码登录失败", ip, userAgent: ua })
         return respond(genericFail)
       }
@@ -81,6 +90,7 @@ export async function POST(req: NextRequest) {
       }
       if (sha256(input.code) !== codeRow.codeHash) {
         await db.emailVerificationCode.update({ where: { id: codeRow.id }, data: { attempts: { increment: 1 } } })
+        await recordIpLoginFail(ip, "LOGIN", "邮箱验证码错误")
         await writeSecurityEvent({ username: input.email, eventType: "LOGIN_FAILED", success: false, detail: "邮箱验证码错误", ip, userAgent: ua })
         return respond(genericFail)
       }
@@ -103,6 +113,7 @@ export async function POST(req: NextRequest) {
 
       // 2FA 判定
       if (user.twoFactorEnabled) {
+        await clearIpFailCount(ip) // r23：验证通过清零IP失败计数
         const { ticket } = issueLoginTicket(user.id, "2FA", input.remember)
         await writeSecurityEvent({ userId: user.id, username: user.username, eventType: "LOGIN_EMAIL_CODE", success: true, detail: "邮箱验证码通过，等待2FA", ip, userAgent: ua })
         return respond({ code: 0, msg: "ok", data: { twoFactorRequired: true, ticket } })
@@ -147,6 +158,7 @@ export async function POST(req: NextRequest) {
 
     if (!user || !user.passwordHash) {
       trackLoginFailure(usernameKey)
+      await recordIpLoginFail(ip, "LOGIN", "账号不存在或无密码")
       await writeSecurityEvent({ username: input.username, eventType: "LOGIN_FAILED", success: false, detail: "账号不存在或无密码", ip, userAgent: ua })
       return respond(generic)
     }
@@ -163,6 +175,11 @@ export async function POST(req: NextRequest) {
       const count = trackLoginFailure(usernameKey)
       const threshold = await getConfigNumber("security.maxLoginFailures", 5)
       const lockoutMin = await getConfigNumber("security.lockoutMinutes", 15)
+      // r23：IP维度失败计数（账号维度锁定之外的第二道防线）
+      const ipBan = await recordIpLoginFail(ip, "LOGIN", `密码错误（账号 ${user.username}）`)
+      if (ipBan.banned) {
+        return respond({ code: 46002, msg: `连续失败达到阈值，该IP已被封禁约${ipBan.remainMinutes}分钟` })
+      }
       if (count >= threshold) {
         await db.user.update({
           where: { id: user.id },
@@ -186,6 +203,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ---- 密码正确 ----
+    await clearIpFailCount(ip) // r23：登录成功清零IP失败计数（正常使用不受影响）
     if (user.mustChangePassword) {
       const { ticket } = issueLoginTicket(user.id, "LOGIN", input.remember)
       return respond({ code: 0, msg: "ok", data: { ok: true, ticket, mustChangePassword: true } })

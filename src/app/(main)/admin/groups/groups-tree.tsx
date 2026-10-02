@@ -5,7 +5,7 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { ChevronDown, ChevronRight, FileDown, FileUp, MoreHorizontal, Plus, Trash2, X, Loader2, UserX } from "lucide-react"
+import { ChevronDown, ChevronRight, FileDown, FileUp, KeyRound, MoreHorizontal, Plus, Trash2, X, Loader2, UserX } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -18,6 +18,7 @@ import { batchDeleteGroupsAction } from "@/server/actions/batch"
 import { adminEvictGroupSharesAction, adminShareEvictPreviewAction } from "@/server/actions/admin-share-evict"
 import { BatchFailuresDialog } from "@/components/shared/batch-ui"
 import { GroupFormDialog } from "./group-form"
+import { GroupTokenPolicyDialog } from "../users/token-policy-dialog"
 import {
   MembersDialog, AdminsDialog, ProxiesDialog, LocksDialog, CopyGroupDialog, ImportGroupsDialog,
   type UserOption, type ProxyOption,
@@ -67,9 +68,16 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
   const [editingGroup, setEditingGroup] = React.useState<AdminGroupNode | null>(null)
 
   const [membersGroup, setMembersGroup] = React.useState<AdminGroupNode | null>(null)
+  // 23-a：组员弹窗数据新鲜度 —— membersGroup 捕获的是打开时的节点引用，router.refresh() 后
+  // 服务端重渲 allNodes（含最新组员名单），按 id 同步最新节点，避免弹窗内展示过期成员/候选
+  const membersGroupLive = membersGroup
+    ? allNodes.find((n) => n.id === membersGroup.id) || membersGroup
+    : null
   const [adminsGroup, setAdminsGroup] = React.useState<AdminGroupNode | null>(null)
   const [proxiesGroup, setProxiesGroup] = React.useState<AdminGroupNode | null>(null)
   const [locksGroup, setLocksGroup] = React.useState<AdminGroupNode | null>(null)
+  // r23-d：组级 API-Key 策略（成员默认基线）
+  const [tokenPolicyGroup, setTokenPolicyGroup] = React.useState<AdminGroupNode | null>(null)
   const [copyGroup, setCopyGroup] = React.useState<AdminGroupNode | null>(null)
   const [deleteGroup, setDeleteGroup] = React.useState<AdminGroupNode | null>(null)
   const [importOpen, setImportOpen] = React.useState(false)
@@ -264,6 +272,9 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
                 <DropdownMenuItem onClick={() => { setAdminsGroup(node) }}>组管理员</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setProxiesGroup(node) }}>代理绑定</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setLocksGroup(node) }}>权限锁</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setTokenPolicyGroup(node) }}>
+                  <KeyRound className="mr-1.5 h-4 w-4" /> API-Key 策略
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setCopyGroup(node) }}>复制组</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => openEvictGroup(node)}>
                   <UserX className="mr-1.5 h-4 w-4 text-rose-600" /> 清退组内收到的共享
@@ -368,7 +379,7 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
         open={!!membersGroup}
         onOpenChange={(v) => !v && setMembersGroup(null)}
         group={membersGroup ? { id: membersGroup.id, name: membersGroup.name } : null}
-        members={membersGroup?.members || []}
+        members={membersGroupLive?.members || []}
         userOptions={userOptions}
       />
 
@@ -399,6 +410,13 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
         currentLocks={
           ((locksGroup?.policy as Record<string, unknown> | null)?.permissionLocks as Record<string, boolean> | undefined) || {}
         }
+      />
+
+      {/* r23-d：组级 API-Key 策略基线（组内成员默认；用户级可覆盖收紧） */}
+      <GroupTokenPolicyDialog
+        open={!!tokenPolicyGroup}
+        onOpenChange={(v) => !v && setTokenPolicyGroup(null)}
+        group={tokenPolicyGroup ? { id: tokenPolicyGroup.id, name: tokenPolicyGroup.name } : null}
       />
 
       {/* 复制 */}

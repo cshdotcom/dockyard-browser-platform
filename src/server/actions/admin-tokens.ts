@@ -41,6 +41,8 @@ const adminTokenInputSchema = z.object({
 const adminTokenUpdateSchema = adminTokenInputSchema.extend({
   id: zId,
   // 保持目标用户不可变更：更新时以令牌归属为准，忽略传入 userId 的差异
+  // r23-d：每 Key 分钟限流覆盖（null/缺省 = 清除独立上限，继承策略链：用户/组/全局）
+  rateLimitPerMin: z.number().int().min(0).max(1000000).nullable().optional(),
 })
 
 // ---- 权限断言：管理员对目标用户的令牌操作权限 ----
@@ -107,6 +109,7 @@ export async function adminListUserApiTokensAction(input: unknown): Promise<Acti
     scopes: string[] | null
     ipWhitelist: string[] | null
     qpsLimit: number
+    rateLimitPerMin: number | null // r23-d：每 Key 分钟限流（null=继承策略链）
     expireAt: string | null
     enabled: boolean
     callCount: number
@@ -138,6 +141,7 @@ export async function adminListUserApiTokensAction(input: unknown): Promise<Acti
       scopes: normalizeScopes(t.scopes),
       ipWhitelist: Array.isArray(t.ipWhitelist) ? (t.ipWhitelist as string[]) : null,
       qpsLimit: t.qpsLimit,
+      rateLimitPerMin: t.rateLimitPerMin,
       expireAt: t.expireAt ? t.expireAt.toISOString() : null,
       enabled: t.enabled,
       callCount: t.callCount,
@@ -267,6 +271,8 @@ export async function adminUpdateUserApiTokenAction(input: unknown): Promise<Act
         ipWhitelist: p.ipWhitelist.length ? (p.ipWhitelist as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
         qpsLimit: p.qps,
         expireAt,
+        // r23-d：null/undefined → null（继承策略链）；数值照存（0 亦视为继承，鉴权热路径 rateLimitPerMin>0 才生效）
+        rateLimitPerMin: p.rateLimitPerMin ?? null,
       },
     })
 
@@ -286,6 +292,7 @@ export async function adminUpdateUserApiTokenAction(input: unknown): Promise<Act
         expireAt: before.expireAt ? before.expireAt.toISOString() : "永久",
         qpsLimit: before.qpsLimit,
         ipWhitelist: before.ipWhitelist,
+        rateLimitPerMin: before.rateLimitPerMin, // r23-d：审计前后对照（null=继承策略链）
       },
       after: {
         name: p.name,
@@ -295,6 +302,7 @@ export async function adminUpdateUserApiTokenAction(input: unknown): Promise<Act
         expireAt: expireAt ? expireAt.toISOString() : "永久",
         qpsLimit: p.qps,
         ipWhitelist: p.ipWhitelist,
+        rateLimitPerMin: p.rateLimitPerMin ?? null, // r23-d：审计前后对照（null=继承策略链）
       },
       severity: "WARN",
     })

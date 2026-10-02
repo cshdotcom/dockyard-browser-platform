@@ -2,13 +2,46 @@ import { db } from "@/lib/db"
 import { requireAdmin } from "@/lib/permissions"
 import { getAllConfig } from "@/lib/config"
 import { fmtDate } from "@/lib/utils-server"
-import { ConfigPanel, type ConfigItem, type ConfigVersionRow } from "./config-panel"
+import { ConfigPanel, type ConfigItem, type ConfigVersionRow, type SelfCheckData } from "./config-panel"
 import { Settings } from "lucide-react"
 
 // 系统配置（管理员可查看，仅超级管理员可修改）——配置项随时后台可改，禁用路由缓存保证回显最新落库值
 export const dynamic = "force-dynamic"
 
 export const metadata = { title: "系统配置" }
+
+// r23-C 配置生效自检：内置接线清单（代码库内已确认的预留键，其余均视为已接线生效）
+const RESERVED_CONFIG_KEYS = new Set([
+  "workspace.prewarmEnabled",  // 预热功能预留
+  "workspace.prewarmPoolSize", // 预热池大小预留
+  "storage.mode",             // 存储后端切换预留
+])
+
+function buildSelfCheck(items: ConfigItem[]): SelfCheckData {
+  const rows = items.map((i) => {
+    const reserved = RESERVED_CONFIG_KEYS.has(i.key)
+    let value: string
+    if (i.key === "smtp.pass") {
+      // 密码永不明文回显
+      value = String(i.value ?? "") ? "••••（AES 加密，已脱敏）" : "未配置"
+    } else if (i.value === null || i.value === undefined) {
+      value = "—"
+    } else if (typeof i.value === "object") {
+      const s = JSON.stringify(i.value)
+      value = s.length > 60 ? s.slice(0, 60) + "…" : s
+    } else {
+      value = String(i.value)
+    }
+    return {
+      key: i.key,
+      value,
+      status: reserved ? ("reserved" as const) : ("active" as const),
+      description: i.description || "",
+    }
+  })
+  const reservedCount = rows.filter((r) => r.status === "reserved").length
+  return { rows, activeCount: rows.length - reservedCount, reservedCount }
+}
 
 export default async function AdminConfigPage() {
   const ctx = await requireAdmin()
@@ -63,7 +96,12 @@ export default async function AdminConfigPage() {
         </div>
       </div>
 
-      <ConfigPanel items={configItems} versions={versionRows} canEdit={ctx.role === "SUPER_ADMIN"} />
+      <ConfigPanel
+        items={configItems}
+        versions={versionRows}
+        canEdit={ctx.role === "SUPER_ADMIN"}
+        selfCheck={ctx.role === "SUPER_ADMIN" ? buildSelfCheck(configItems) : undefined}
+      />
     </div>
   )
 }

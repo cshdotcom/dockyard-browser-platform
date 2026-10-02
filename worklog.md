@@ -655,3 +655,107 @@ Stage Summary:
 - 浏览器「可分可合」：EXTERNAL_BROWSER_URL 外部分离部署（CDP/VNC 全指外部）vs 默认单容器内嵌，start.sh/README/文档齐备
 - PostgreSQL 支持：双 Prisma 客户端运行时切换+Docker 镜像双 engine+启动全自动初始化（结构/触发器/种子幂等）+init.sql 人工导入备选通道；默认 SQLite 完全不受影响
 - 跨域名登录/用户信息传递：CORS 白名单+预检+凭证回显+/api/me/cross-domain 跨域登录态识别端点
+
+---
+Task ID: 23-foundation
+Agent: main
+Task: r23 基础层 — schema迁移/预警中心/真实资源采集/IP封禁/2FA后端强制/Token策略链/cron调度器/配置生效接线
+
+Work Log:
+- 【schema】ScheduleTask +isCustom/taskType/paramsJson/description/createdByUserId/nextRunAt；ScheduleTaskLog +status/startAt索引；新表 IpBanRecord(ip唯一/failCount/bannedUntil/手动封解封字段)；Group/User +tokenPolicy Json；ApiToken +rateLimitPerMin Int?；prisma db push + generate 完成
+- 【配置键】+23项：security.force2faAdminExempt / security.ipBan{Enabled,Threshold,WindowMinutes,Minutes,ApiCountEnabled,AlertEnabled} / alert.email{Enabled,MinLevel,Recipients} / alert.{cpu,mem,disk}ThresholdPct + alert.hostEnabled + 9个分功能预警开关 / token.allowCreate；seed-r23-config.ts 全部落库 + 内置任务补 taskType/nextRunAt
+- 【cron调度器】src/lib/cron-next.ts（5字段解析器+nextCronRun+describeCron，单值字段bug修复，worst-case 0ms）；/api/cron 重写为按 nextRunAt 到期触发（先推进再入队防并发重入；force=1 兼容旧全量）；src/instrumentation.ts 进程内置调度器（60s tick，BUILTIN_CRON=0 可关；与 start.sh wget 心跳兼容并存）；runTask 支持自定义任务（taskType 解析）+ 执行后重算 nextRunAt
+- 【真实资源采集】docker.ts +hostRealMetrics（CPU=/proc/stat差分250ms、内存=/proc/meminfo、磁盘=statfs(DockerRootDir优先→存储目录→根)）；engine host_probe 重写：真实指标+可配置阈值+磁盘口径说明+用户配额水位预警；采集失败标 OFFLINE
+- 【IP封禁】src/lib/ip-ban.ts（checkIpBanned/recordIpLoginFail窗口计数/manualBan/manualUnban/clearIpFailCount；回环/内网探测不参与）；pre-login 全失败路径计数+封禁期拒绝+成功清零；api-token-auth 无效Key计数+封禁拒绝+有效Key清零；admin-ipban.ts actions（列表分页搜索筛选/手动封/解封/删记录）
+- 【2FA后端强制】permissions.ts +enforce2faCompliance；requireWritableMode/requireAdmin/requireSuperAdmin 前置拦截（真拒绝非提示）；security.force2faAdminExempt 豁免开关；API-Key通道不受影响；account.ts 仅用 requireAuth 无死锁
+- 【Token策略链】src/lib/token-policy.ts（四级：每Key>用户>组>全局；sources来源标注；多组取最严格/scope交集）；tokens.ts 创建走 checkTokenPolicyForCreate/checkTokenQuota；api-token-auth 每分钟限流走 resolveTokenRatePerMin；users/groups.ts +setUserTokenPolicy/getUserTokenPolicy/setGroupTokenPolicy/getGroupTokenPolicy actions
+- 【告警邮件通道】alerts.ts +sendAlertEmail（级别过滤/静默窗口/收件人显式或自动取管理员邮箱）；email.ts +alertEmailTemplate
+- 【actions】workspaces.ts +batchRevokeShareRecipientsAction（多选踢出）；profile.ts +deleteMySessionRecordAction/deleteAllMyOfflineSessionsAction/deleteMyRevokedTrustedDevicesAction（离线设备=DB删除cookie失效）；tasks.ts +自定义任务CRUD/批量启停/批量执行/日志清理/cron预览
+- 【分页升级】data-table.tsx：首页/尾页/页码组（±2折叠省略号）/指定页跳转表单 — 全站所有列表统一生效
+- 【全局搜索API】/api/search 重写：14类资源（普通用户=自己的+共享给我的+公告+回收站；管理员+SingBox/用户/组/代理/宿主机/告警/备份/审计/任务/Key/文件）；types多选/from,to日期/user归属过滤；单类型take20
+- 【配置生效接线】audit-config-usage.ts 扫描出20个无读取点键→修复16个：backup.enabled(任务跳过)/log.retentionDays(任务+API日志清理)/proxy.probeTimeoutMs+healthCheckIntervalSec(探测超时+间隔内存控制)/rate.anonymousQps(apiHandler匿名IP限流)/rate.userQps(getAuthContext用户限流)/recycle.requireReason+storage.backupOnDelete(删除链路)/workspace.vnc{DefaultMode,ForceMode,Watermark,AutoQuality}(page→tabs→viewer服务端策略下发+RTT自适应画质)/storage.{allowedExtensions,retentionDays,quotaPerUserMb,quotaPerGroupMb}(新补/api/files/upload路由——上传404缺口)/ui.siteLogo(登录页)/log.slowQueryMs(db.ts $extends慢查询观测——全应用生效)；剩4个预留(prewarm×2/storage.mode/已记录)
+- 【文件上传404修复】/api/files/upload 路由此前缺失（上传卡片指向不存在路由），新建完整实现（扩展名白名单/保留期/用户+组配额/病毒扫描标记/逐文件失败明细/审计）
+- 【质量】bunx tsc 全部新改文件零新增错误；慢查询扩展/cron解析器/真实采集/上传路由均独立脚本实测通过
+
+Stage Summary:
+- r23 基础层全部落地：自定义cron调度体系/真实资源预警+邮件/IP封禁/2FA真拦截/Token四级策略/离线设备删除/共享批量移除/全局搜索API/DataTable分页升级/16个配置键真实生效
+- 待子代理：A=共享接收者+组员管理UI；B=任务中心UI；C=全局搜索UI+预警配置卡+IP封禁UI+生效自检；D=Token策略UI+离线设备UI
+
+---
+Task ID: 23-a
+Agent: full-stack-developer subagent
+Task: r23-A 三块 UI 增强 — 共享弹窗接收者管理（搜索/筛选/多选批量移除）+ 管理端共享日期筛选 + 组员管理批量操作
+
+Work Log:
+- 【共享弹窗接收者名单增强】share-dialogs.tsx（348→491行）：客户端实时搜索（用户名/昵称包含匹配 + 匹配 N/M 计数）；状态筛选 Select（全部/生效中/已移除/已过期）；行 Checkbox 多选（仅可见且非 revoked 行可勾，已移除行 disabled；筛选变化自动剔除失效勾选）；「已选 N」+「批量移除所选（N）」→ ConfirmDialog（destructive，列出用户名，说明其他接收者不受影响）→ batchRevokeShareRecipientsAction → toast（撤销N/跳过N/失败明细）→ 清空选择 + loadRecipients() + onDone()；弹窗加宽 max-w-md→max-w-lg；名单保持 max-h-56 overflow-y-auto；blockedReason 存在时批量移除仍可用（r22b 语义）；单移除/多选共享等既有功能零破坏
+- 【管理端共享日期筛选】admin/workspaces/page.tsx：shares 视图解析 f.shareFrom/shareTo（YYYY-MM-DD 正则校验，非法格式忽略）→ shareWhere.createdAt gte/lte（当日边界 00:00:00/23:59:59）；shares-table.tsx：筛选面板新增两个 Input type=date（创建时间起/止，受控 value，onChange pushQuery page重置1）+ 有值时「清空」按钮（一键双清）；既有筛选（状态/权限/关键词/按用户清退/按组清退）不动
+- 【组员管理批量操作】group-dialogs.tsx MembersDialog：左列「当前成员」顶部搜索框（用户名实时过滤 + 匹配计数）+ 行 Checkbox + 底部「已选 N · 批量移除（N）」→ ConfirmDialog → setGroupUsersAction({userIds, op:"remove"})；右列「添加用户」候选行 Checkbox 多选（跨搜索连续勾选累积）+「添加所选（N）」→ setGroupUsersAction({userIds, op:"add"})，成功清空已选并 router.refresh()；单个添加/移除按钮保留；数据刷新后自动剔除失效勾选（已移出成员/已入组候选）；ScrollArea h-64/56 滚动规范保持
+- 【groups-tree.tsx 数据新鲜度修复（必要支撑）】membersGroup 捕获打开时节点引用，router.refresh() 后弹窗内 members 过期（批量添加后左列不更新，属既有缺陷，阻断本功能连续操作流）——按 id 从 allNodes 同步最新节点 membersGroupLive 传入 MembersDialog
+- 【QA 实测 agent-browser --session qa23a（admin/Admin@2026）】新建工作区「QA23A共享测试工作区」→ 多选共享 qa23a1+qa23a2 → 弹窗内：搜索"qa23a1"/昵称"甲"过滤正确、状态筛选（已移除=仅qa23a1+disabled勾选 / 生效中=仅qa23a2 / 已过期=0条+空态文案）、勾选 qa23a1 → 批量移除确认（列出用户名+不影响说明）→ 执行成功 toast + 名单刷新（qa23a1 行勾选禁用无移除按钮，qa23a2 保持生效）→ DB 断言 WorkspaceShare：qa23a1 revokedAt=2026-10-02T15:38:03Z / qa23a2 NULL（PASS）；管理端 shares 视图：shareFrom=2026-10-03→0行 / =2026-10-02→2行 / shareTo=2026-10-01→0行 / 区间10-02~10-02→2行 / 非法格式 abc/xyz 服务端忽略 / 清空按钮双清 URL 参数回退；组员管理：多选添加2人（router.refresh 后弹窗内名单实时更新）→ 搜索 qa23a1 过滤 → 多选批量移除1人 → DB 断言 GroupUser 仅剩 qa23a2（PASS）；14 张截图存 download/qa-23a/
+- 【QA 数据清理】scripts/qa-cleanup-23a.ts（幂等）：工作区+WorkspaceShare+ShareLink+RecycleBin / QA23A测试组+GroupUser/GroupAdmin/GroupProxy / qa23a1+qa23a2 及关联行 / 按资源 id 圈定的审计日志（沿用 r22b 先例，AuditLog 应用层仍仅 INSERT）；执行后终态断言 workspace=0 group=0 users=0 shares=0（CLEANUP PASS，全库回到 admin+demo/默认用户组 原始态）
+- 【质量】bunx tsc 改动文件零新增错误（唯一 groups-tree:366 为 git stash 验证的基线既有错误）；bunx eslint 5个改动文件+清理脚本 0 error 0 warning；dev.log 无异常（仅既有 NEXTAUTH_URL warning）
+- 【环境】dev 服务器两次被沙箱回收，以 python subprocess.Popen(start_new_session=True) 模式重启（daemon-services.py 已验证的模式）恢复至 200
+
+Stage Summary:
+- 三块 UI 增强全部交付并经浏览器端到端实测：共享接收者「搜索+筛选+多选批量移除」全链路（DB 断言撤销准确、他项不受影响）、管理端共享创建时间范围筛选（服务端边界+客户端 URL 参数+清空）、组员管理「多选批量添加/移除」（含弹窗内数据实时刷新修复）
+- QA 产物全部清理归零，截图存档 download/qa-23a/（14张），清理脚本可重复执行
+
+---
+Task ID: 23-b
+Agent: full-stack-developer subagent（超轮次由主代理收尾复核）
+Task: r23-B 定时任务中心全面重构 — 任务列表分页/搜索/筛选/批量 + 自定义任务CRUD弹窗 + 日志日期筛选与清理
+
+Work Log:
+- 【任务列表】page.tsx + tasks-table.tsx 重写为 DataTable 统一底座：keyword(name/code/description)/enabled/taskKind(内置|自定义)/taskStatus(success|failed) 筛选 + 排序(name/code/lastExecuteAt/nextRunAt/avgDurationMs) + 分页；TaskRow +isCustom/taskType/description/nextRunAt/createdByUsername
+- 【列设计】名称+内置/自定义徽章、任务类型、cron+人话描述（describeCron）、启停 Switch、下次运行、最近执行+结果摘要、连续失败红徽章、平均耗时、操作（执行/编辑/删除-仅自定义/查看日志）
+- 【批量操作】batchToolbar：批量启用/停用（batchToggleTasksAction）、批量立即执行（batchExecuteTasksAction，失败明细弹窗）、批量删除（仅自定义）
+- 【自定义任务CRUD】custom-task-dialog.tsx（397行）：名称/任务类型(listCustomTaskTypesAction)/cron+实时预览(previewCronAction 防抖500ms 显示人话+未来3次)/超时/描述/启停；编辑模式内置任务锁定类型与名称
+- 【日志增强】task-logs-table.tsx：日期范围(startAt from/to)+触发类型(CRON/MANUAL)筛选；「清理旧日志」弹窗（天数/状态/限定任务）→ cleanupTaskLogsAction
+- 【QA】agent-browser --session qa23b 全流程实测 23 张截图 download/qa-23b/（创建→列表徽章→批量停用/启用→批量执行→日志筛选→清理→编辑→删除）；qa-cleanup-23b.ts 已执行（自定义任务归零、内置恢复 seed 原值）
+- 【质量】tsc 改动文件零错误、eslint 0 error 0 warning、/admin/tasks 307 登录守卫正常（编译通过）
+
+Stage Summary:
+- 定时任务中心从「全量无分页列表」升级为完整任务管理中枢：统一分页底座+多维筛选+批量操作+自定义任务全生命周期（创建/编辑/删除/启停/执行）+日志检索与治理；主代理复核 lint/tsc/清理终态全部通过
+
+---
+Task ID: 23-c
+Agent: full-stack-developer subagent
+Task: r23-C 四块 UI — 全局搜索筛选栏 / 配置页预警中心+封禁卡 / IP封禁管理 / 配置生效自检
+
+Work Log:
+- 【全局搜索增强】app-shell.tsx GlobalSearch 重写（472→646行，NotificationBell 等其余逻辑零改动）：筛选栏 = 类型多选 Chip（挂载空查询拉 /api/search types 目录渲染可勾选徽章，点击切换，仅勾选类型参与 types 参数；「全部」chip 一键清空含日期/用户）+ 日期范围双 Input(type=date) 起/止（ISO 透传 from/to）+ 管理员用户过滤 Input（占位"按用户过滤（用户名/邮箱）"，仅返回目录含 adminOnly 项时渲染）；结果组 = 组名+计数 Badge+每项 sub 副标题；结果区 max-h-96→max-h-[60vh] overflow-y-auto；q/筛选全部 300ms 防抖联合触发；空态提示"可尝试清空筛选"；弹窗标题/触发按钮文案改「全部资源」
+- 【必要支撑修复】/api/search announce 分支 `deletedAt: null` 在 Announcement 模型不存在（enabled 管理展示）→ 所有默认搜索 500（23-foundation 遗留 bug，阻断 GlobalSearch 链路）→ 移除该过滤；其余分支（recycle restoredAt 等）核对无误
+- 【预警中心卡】config-panel.tsx AlertCard（ALERT 分类，amber 主题 lg:col-span-2）：邮件通道（emailEnabled Switch + emailMinLevel Select ERROR|CRITICAL + emailRecipients Input 占位"留空=自动发给全部管理员邮箱"）+ 宿主机水位（hostEnabled + cpu/mem/disk PrecisionInput 1-100，磁盘注明按 Docker 容器存储位置统计）+ 9 个分功能预警开关两列布局（sessionQuota/singboxTraffic/proxyFail/backupFail/tokenExpire/zombieReclaim/configDrift/taskFail/quotaUser，Switch+说明+未保存徽章）；卡片托管 16 键从通用行过滤防重复，保存按钮走 setConfigAction 批量（复用 values/dirty/setLocal/saveItems 模式）
+- 【安全防护卡】SecurityCard（SECURITY 分类，red 主题）：ipBanEnabled 开关 + 阈值(1-1000)/计数窗口(1-1440)/封禁时长(1-10080) PrecisionInput 各带键名说明 + ipBanApiCountEnabled/ipBanAlertEnabled 开关 + force2faAdminExempt 开关（说明：开启后管理员不受强制2FA门控）；同卡片保存模式
+- 【IP封禁管理页】新增 admin/ipban/page.tsx（requireAdmin 壳）+ ipban-table.tsx（客户端 useEffect+250ms 防抖调 listIpBansAction）：统计卡（封禁中/计数中/记录总数 StatCard）+ 搜索q/状态Select(all|banned|counting)/刷新 + 服务端分页条（首页/上一页/下一页/尾页）+ 表格（IP、来源 LOGIN/API_KEY/MANUAL 徽章、失败计数、最近失败、封禁至=剩N分/已过期/计数中、原因、备注、解封时间、操作）；行多选 Checkbox + 批量删除（选中含封禁生效中→前端预判禁用+提示"请先解封再删除"，与后端拒绝语义对齐）；手动封禁弹窗（IPv4 正则前端校验+提示/minutes 0-525600 默认60 0=长期/reason 必填 2-200/note 可选）→ ConfirmDialog 摘要 → manualBanIpAction；解封行内按钮 → 备注弹窗（可填 note 写审计）→ manualUnbanIpAction；单行删除 ConfirmDialog（封禁中禁用 title 提示）；fmtDT 客户端本地实现（server fmtDate 不可 import，同 share-dialogs 模式）；菜单入口 layout.tsx「安全与审计」组 a-ipban（ShieldBan 图标，置于告警中心后）
+- 【配置生效自检】page.tsx buildSelfCheck()：RESERVED_CONFIG_KEYS 内置清单 Set（workspace.prewarmEnabled/prewarmPoolSize/storage.mode=功能预留，其余=生效中）+ smtp.pass 值脱敏（"••••（AES 加密，已脱敏）"/未配置）；仅 SUPER_ADMIN 角色下发 selfCheck（ADMIN 视角无此区块）；config-panel.tsx 底部 SelfCheckBlock：Collapsible 折叠（默认收起）+ 总计统计行"共N项 · 生效N · 预留3" + Table（配置键/当前值 max-w truncate/✅生效中|⏸️功能预留徽章/说明）max-h-[60vh] 滚动 + 语义说明脚注
+- 【QA 实测 agent-browser --session qa23c（admin/Admin@2026）】①全局搜索"demo"→用户(1)+审计日志(5)分组+sub副标题→勾选仅"用户"→只剩用户组（network 断言 q=demo&types=user）→from=2026-10-03（明天）→无匹配结果（q=demo&types=user&from=…）→点"全部"→分组恢复；用户过滤输入渲染且 q=demo&user=admin 生效（审计组缩至 admin 操作的2条）②预警中心卡 emailEnabled 开+80/85/85→保存 toast"已保存 3 项配置"→DB 断言 PASS（emailEnabled=true v2/cpu=80/mem=85/disk=85）③IP封禁 192.0.2.99/60分钟→列表"封禁中 · 剩 60 分"+解封按钮→解封（备注）→DB bannedUntil=null PASS（unbannedAt+note 落库）④再封禁→封禁中状态：行删除禁用（title 提示）+批量删除禁用（"选中含 1 条封禁生效中的记录，请先解封再删除"）→解封→单行删除→行消失+空态+DB 计数归零 PASS ⑤配置自检：共 123 项 · 生效 120 · 预留 3；展开 123 行、reserved 三键正确、smtp.pass 脱敏显示；23 张截图 download/qa-23c/
+- 【QA 清理】scripts/qa-cleanup-23c.ts（幂等）：IpBanRecord 测试行（192.0.2.x+QA23c 原因圈定）删除；alert 配置走 setConfig 恢复 seed 默认（emailEnabled=false，保留版本快照一致性，偏离默认才执行）；审计清理（IP_BAN_MANUAL/IP_UNBAN_MANUAL/IP_BAN_RECORD_DELETE resourceName=192.0.2.99 + CONFIG_UPDATE alert.emailEnabled）；执行 PASS（ipban 归零/emailEnabled 恢复 false/审计 5 条清除）；dev 服务器重启刷新配置内存缓存，UI 复核"邮件通道关闭"
+- 【质量】tsc 改动文件零新增错误（全局 73 个均为 singbox.ts/mini-services/scripts 基线既有）；eslint 8 个改动文件 0 error 0 warning；浏览器无页面错误；dev 服务器 3 次被沙箱回收均以 run-detached.py（python Popen start_new_session）重启恢复；未 git commit
+
+Stage Summary:
+- 四块 UI 全部交付并浏览器端到端实测：全局搜索弹窗升级为可筛选的全资源检索（类型多选/日期范围/管理员用户过滤，API 参数链路逐项断言）、配置页新增预警中心与安全防护两张专属卡（批量保存+DB 断言）、IP 封禁管理页（统计/筛选/分页/多选批量/手动封禁/解封/删除全链路含封禁中删除防护）、配置生效自检区块（123 键清单+预留标注+脱敏）
+- 修复 23-foundation 遗留 /api/search announce 500（Announcement 无 deletedAt 字段）
+- QA 产物全部清理归零，23 张截图存档 download/qa-23c/，清理脚本可重复执行
+
+---
+Task ID: 23-d
+Agent: full-stack-developer subagent
+Task: r23-D 三块 UI — 用户/组 Token 策略对话框（四级链可视化+三态覆盖）+ 每 Key 分钟限流编辑 + 离线设备记录删除
+
+Work Log:
+- 【用户级 Token 策略对话框】新增 src/app/(main)/admin/users/token-policy-dialog.tsx（556行）：UserTokenPolicyDialog 打开时 getUserTokenPolicyAction 解析四级链 →「当前生效策略（只读）」六项逐条展示（allowCreate 允许/禁止、maxPerUser N个、allowPermanent、maxLifetimeDays N天/不限、rateLimitPerMin N次/分、allowedScopes 功能面标签串）+ 来源徽章（user=teal 用户级 / group=amber 组级 / global=slate 全局默认）；「用户级覆盖设置」六字段三态：勾「覆盖」才传该字段（Switch/PrecisionInput 控件未勾时 opacity-40+pointer-events-none）、allowedScopes 勾选后 TOKEN_SCOPES 8 项 checkbox 组（全不勾=显式不限 null）、「覆盖 N 项」徽章、「清除全部覆盖」按钮（tokenPolicy:null 完全继承，ConfirmDialog）；保存 setUserTokenPolicyAction 仅传勾选字段（全空→null）→ toast+router.refresh；SUPER_ADMIN 目标显示 amber 豁免横幅（平台豁免，覆盖仅落库不参与解析）；共用 PolicyFieldRow 顶层组件（规避 react-hooks/static-components render 内建组件）
+- 【组级 Token 策略对话框】GroupTokenPolicyDialog（同文件导出，groups-tree import）：getGroupTokenPolicyAction 回显组级稀疏 JSON + 影响成员 N 人横幅；文案「组级为组内成员默认基线；用户级可覆盖收紧；数值多组取最严格（数量/时长/限流取最小，布尔禁止优先，范围取交集）」；同套三态字段（勾「设置」=组级基线）→ setGroupTokenPolicyAction；「清除组级策略」→ null
+- 【入口接线】users-table.tsx 行菜单「API-Key 策略（创建/数量/限流）」（KeyRound amber 图标，置于 API 密钥代管之后）+ tokenPolicyUser 状态 + 对话框渲染；groups-tree.tsx 组行菜单「API-Key 策略」（KeyRound，置于权限锁后）+ tokenPolicyGroup 状态 + 对话框渲染
+- 【每 Key 分钟限流编辑】admin-tokens.ts 最小补丁（4处）：adminTokenUpdateSchema +rateLimitPerMin z.number().int().min(0).max(1000000).nullable().optional()；update data +rateLimitPerMin: p.rateLimitPerMin ?? null；审计 before/after 双向注明（null=继承策略链）；list action items +rateLimitPerMin（编辑回显/列表展示依赖）。user-api-tokens.tsx：AdminApiTokenItem +rateLimitPerMin；编辑表单（仅 edit 模式渲染，create schema 无此字段）teal 高亮卡「每分钟调用上限（空/0=继承策略链）」PrecisionInput + 动态提示（>0 显示独立上限说明；0 时显示当前生效 N 次/分（来源：用户级覆盖/组级基线/全局默认）——open 时 viewerIsAdmin 门控拉 getUserTokenPolicyAction）；submit payload 仅 edit 透传（>0 取整，0/空→null）；列表明细 +「分钟限流」行（独立=teal 数值 / 继承=灰+当前生效·来源）
+- 【用户令牌页（不改后端）】account/tokens/page.tsx 服务端 resolveTokenPolicy(ctx.userId)（SUPER_ADMIN 豁免回退 mcp.perKeyPerMinute）→ TokensTable 新 props effectiveRatePerMin/effectiveRateSource；tokens-table.tsx：TokenRow +rateLimitPerMin；列表新增「分钟限流」列（60/分（独立）teal / 继承策略链（N/分））；编辑表单 amber 管控卡「每分钟调用上限（管理员管控）」只读说明（当前生效+来源+该令牌独立限制+策略链脚注）——用户侧 updateApiTokenAction schema 无此字段故仅展示
+- 【离线会话记录删除】sessions-table.tsx：已下线/已过期行（sessionState tone=muted/danger）行按钮由禁用态「下线」换「删除记录」（Trash2，title="从数据库删除该会话记录，设备cookie彻底失效"）→ ConfirmDialog → deleteMySessionRecordAction({sids:[id]})；在线行保持「下线」语义；顶部工具栏 +「清理全部已下线记录」（offlineRows=0 时禁用）→ ConfirmDialog → deleteAllMyOfflineSessionsAction → toast 删除N条；行多选 Checkbox 列（仅已下线/过期行可勾，在线行 disabled+半透明）+「已选 N 条记录」红条 +「删除所选（N）」→ deleteMySessionRecordAction({sids:选中})；数据刷新自动剔除失效勾选（memo 依赖 rows 引用稳定化 + setState 引用相等短路，修复初版 Maximum update depth 无限循环导致 dev 崩溃）
+- 【已撤销设备删除】devices-table.tsx：row.revoked 行按钮由禁用态「撤销信任」换「删除记录」（Trash2）→ ConfirmDialog → deleteMyRevokedTrustedDevicesAction({ids:[id]})；生效/过期行保持「撤销信任」
+- 【admin sessions 核查】页面 where revokedAt:null 仅展示在线会话（无"已离线"行）且无删除会话 action → 按任务要求保持现状不动，仅用户端
+- 【QA 实测 agent-browser --session qa23d（admin/Admin@2026）+ qa23d-demo（demo）】①用户管理 demo 设覆盖（勾选 maxPerUser=3 + allowCreate 覆盖+开关）→保存→DB 断言 User.tokenPolicy={"allowCreate":true,"maxPerUser":3}（开关初值 false 点击翻转，复点修正）→重开对话框生效区「禁止/用户级」「3 个/用户级」徽章+覆盖2项回显→开关改 false 保存→DB {"allowCreate":false,"maxPerUser":3} PASS→「清除全部覆盖」确认→DB null PASS→重开全项恢复「全局默认」②组管理默认用户组设基线 rateLimitPerMin=100→DB 断言 {"rateLimitPerMin":100} PASS（影响成员 2 人+取最严格文案渲染）③demo 新建永久密钥「QA23D测试密钥」→列表分钟限流显示「继承策略链（当前生效 100/分·组级基线）」（跨链路：QA②组级基线实时解析）→编辑设 60→保存→DB 断言 ApiToken.rateLimitPerMin=60 PASS+审计 before rateLimitPerMin:null/after:60 落库→列表「60 次/分（该 Key 独立）」；demo 登录自查：我的令牌列表「60/分（独立）」列+编辑表单管控卡「当前生效：100 次/分（组级基线）；该令牌被单独限制为 60 次/分」④admin 登录设备页：已下线行（Chrome/Linux）行勾选→「删除所选（1）」→确认→DB 断言 LoginSession 行消失（admin revoked 1→0，total 10→9）+SecurityEvent SESSION_RECORD_DELETE 落库→无已下线行时「清理全部已下线记录」禁用；辅种已撤销 TrustedDevice→devices 页签「删除记录」→确认→DB trustedDevices 归零；超管自身策略对话框显示豁免横幅+9999个/不限时长；29 张截图 download/qa-23d/
+- 【QA 清理】scripts/qa-cleanup-23d.ts（幂等）：demo/默认用户组 tokenPolicy 置 null、QA 令牌物理删除（含调用日志）、demo 密码恢复种子值 Demo@2026（QA 期间误跑历史脚本 qa-demo-pwd.ts 修正）、UserBehaviorProfile.resourcesCreated 回退 1、审计清理（USER_TOKEN_POLICY×3/GROUP_TOKEN_POLICY×1/TOKEN_ADMIN_CREATE+UPDATE×2）、SecurityEvent SESSION_RECORD_DELETE×1、残留测试设备归零；执行 CLEANUP PASS（终态 tokenPolicy 全 null/令牌数 0/QA 审计残留 0）；QA④删除的 1 条 admin 历史已撤销会话为死数据不恢复（功能语义即清理）
+- 【质量】tsc 改动文件零新增错误（groups-tree:372 为 stash 验证的基线既有错误位移，security-tabs 基线）；eslint 11 个文件（9 源码+2 脚本）0 error 0 warning；修复 sessions-table 无限循环（dev 崩溃 1 次+Fast Refresh 全量重载，重启恢复）；dev 服务器 2 次被沙箱回收以 daemon-restart.py 守护化恢复；未 git commit
+
+Stage Summary:
+- 三块 UI 全部交付并双账号浏览器端到端实测：用户/组 Token 策略对话框（四级链生效值只读+来源三色徽章+六字段三态覆盖+清除全部）、每 Key 分钟限流编辑（管理端可写+审计前后对照+用户端只读展示，跨链路实时解析断言）、离线设备记录删除（单条/多选/一键清理+已撤销设备删除，DB 行消失断言）
+- QA 产物全部清理归零（tokenPolicy/rateLimitPerMin/审计/安全事件/行为计数/密码种子值），29 张截图存档 download/qa-23d/，清理脚本可重复执行

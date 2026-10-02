@@ -181,5 +181,22 @@ export function remoteLoginAlertTemplate(ip: string, ua: string, time: string): 
   </div>`
 }
 
+// r23：告警邮件模板（预警中心邮件通道）
+export function alertEmailTemplate(level: string, title: string, content: string): string {
+  const tone = level === "CRITICAL" ? "#b91c1c" : level === "ERROR" ? "#c2410c" : "#0f766e"
+  const label = level === "CRITICAL" ? "严重告警" : level === "ERROR" ? "错误告警" : "平台告警"
+  return `
+  <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">
+    <h2 style="color:${tone};margin:0 0 12px">【${label}】Dockyard 平台预警通知</h2>
+    <div style="font-size:16px;font-weight:600;color:#111827;margin-bottom:8px">${escapeHtml(title)}</div>
+    <div style="color:#374151;background:#f9fafb;padding:12px 16px;border-radius:8px;white-space:pre-wrap;word-break:break-word">${escapeHtml(content)}</div>
+    <p style="color:#6b7280;font-size:12px;margin:16px 0 0">触发时间：${new Date().toLocaleString("zh-CN")} · 本邮件由平台预警中心自动发送，可在 后台 → 配置 → 预警中心 调整级别与收件人。</p>
+  </div>`
+}
+
+function escapeHtml(s: string): string {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+}
+
 // 加密工具导出（配置保存动作用）
 export { encrypt as encryptSmtpPassword }

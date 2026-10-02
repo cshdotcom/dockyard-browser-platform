@@ -1,17 +1,17 @@
 "use client"
 
 // 受信任设备列表：设备标签 / UA / IP / 添加时间 / 最后使用 / 过期时间 / 撤销信任
-// 附带剩余备份码数量提示
+// r23-d：已撤销信任的设备行支持「删除记录」（DB 物理删除，列表瘦身）
 
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, KeySquare, ShieldCheck, ShieldX } from "lucide-react"
+import { Loader2, KeySquare, ShieldCheck, ShieldX, Trash2 } from "lucide-react"
 import { DataTable } from "@/components/shared/data-table"
 import { ConfirmDialog } from "@/components/shared/confirm"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { revokeMyTrustedDeviceAction } from "@/server/actions/profile"
+import { revokeMyTrustedDeviceAction, deleteMyRevokedTrustedDevicesAction } from "@/server/actions/profile"
 
 export interface TrustedDeviceRow {
   id: string
@@ -44,6 +44,8 @@ export function DevicesTable({ rows, total, page, pageSize, keyword, sortField, 
   const searchParams = useSearchParams()
   const [busy, setBusy] = React.useState("")
   const [revokeTarget, setRevokeTarget] = React.useState<TrustedDeviceRow | null>(null)
+  // r23-d：删除已撤销信任设备记录
+  const [deleteTarget, setDeleteTarget] = React.useState<TrustedDeviceRow | null>(null)
 
   const pushQuery = (patch: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString())
@@ -64,6 +66,24 @@ export function DevicesTable({ rows, total, page, pageSize, keyword, sortField, 
         return
       }
       toast.success(`已撤销受信任设备「${revokeTarget.label}」，该设备下次登录需要完整 2FA 验证`)
+      router.refresh()
+    } finally {
+      setBusy("")
+    }
+  }
+
+  // r23-d：删除已撤销信任的设备记录（DB 物理删除）
+  const doDeleteRevoked = async () => {
+    if (!deleteTarget) return
+    setBusy(`del-${deleteTarget.id}`)
+    try {
+      const res = await deleteMyRevokedTrustedDevicesAction({ ids: [deleteTarget.id] })
+      if (res.code !== 0) {
+        toast.error(res.msg)
+        return
+      }
+      toast.success(`已删除 1 条已撤销信任的设备记录（${deleteTarget.label}）`)
+      setDeleteTarget(null)
       router.refresh()
     } finally {
       setBusy("")
@@ -144,19 +164,37 @@ export function DevicesTable({ rows, total, page, pageSize, keyword, sortField, 
         ]}
         onQueryChange={pushQuery}
         emptyText="暂无受信任设备"
-        rowActions={(row) => (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-red-600 hover:text-red-700"
-            disabled={row.revoked || busy !== ""}
-            onClick={() => setRevokeTarget(row)}
-            title={row.revoked ? "已撤销" : "撤销该设备的信任"}
-          >
-            {busy === `revoke-${row.id}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldX className="mr-1 h-4 w-4" />}
-            撤销信任
-          </Button>
-        )}
+        rowActions={(row) => {
+          // r23-d：已撤销信任的行 → 删除记录（DB 物理删除）；其余行保持「撤销信任」
+          if (row.revoked) {
+            return (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-red-600 hover:text-red-700"
+                disabled={busy !== ""}
+                onClick={() => setDeleteTarget(row)}
+                title="从数据库删除该已撤销设备记录"
+              >
+                {busy === `del-${row.id}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="mr-1 h-4 w-4" />}
+                删除记录
+              </Button>
+            )
+          }
+          return (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-red-600 hover:text-red-700"
+              disabled={busy !== ""}
+              onClick={() => setRevokeTarget(row)}
+              title={"撤销该设备的信任"}
+            >
+              {busy === `revoke-${row.id}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldX className="mr-1 h-4 w-4" />}
+              撤销信任
+            </Button>
+          )
+        }}
       />
 
       <ConfirmDialog
@@ -167,6 +205,17 @@ export function DevicesTable({ rows, total, page, pageSize, keyword, sortField, 
         confirmText="确认撤销"
         destructive
         onConfirm={doRevoke}
+      />
+
+      {/* r23-d：删除已撤销信任的设备记录 */}
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(v) => !v && setDeleteTarget(null)}
+        title={`删除设备记录「${deleteTarget?.label || ""}」`}
+        description={`该设备的信任已被撤销。确认从数据库物理删除该受信任设备记录？\n· 仅清理历史记录，不影响任何在线会话\n· 此操作不可恢复`}
+        confirmText="确认删除记录"
+        destructive
+        onConfirm={doDeleteRevoked}
       />
     </div>
   )

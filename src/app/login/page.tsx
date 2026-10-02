@@ -20,6 +20,7 @@ export default async function LoginPage({
   if (ctx) redirect(sp.from && sp.from.startsWith("/") && !sp.from.startsWith("//") ? sp.from : "/dashboard")
   const siteName = await getConfig<string>("ui.siteName", "Dockyard 浏览器工作平台")
   const announcement = await getConfig<string>("ui.loginAnnouncement", "")
+  const siteLogo = (await getConfig<string>("ui.siteLogo", "")).trim() // r23：ui.siteLogo 真实生效（空=默认 D 徽标）
   const allowRegister = await getConfig<boolean>("security.allowRegister", true)
   const bootstrap = await getBootstrapState()
 
@@ -27,7 +28,12 @@ export default async function LoginPage({
     <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-teal-50 via-white to-white dark:from-teal-950/40 dark:via-background dark:to-background p-4">
       <div className="w-full max-w-md space-y-6">
         <div className="text-center space-y-2">
-          <div className="mx-auto h-12 w-12 rounded-xl bg-teal-600 flex items-center justify-center text-white font-bold text-xl">D</div>
+          {siteLogo ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={siteLogo} alt={siteName} className="mx-auto h-12 w-12 rounded-xl object-cover" />
+          ) : (
+            <div className="mx-auto h-12 w-12 rounded-xl bg-teal-600 flex items-center justify-center text-white font-bold text-xl">D</div>
+          )}
           <h1 className="text-2xl font-semibold tracking-tight">{siteName}</h1>
           <p className="text-sm text-muted-foreground">企业级远程浏览器工作平台</p>
         </div>

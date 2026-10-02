@@ -14,6 +14,7 @@ import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
+import { getUserTokenPolicyAction } from "@/server/actions/users"
 import {
   Dialog,
   DialogContent,
@@ -56,6 +57,7 @@ export interface AdminApiTokenItem {
   scopes: string[] | null
   ipWhitelist: string[] | null
   qpsLimit: number
+  rateLimitPerMin: number | null // r23-d：每 Key 分钟限流（null=继承策略链：用户/组/全局）
   expireAt: string | null
   enabled: boolean
   callCount: number
@@ -79,6 +81,13 @@ const LEVEL_META: Record<Level, { title: string; hint: string; badgeClass: strin
   READ_ONLY: { title: "只读", hint: "仅查询：列表/状态/任务查询，不能创建/修改/删除", badgeClass: "border-sky-300 text-sky-700 dark:text-sky-400" },
   READ_WRITE: { title: "读写", hint: "查询 + 创建/修改/执行（浏览器控制、批量编排等）", badgeClass: "border-emerald-300 text-emerald-700 dark:text-emerald-400" },
   ADMIN: { title: "管理级", hint: "含用户/令牌/强制管控等管理操作（仅管理员账号可授予）", badgeClass: "border-red-300 text-red-700 dark:text-red-400" },
+}
+
+// r23-d：分钟限流生效来源标签（与策略链解析 sources 对应）
+const RATE_SOURCE_LABEL: Record<string, string> = {
+  user: "用户级覆盖",
+  group: "组级基线",
+  global: "全局默认",
 }
 
 const fmt = (iso: string | null): string => {
@@ -111,6 +120,10 @@ export function UserApiTokensDialog({ user, open, onOpenChange, viewerRole }: Us
   const [fScopes, setFScopes] = React.useState<string[]>([])
   const [fIpList, setFIpList] = React.useState("")
   const [fQps, setFQps] = React.useState(0)
+  // r23-d：每 Key 分钟限流（0/空 = 继承策略链；正数 = 该 Key 独立上限）
+  const [fRatePerMin, setFRatePerMin] = React.useState(0)
+  // 目标用户当前生效的分钟限流（编辑表单提示用；GROUP_ADMIN 无权调 getUserTokenPolicyAction）
+  const [effRate, setEffRate] = React.useState<{ value: number; source: string } | null>(null)
   const [fPermanent, setFPermanent] = React.useState(false)
   const [fExpire, setFExpire] = React.useState("")
 
@@ -150,9 +163,22 @@ export function UserApiTokensDialog({ user, open, onOpenChange, viewerRole }: Us
       setMode("list")
       setEditing(null)
       setPlain(null)
+      setEffRate(null)
       void reload()
+      // r23-d：拉取目标用户四级链解析的生效分钟限流（仅平台管理员有权限）
+      if (viewerIsAdmin) {
+        void getUserTokenPolicyAction({ id: userId })
+          .then((res) => {
+            if (res.code === 0 && res.data) {
+              const eff = res.data.effective as Record<string, unknown> | undefined
+              const src = (res.data.sources as Record<string, string> | undefined)?.rateLimitPerMin
+              setEffRate({ value: typeof eff?.rateLimitPerMin === "number" ? eff.rateLimitPerMin : 0, source: src || "global" })
+            }
+          })
+          .catch(() => {})
+      }
     }
-  }, [open, userId, reload])
+  }, [open, userId, reload, viewerIsAdmin])
 
   const openCreate = () => {
     setEditing(null)
@@ -175,6 +201,7 @@ export function UserApiTokensDialog({ user, open, onOpenChange, viewerRole }: Us
     setFScopes(it.scopes || [])
     setFIpList((it.ipWhitelist || []).join("\n"))
     setFQps(it.qpsLimit)
+    setFRatePerMin(it.rateLimitPerMin ?? 0)
     setFPermanent(!it.expireAt)
     setFExpire(it.expireAt ? isoToLocalInput(it.expireAt) : "")
     setMode("edit")
@@ -214,6 +241,8 @@ export function UserApiTokensDialog({ user, open, onOpenChange, viewerRole }: Us
         expireAtIso: expireIso,
         ipWhitelist: ipList,
         qps: fQps,
+        // r23-d：仅编辑链路支持（创建 schema 无此字段）；0/空 = null（继承策略链）
+        ...(mode === "edit" ? { rateLimitPerMin: fRatePerMin > 0 ? Math.floor(fRatePerMin) : null } : {}),
       }
       const res = mode === "create"
         ? await adminCreateUserApiTokenAction(payload)
@@ -408,6 +437,16 @@ export function UserApiTokensDialog({ user, open, onOpenChange, viewerRole }: Us
                           {it.qpsLimit > 0 ? `${it.qpsLimit}/s` : "全局默认"}
                         </p>
                         <p>
+                          <span className="text-muted-foreground">分钟限流：</span>
+                          {it.rateLimitPerMin != null && it.rateLimitPerMin > 0 ? (
+                            <span className="text-teal-600">{it.rateLimitPerMin} 次/分（该 Key 独立）</span>
+                          ) : (
+                            <span className="text-muted-foreground">
+                              继承策略链{effRate ? `（当前生效 ${effRate.value > 0 ? `${effRate.value}/分` : "不限"}·${RATE_SOURCE_LABEL[effRate.source] || "全局"}）` : ""}
+                            </span>
+                          )}
+                        </p>
+                        <p>
                           <span className="text-muted-foreground">调用：</span>
                           <span className="tabular-nums">{it.callCount}</span> 次
                           {it.failCount > 0 && <span className="text-red-600">（失败 {it.failCount}）</span>}
@@ -525,6 +564,21 @@ export function UserApiTokensDialog({ user, open, onOpenChange, viewerRole }: Us
               <Label>独立 QPS 限制（0 = 使用全局默认）</Label>
               <PrecisionInput value={fQps} onChange={setFQps} min={0} max={100000} suffix="次/秒" />
             </div>
+
+            {/* r23-d：每 Key 分钟限流覆盖（仅编辑链路；空/0 = 继承策略链） */}
+            {mode === "edit" && (
+              <div className="space-y-1.5 rounded-md border border-teal-200 dark:border-teal-800 bg-teal-50/40 dark:bg-teal-950/30 p-3">
+                <Label>每分钟调用上限（空 / 0 = 继承策略链）</Label>
+                <PrecisionInput value={fRatePerMin} onChange={(n) => setFRatePerMin(Math.floor(n))} min={0} max={1000000} step={1} suffix="次/分" />
+                <p className="text-[11px] text-muted-foreground">
+                  {fRatePerMin > 0
+                    ? `该 Key 独立上限：每分钟最多 ${Math.floor(fRatePerMin)} 次调用（优先于用户/组/全局策略）`
+                    : effRate
+                      ? `继承策略链：当前生效 ${effRate.value > 0 ? `${effRate.value} 次/分` : "不限"}（来源：${RATE_SOURCE_LABEL[effRate.source] || "全局"}），可填正数设置该 Key 独立上限`
+                      : "继承策略链（用户 / 组 / 全局逐级取值），可填正数设置该 Key 独立上限"}
+                </p>
+              </div>
+            )}
           </div>
         )}
 

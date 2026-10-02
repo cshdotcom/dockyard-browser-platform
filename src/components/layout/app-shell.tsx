@@ -168,12 +168,12 @@ export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenan
               <DialogTrigger asChild>
                 <Button variant="outline" size="sm" className="gap-2 text-muted-foreground w-9 sm:w-64 justify-start sm:justify-start justify-center shrink-0">
                   <Search className="h-4 w-4" />
-                  <span className="hidden sm:inline text-xs">全局搜索（工作区/实例/用户）</span>
+                  <span className="hidden sm:inline text-xs">全局搜索（全部资源）</span>
                 </Button>
               </DialogTrigger>
               <DialogContent className="max-w-xl">
                 <DialogHeader>
-                  <DialogTitle>全局搜索</DialogTitle>
+                  <DialogTitle>全局搜索（工作区/用户/任务/告警等全部资源）</DialogTitle>
                 </DialogHeader>
                 <GlobalSearch onClose={() => setSearchOpen(false)} />
               </DialogContent>
@@ -469,10 +469,37 @@ function NotificationBell({ initial }: { initial: number }) {
   )
 }
 
+// r23-C：全局搜索增强 —— 筛选栏（类型多选 Chip / 日期范围 / 管理员用户过滤）+ 分组副标题
+interface SearchTypeMeta { type: string; label: string; adminOnly: boolean }
+interface SearchHit { id: string; label: string; sub?: string; href: string }
+interface SearchGroup { group: string; type: string; items: SearchHit[] }
+
 function GlobalSearch({ onClose }: { onClose: () => void }) {
   const [q, setQ] = React.useState("")
-  const [results, setResults] = React.useState<{ group: string; items: { id: string; label: string; href: string }[] }[]>([])
+  const [catalog, setCatalog] = React.useState<SearchTypeMeta[]>([])
+  const [selectedTypes, setSelectedTypes] = React.useState<Set<string>>(new Set())
+  const [from, setFrom] = React.useState("")
+  const [to, setTo] = React.useState("")
+  const [user, setUser] = React.useState("")
+  const [results, setResults] = React.useState<SearchGroup[]>([])
   const [busy, setBusy] = React.useState(false)
+
+  // 目录含管理员专属类型 → 当前为管理员模式，显示「按用户过滤」
+  const adminMode = catalog.some((t) => t.adminOnly)
+  const typesKey = [...selectedTypes].sort().join(",")
+
+  // 挂载即拉类型目录（空查询也会返回 types 目录）
+  React.useEffect(() => {
+    let alive = true
+    ;(async () => {
+      try {
+        const res = await fetch("/api/search?q=")
+        const json = await res.json()
+        if (alive && json.code === 0 && Array.isArray(json.data?.types)) setCatalog(json.data.types)
+      } catch { /* 目录拉取失败不阻断搜索 */ }
+    })()
+    return () => { alive = false }
+  }, [])
 
   React.useEffect(() => {
     if (q.trim().length < 2) {
@@ -482,9 +509,18 @@ function GlobalSearch({ onClose }: { onClose: () => void }) {
     const t = setTimeout(async () => {
       setBusy(true)
       try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(q.trim())}`)
+        const sp = new URLSearchParams()
+        sp.set("q", q.trim())
+        if (selectedTypes.size > 0) sp.set("types", typesKey)
+        if (from) sp.set("from", from)
+        if (to) sp.set("to", to)
+        if (adminMode && user.trim()) sp.set("user", user.trim())
+        const res = await fetch(`/api/search?${sp.toString()}`)
         const json = await res.json()
-        if (json.code === 0) setResults(json.data.groups || [])
+        if (json.code === 0) {
+          setResults(json.data.groups || [])
+          if (Array.isArray(json.data?.types)) setCatalog(json.data.types)
+        }
       } catch {
         toast.error("搜索失败")
       } finally {
@@ -492,17 +528,103 @@ function GlobalSearch({ onClose }: { onClose: () => void }) {
       }
     }, 300)
     return () => clearTimeout(t)
-  }, [q])
+  }, [q, typesKey, from, to, user, adminMode])
+
+  const toggleType = (type: string) => {
+    setSelectedTypes((prev) => {
+      const next = new Set(prev)
+      if (next.has(type)) next.delete(type)
+      else next.add(type)
+      return next
+    })
+  }
+
+  const hasFilter = selectedTypes.size > 0 || !!from || !!to || (adminMode && !!user.trim())
+  const clearFilters = () => {
+    setSelectedTypes(new Set())
+    setFrom("")
+    setTo("")
+    setUser("")
+  }
 
   return (
     <div className="space-y-3">
-      <Input autoFocus placeholder="输入关键词：名称 / UUID / 用户名..." value={q} onChange={(e) => setQ(e.target.value)} />
+      <Input autoFocus placeholder="输入关键词：名称 / UUID / 用户名 / 告警标题..." value={q} onChange={(e) => setQ(e.target.value)} />
+
+      {/* ---- 筛选栏：类型多选 Chip + 日期范围 + 管理员用户过滤 ---- */}
+      {catalog.length > 0 && (
+        <div className="space-y-2.5 rounded-lg border bg-muted/30 p-3">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-muted-foreground shrink-0">类型</span>
+            <button
+              type="button"
+              onClick={clearFilters}
+              className={cn(
+                "rounded-full border px-2.5 py-0.5 text-xs transition-colors cursor-pointer",
+                hasFilter
+                  ? "border-border bg-background text-muted-foreground hover:bg-muted"
+                  : "border-teal-600 bg-teal-600 text-white"
+              )}
+              title="清空全部筛选（搜索所有类型）"
+            >
+              全部
+            </button>
+            {catalog.map((t) => {
+              const on = selectedTypes.has(t.type)
+              return (
+                <button
+                  key={t.type}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() => toggleType(t.type)}
+                  className={cn(
+                    "rounded-full border px-2.5 py-0.5 text-xs transition-colors cursor-pointer",
+                    on
+                      ? "border-teal-600 bg-teal-600 text-white"
+                      : "border-border bg-background text-muted-foreground hover:bg-muted"
+                  )}
+                >
+                  {t.label}
+                </button>
+              )
+            })}
+          </div>
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="space-y-1">
+              <label className="text-[11px] text-muted-foreground block" htmlFor="gs-from">创建时间 起</label>
+              <Input id="gs-from" type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="h-8 w-36 text-xs" />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[11px] text-muted-foreground block" htmlFor="gs-to">创建时间 止</label>
+              <Input id="gs-to" type="date" value={to} onChange={(e) => setTo(e.target.value)} className="h-8 w-36 text-xs" />
+            </div>
+            {adminMode && (
+              <div className="space-y-1 min-w-40 flex-1">
+                <label className="text-[11px] text-muted-foreground block" htmlFor="gs-user">按用户过滤（管理员）</label>
+                <Input
+                  id="gs-user"
+                  value={user}
+                  onChange={(e) => setUser(e.target.value)}
+                  placeholder="按用户过滤（用户名/邮箱）"
+                  className="h-8 text-xs"
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {busy && <p className="text-xs text-muted-foreground text-center py-4">搜索中...</p>}
-      {!busy && results.length === 0 && q.trim().length >= 2 && <p className="text-xs text-muted-foreground text-center py-4">无匹配结果</p>}
-      <div className="space-y-3 max-h-96 overflow-y-auto">
+      {!busy && results.length === 0 && q.trim().length >= 2 && (
+        <p className="text-xs text-muted-foreground text-center py-4">无匹配结果{hasFilter ? "（可尝试清空筛选）" : ""}</p>
+      )}
+      <div className="space-y-3 max-h-[60vh] overflow-y-auto">
         {results.map((g) => (
           <div key={g.group}>
-            <p className="text-xs text-muted-foreground mb-1">{g.group}（{g.items.length}）</p>
+            <p className="text-xs text-muted-foreground mb-1 flex items-center gap-1.5">
+              {g.group}
+              <Badge variant="secondary" className="text-[10px] px-1.5">{g.items.length}</Badge>
+            </p>
             <div className="space-y-1">
               {g.items.map((item) => (
                 <Link
@@ -511,7 +633,8 @@ function GlobalSearch({ onClose }: { onClose: () => void }) {
                   onClick={onClose}
                   className="block rounded-md border px-3 py-2 text-sm hover:bg-muted"
                 >
-                  {item.label}
+                  <span className="break-all">{item.label}</span>
+                  {item.sub && <span className="block mt-0.5 text-xs text-muted-foreground truncate">{item.sub}</span>}
                 </Link>
               ))}
             </div>

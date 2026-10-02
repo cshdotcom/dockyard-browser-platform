@@ -57,6 +57,13 @@ export interface WorkspaceDetailData {
   } | null
   /** r14（22-c）：闲置超时四级策略链（生效值+来源徽章；locked 已按查看者角色豁免管理员） */
   idleInfo: { minutes: number; source: string; sourceLabel: string; locked: boolean; lockSourceLabel: string } | null
+  /** r23：VNC 全局策略（服务端配置真实下发：默认输入模式/强制模式/水印/自适应画质） */
+  vncPolicy?: {
+    defaultMode: string // auto | mouse | touch
+    forceMode: string // 空=不强制
+    watermark: boolean
+    autoQuality: boolean
+  }
 }
 
 interface ShareRow { id: string; targetName: string; permission: string; expireAt: string | null; createdAt: string }
@@ -332,6 +339,12 @@ function VncPanel({ workspace, canOperate, vncBridge }: { workspace: WorkspaceDe
           novncSessionId: workspace.novncSessionId, ownerName: workspace.ownerName,
           mySharePermission: workspace.mySharePermission, isOwner: workspace.isOwner, isAdmin: workspace.isAdmin,
         }}
+        serverPolicy={workspace.vncPolicy ? {
+          defaultMode: workspace.vncPolicy.defaultMode === "mouse" || workspace.vncPolicy.defaultMode === "touch" ? workspace.vncPolicy.defaultMode : "auto",
+          forceMode: workspace.vncPolicy.forceMode === "mouse" || workspace.vncPolicy.forceMode === "touch" ? workspace.vncPolicy.forceMode : "",
+          watermark: workspace.vncPolicy.watermark,
+          autoQuality: workspace.vncPolicy.autoQuality,
+        } : undefined}
       />
 
       {/* r13c：VNC 接入信息（跨域名部署可视化） */}

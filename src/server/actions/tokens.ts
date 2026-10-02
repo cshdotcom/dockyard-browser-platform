@@ -2,6 +2,8 @@
 
 // 我的 API 令牌（用户自助）：创建 / 编辑 / 删除(软删+回收站) / 启停
 // 全局策略校验：token.maxPerUser / token.allowPermanent(仅 SUPER_ADMIN 豁免) / token.maxLifetimeDays
+// r23：四级策略链（每Key > 用户级 > 组级 > 全局）— checkTokenPolicyForCreate / checkTokenQuota 统一校验
+//   组/用户级可覆盖：allowCreate / maxPerUser / allowPermanent / maxLifetimeDays / rateLimitPerMin / allowedScopes
 // 权限锁：blockCreateApiToken / blockEditTokenExpiry / blockDeleteResource
 // 明文 token 仅创建时返回一次，库内只存 sha256 哈希
 //
@@ -22,6 +24,7 @@ import { moveToRecycle } from "@/lib/recycle"
 import { trackBehavior } from "@/lib/risk"
 import { bizError, ErrorCode } from "@/lib/errors"
 import { TOKEN_PERM, TOKEN_SCOPES, normalizeScopes, levelOfMask, levelLabel } from "@/lib/token-scopes"
+import { checkTokenPolicyForCreate, checkTokenQuota } from "@/lib/token-policy"
 
 const IP_CIDR_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\/(?:[12]\d|[0-9]))?$/
 
@@ -104,11 +107,12 @@ export async function createApiTokenAction(input: unknown): Promise<ActionResult
     const scopes = resolveScopes(p.scopes || [])
     validateIpList(p.ipWhitelist)
 
-    const maxPerUser = await getConfigNumber("token.maxPerUser", 10)
-    const count = await db.apiToken.count({ where: { userId: ctx.userId, deletedAt: null } })
-    if (count >= maxPerUser) {
-      throw bizError(ErrorCode.QUOTA_EXCEEDED, `已达个人令牌数量上限（${maxPerUser} 个），请先删除不再使用的令牌`)
-    }
+    // r23：四级策略链校验（组/用户级覆盖收紧：允许创建/永久/时长/数量/范围）
+    const expireDays = expireAt ? Math.ceil((expireAt.getTime() - Date.now()) / 86400_000) : null
+    const policyErr = await checkTokenPolicyForCreate(ctx.userId, { expireDays, scopes })
+    if (policyErr) throw bizError(ErrorCode.FORBIDDEN, policyErr)
+    const quotaErr = await checkTokenQuota(ctx.userId)
+    if (quotaErr) throw bizError(ErrorCode.QUOTA_EXCEEDED, quotaErr)
 
     const plain = generateApiToken()
     const token = await db.apiToken.create({

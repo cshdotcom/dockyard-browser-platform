@@ -62,6 +62,7 @@ export interface TokenRow {
   status: "PERMANENT" | "NORMAL" | "EXPIRING" | "EXPIRED"
   enabled: boolean
   qpsLimit: number
+  rateLimitPerMin: number | null // r23-d：每 Key 分钟限流（null=继承策略链）
   ipWhitelist: string[]
   lastCallAt: string
   callCount: number
@@ -75,6 +76,13 @@ const STATUS_META: Record<TokenRow["status"], { label: string; className: string
   NORMAL: { label: "正常", className: "bg-emerald-600 hover:bg-emerald-600 text-white" },
   EXPIRING: { label: "即将到期", className: "bg-orange-500 hover:bg-orange-500 text-white" },
   EXPIRED: { label: "已过期", className: "bg-red-600 hover:bg-red-600 text-white" },
+}
+
+// r23-d：分钟限流生效来源标签（四级链：每Key>用户>组>全局）
+const RATE_SOURCE_LABEL: Record<string, string> = {
+  user: "用户级覆盖",
+  group: "组级基线",
+  global: "全局默认",
 }
 
 function maskLabel(mask: number): string {
@@ -128,9 +136,12 @@ interface TokensTableProps {
   sortOrder?: "asc" | "desc"
   filters: Record<string, string>
   role: string
+  // r23-d：四级链解析后的账号级生效分钟限流（仅展示；独立上限由管理员设置）
+  effectiveRatePerMin?: number
+  effectiveRateSource?: string
 }
 
-export function TokensTable({ rows, total, page, pageSize, keyword, sortField, sortOrder, filters, role }: TokensTableProps) {
+export function TokensTable({ rows, total, page, pageSize, keyword, sortField, sortOrder, filters, role, effectiveRatePerMin, effectiveRateSource }: TokensTableProps) {
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -377,6 +388,18 @@ export function TokensTable({ rows, total, page, pageSize, keyword, sortField, s
       render: (row: TokenRow) => <span className="tabular-nums text-sm">{row.qpsLimit > 0 ? row.qpsLimit : "默认"}</span>,
     },
     {
+      key: "rateLimitPerMin",
+      title: "分钟限流",
+      render: (row: TokenRow) =>
+        row.rateLimitPerMin != null && row.rateLimitPerMin > 0 ? (
+          <span className="tabular-nums text-sm text-teal-600" title="管理员为该 Key 设置的独立分钟限流">{row.rateLimitPerMin}/分（独立）</span>
+        ) : (
+          <span className="text-xs text-muted-foreground" title="四级策略链：每Key>用户>组>全局">
+            继承策略链{effectiveRatePerMin != null ? `（${effectiveRatePerMin > 0 ? `${effectiveRatePerMin}/分` : "不限"}）` : ""}
+          </span>
+        ),
+    },
+    {
       key: "ipWhitelist",
       title: "IP 白名单",
       render: (row: TokenRow) =>
@@ -591,6 +614,19 @@ export function TokensTable({ rows, total, page, pageSize, keyword, sortField, s
             <div className="space-y-1.5">
               <Label>独立 QPS 限制（0 = 使用全局默认）</Label>
               <PrecisionInput value={fQps} onChange={setFQps} min={0} max={100000} suffix="次/秒" />
+            </div>
+
+            {/* r23-d：每分钟调用上限为管理员管控项（四级链：每Key>用户>组>全局），用户侧仅展示当前生效值 */}
+            <div className="space-y-1.5 rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/30 p-3">
+              <Label className="flex items-center gap-1.5">每分钟调用上限（管理员管控）</Label>
+              <p className="text-xs text-muted-foreground">
+                当前生效：{effectiveRatePerMin != null && effectiveRatePerMin > 0 ? `${effectiveRatePerMin} 次/分` : "不限"}
+                （来源：{RATE_SOURCE_LABEL[effectiveRateSource || "global"] || "全局默认"}）
+                {editing && editing.rateLimitPerMin != null && editing.rateLimitPerMin > 0
+                  ? `；该令牌被单独限制为 ${editing.rateLimitPerMin} 次/分`
+                  : "；该令牌未设独立上限，继承账号策略"}
+              </p>
+              <p className="text-[11px] text-muted-foreground/80">策略链：每 Key 独立上限 {'>'} 用户级 {'>'} 组级 {'>'} 全局默认；如需调整请联系平台管理员。</p>
             </div>
           </div>
 

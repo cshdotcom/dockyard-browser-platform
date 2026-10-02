@@ -45,6 +45,57 @@ function createPrismaClient(): PrismaClient {
   })
 }
 
-export const db = globalForPrisma.prisma ?? createPrismaClient()
+const baseClient = globalForPrisma.prisma ?? createPrismaClient()
 
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = db
+// ============================================================
+// r23：log.slowQueryMs 真实生效 —— 慢查询观测扩展
+// · 阈值读自内存配置缓存（system_config 的 log.slowQueryMs，默认 1000ms，0=关闭）
+// · 缓存未加载/不可用时用默认值；阈值每 60s 从缓存同步一次（不逐查询读库）
+// · 输出：console.warn（结构化前缀 [slow-query]），生产可据此定位慢模型/慢操作
+// ============================================================
+const slowQueryDb = globalThis as unknown as { __dySlowQueryThresholdMs?: number; __dySlowQueryCheckedAt?: number }
+
+function syncSlowQueryThreshold() {
+  // 直接读 config 模块内存缓存（非 async，不产生额外 DB 查询；缓存由 ensureConfigLoaded 维护）
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { CONFIG_DEFAULTS } = require("./config") as { CONFIG_DEFAULTS: Record<string, { value: unknown }> }
+    const g = globalThis as unknown as { __dockyardConfig?: Map<string, { value: unknown }> }
+    const hit = g.__dockyardConfig?.get("log.slowQueryMs")
+    const raw = hit ? Number(hit.value) : Number(CONFIG_DEFAULTS["log.slowQueryMs"]?.value ?? 1000)
+    slowQueryDb.__dySlowQueryThresholdMs = Number.isFinite(raw) ? raw : 1000
+  } catch {
+    slowQueryDb.__dySlowQueryThresholdMs = 1000
+  }
+  slowQueryDb.__dySlowQueryCheckedAt = Date.now()
+}
+
+// 包装：全应用统一走慢查询观测版客户端（类型保持 PrismaClient 兼容，方法面完全一致）
+const dbWithSlowQuery = (baseClient as unknown as any).$extends({
+  query: {
+    $allModels: {
+      $allOperations: async ({ operation, model, query, args }: { operation: string; model: string | undefined; query: (args: unknown) => Promise<unknown>; args: unknown }) => {
+        if (!slowQueryDb.__dySlowQueryCheckedAt || Date.now() - slowQueryDb.__dySlowQueryCheckedAt > 60_000) syncSlowQueryThreshold()
+        const threshold = slowQueryDb.__dySlowQueryThresholdMs ?? 1000
+        if (threshold <= 0) return query(args)
+        const start = Date.now()
+        try {
+          return await query(args)
+        } finally {
+          const ms = Date.now() - start
+          if (ms > threshold) {
+            console.warn(`[slow-query] ${model ?? "?"}.${operation} took ${ms}ms (threshold ${threshold}ms)`)
+          }
+        }
+      },
+    },
+  },
+})
+
+// 对外导出：慢查询观测版（cast 回 PrismaClient 类型 —— 全部既有调用点零改动）
+export const dbExtended = dbWithSlowQuery
+
+if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = baseClient
+
+// 对外统一导出（慢查询观测版 = 全部业务代码实际使用的客户端）
+export const db = dbWithSlowQuery as unknown as PrismaClient

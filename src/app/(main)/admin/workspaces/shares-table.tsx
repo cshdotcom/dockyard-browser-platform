@@ -9,7 +9,7 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Share2, Ban, Undo2, Trash2, ExternalLink, UserX, Users2, Check } from "lucide-react"
+import { Loader2, Share2, Ban, Undo2, Trash2, ExternalLink, UserX, Users2, Check, X, CalendarRange } from "lucide-react"
 import { DataTable, type Column } from "@/components/shared/data-table"
 import { ConfirmDialog } from "@/components/shared/confirm"
 import { Button } from "@/components/ui/button"
@@ -265,6 +265,34 @@ export function SharesTable(props: Props) {
             if (e.key === "Enter") pushQuery({ page: "1", keyword: (e.target as HTMLInputElement).value || undefined })
           }}
         />
+        {/* 23-a：共享创建时间范围筛选（起/止；onChange 推 URL 参数并重置页码；有值时可一键清空） */}
+        <div className="flex items-center gap-1.5" title="按共享创建时间范围筛选">
+          <CalendarRange className="h-3.5 w-3.5 text-muted-foreground" />
+          <Input
+            type="date"
+            value={filters.shareFrom || ""}
+            onChange={(e) => pushQuery({ page: "1", shareFrom: e.target.value || undefined })}
+            className="w-36"
+            aria-label="创建时间起（YYYY-MM-DD）"
+          />
+          <span className="text-xs text-muted-foreground">至</span>
+          <Input
+            type="date"
+            value={filters.shareTo || ""}
+            onChange={(e) => pushQuery({ page: "1", shareTo: e.target.value || undefined })}
+            className="w-36"
+            aria-label="创建时间止（YYYY-MM-DD）"
+          />
+          {(filters.shareFrom || filters.shareTo) && (
+            <Button
+              variant="ghost" size="sm" className="h-8 px-2 text-xs"
+              onClick={() => pushQuery({ page: "1", shareFrom: undefined, shareTo: undefined })}
+              title="清空创建时间筛选"
+            >
+              <X className="h-3.5 w-3.5" /> 清空
+            </Button>
+          )}
+        </div>
         <div className="flex items-center gap-1.5 ml-auto">
           <Button variant="outline" size="sm" onClick={() => setEvictOpen("USER")} title="撤销某个用户作为接收者收到的全部生效共享">
             <UserX className="h-3.5 w-3.5 mr-1" /> 按用户清退

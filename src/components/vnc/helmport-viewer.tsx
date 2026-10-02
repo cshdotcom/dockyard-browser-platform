@@ -178,12 +178,20 @@ function invalidateBridgeChannel() {
   }
 }
 
-export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) {
+export interface HelmPortServerPolicy {
+  defaultMode: "auto" | "mouse" | "touch" // 服务端默认输入模式（workspace.vncDefaultMode）
+  forceMode: "" | "mouse" | "touch" // 服务端强制输入模式（workspace.vncForceMode；空=不强制）
+  watermark: boolean // 服务端水印默认（workspace.vncWatermark）
+  autoQuality: boolean // 服务端自适应画质（workspace.vncAutoQuality；false=手动画质）
+}
+
+export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPortWorkspace; serverPolicy?: HelmPortServerPolicy }) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
   const stageRef = React.useRef<HTMLDivElement | null>(null)
   const rfbRef = React.useRef<HelmPortRfb | null>(null)
   const statsRef = React.useRef({ frameTimes: [] as number[], bytesIn: 0, bytesOut: 0, lastMsgAt: 0 })
   const retryRef = React.useRef({ count: 0, timer: null as ReturnType<typeof setTimeout> | null, manual: false })
+  const connectStartRef = React.useRef(Date.now()) // r23：建连起点（自适应画质 RTT 样本）
   const phaseRef = React.useRef<Phase>("idle")
   const buttonMaskRef = React.useRef(0)
   const touchRef = React.useRef<{ x: number; y: number; moved: boolean; timer: ReturnType<typeof setTimeout> | null; longFired: boolean } | null>(null)
@@ -226,10 +234,14 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
   const canOperate = !readonly
 
   // ---- 会话偏好持久化（本地浏览器，不影响其他接入端）----
+  // r23：服务端全局策略作为基线（workspace.vncDefaultMode/vncForceMode/vncWatermark/vncAutoQuality 真实生效）：
+  //   默认值 = 服务端策略；本地偏好仅在服务端未强制时生效；强制项直接锁定
+  const policy = serverPolicy
+  const forcedMode = policy?.forceMode === "mouse" || policy?.forceMode === "touch" ? policy.forceMode : null
   const [quality, setQuality] = React.useState("mid")
   const [scaleFit, setScaleFit] = React.useState(true)
-  const [watermark, setWatermark] = React.useState(true)
-  const [inputMode, setInputMode] = React.useState<"mouse" | "touch">("mouse")
+  const [watermark, setWatermark] = React.useState(policy ? policy.watermark : true)
+  const [inputMode, setInputMode] = React.useState<"mouse" | "touch">(policy?.defaultMode === "mouse" ? "mouse" : policy?.defaultMode === "touch" ? "touch" : "mouse")
 
   const setPhase = (p: Phase) => {
     phaseRef.current = p
@@ -238,15 +250,28 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
 
   React.useEffect(() => {
     try {
-      const savedQ = localStorage.getItem(`hp-quality-${workspace.id}`)
-      if (savedQ && QUALITY_MAP[savedQ]) setQuality(savedQ)
+      // r23：服务端自适应画质（workspace.vncAutoQuality）：开启时忽略本地保存值，
+      // 连接建立后按首个 RTT 样本自动选择（>150ms=low，50-150ms=mid，<50ms=high）
+      if (policy?.autoQuality) {
+        setQuality("mid") // 基线，连接后按 RTT 校正
+      } else {
+        const savedQ = localStorage.getItem(`hp-quality-${workspace.id}`)
+        if (savedQ && QUALITY_MAP[savedQ]) setQuality(savedQ)
+      }
       const savedScale = localStorage.getItem(`hp-scale-${workspace.id}`)
       if (savedScale === "fit" || savedScale === "1:1") setScaleFit(savedScale === "fit")
-      const savedWm = localStorage.getItem(`hp-wm-${workspace.id}`)
-      if (savedWm === "0") setWatermark(false)
-      const savedMode = localStorage.getItem(`vnc-mode-${workspace.id}`)
-      if (savedMode === "mouse" || savedMode === "touch") setInputMode(savedMode)
-      else if ("ontouchstart" in window || navigator.maxTouchPoints > 0) setInputMode("touch")
+      if (!policy || policy.watermark) {
+        const savedWm = localStorage.getItem(`hp-wm-${workspace.id}`)
+        if (savedWm === "0") setWatermark(false)
+      }
+      if (forcedMode) {
+        setInputMode(forcedMode) // 服务端强制输入模式：本地偏好失效
+      } else {
+        const savedMode = localStorage.getItem(`vnc-mode-${workspace.id}`)
+        if (savedMode === "mouse" || savedMode === "touch") setInputMode(savedMode)
+        else if (policy?.defaultMode && policy.defaultMode !== "auto") setInputMode(policy.defaultMode)
+        else if ("ontouchstart" in window || navigator.maxTouchPoints > 0) setInputMode("touch")
+      }
       const savedSide = localStorage.getItem("hp-dock-side")
       if (savedSide === "left" || savedSide === "right") setDockSide(savedSide)
       const savedLang = localStorage.getItem(`hp-ime-lang-${workspace.id}`)
@@ -325,6 +350,7 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
 
   // ---- 建立连接：取票 → 构造经统一网关的 WS → 自研 RFB 客户端接管 ----
   const connect = React.useCallback(async () => {
+    connectStartRef.current = Date.now() // r23：建连起点（自适应画质 RTT 样本）
     if (phaseRef.current === "connecting" || phaseRef.current === "live") return
     if (!canvasRef.current) return
     setPhase("connecting")
@@ -386,6 +412,14 @@ export function HelmPortViewer({ workspace }: { workspace: HelmPortWorkspace }) 
           setPhase("live")
           appliedPresetRef.current = null
           sessionLimitRef.current.connectedAt = Date.now()
+          // r23：自适应画质（workspace.vncAutoQuality）：建连耗时作为 RTT 样本 → 自动档位
+          if (policy?.autoQuality) {
+            const rttMs = Date.now() - connectStartRef.current
+            if (Number.isFinite(rttMs)) {
+              const pick = rttMs > 6000 ? "low" : rttMs > 2500 ? "mid" : "high"
+              setQuality(pick)
+            }
+          }
           // 连接后聚焦输入法捕获框（IME 通道就绪）
           try { imeInputRef.current?.focus({ preventScroll: true }) } catch { /* noop */ }
         },
