@@ -146,6 +146,12 @@ function logsOf(workspaceId: string) {
   }
   return entry
 }
+
+// 网络事件缓冲快照（HAR 组装数据源：网关缓存的 CDP Network 域事件）
+export function networkLogSnapshot(workspaceId: string): Array<{ ts: number; level: string; text: string; source: string }> {
+  const logs = logsOf(workspaceId)
+  return [...logs.network]
+}
 function pushLog(workspaceId: string, kind: "console" | "network", level: string, text: string, source = "cdp") {
   const logs = logsOf(workspaceId)
   const arr = kind === "console" ? logs.console : logs.network

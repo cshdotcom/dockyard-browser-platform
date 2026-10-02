@@ -47,20 +47,31 @@ export default async function AdminAnnouncementsPage({
   const userMap = new Map<string, string>(users.map((u): [string, string] => [u.id, u.username]))
   const creatorMap = new Map<string, string>(creators.map((c): [string, string] => [c.id, c.username]))
 
-  const list: AnnouncementRow[] = rows.map((a) => ({
-    id: a.id,
-    title: a.title,
-    content: a.content,
-    type: a.type,
-    groupId: a.groupId,
-    groupName: a.groupId ? groupMap.get(a.groupId) || a.groupId : null,
-    userId: a.userId,
-    targetUsername: a.userId ? userMap.get(a.userId) || a.userId : null,
-    displayType: a.displayType,
-    enabled: a.enabled,
-    creatorName: a.createdByUserId ? creatorMap.get(a.createdByUserId) || a.createdByUserId : "系统",
-    createdAt: fmtDate(a.createdAt),
-  }))
+  const list: AnnouncementRow[] = rows.map((a) => {
+    // 多选发布通道解析（旧数据无 displayTypes → 回退单值）
+    let displayTypes: string[] = []
+    try {
+      const parsed = JSON.parse(a.displayTypes || "[]")
+      if (Array.isArray(parsed)) displayTypes = parsed.filter((x) => typeof x === "string")
+    } catch { /* ignore */ }
+    return {
+      id: a.id,
+      title: a.title,
+      content: a.content,
+      type: a.type,
+      groupId: a.groupId,
+      groupName: a.groupId ? groupMap.get(a.groupId) || a.groupId : null,
+      userId: a.userId,
+      targetUsername: a.userId ? userMap.get(a.userId) || a.userId : null,
+      displayType: a.displayType,
+      displayTypes,
+      notifyInbox: !!a.notifyInbox,
+      notifiedAt: a.notifiedAt ? fmtDate(a.notifiedAt) : null,
+      enabled: a.enabled,
+      creatorName: a.createdByUserId ? creatorMap.get(a.createdByUserId) || a.createdByUserId : "系统",
+      createdAt: fmtDate(a.createdAt),
+    }
+  })
 
   // 表单选择器数据：组选项 + 用户选项（USER 类型选择器搜索用）
   const [groupOptions, userOptions] = await Promise.all([
@@ -73,7 +84,7 @@ export default async function AdminAnnouncementsPage({
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">公告管理</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          全站 / 用户组 / 定向用户公告：弹窗、跑马灯、强制阅读三种展示方式，支持实时预览
+          Markdown/HTML 富文本公告：弹窗、跑马灯、强制阅读三种展示方式可多选组合，站内信（通知铃）可叠加或单独发送
         </p>
       </div>
 
@@ -81,7 +92,7 @@ export default async function AdminAnnouncementsPage({
         <StatCard title="公告总数" value={totalCount} sub={`当前筛选 ${total} 条`} icon={<Megaphone className="h-4 w-4" />} />
         <StatCard title="启用中" value={enabledCount} sub={`${totalCount - enabledCount} 条已停用`} icon={<ToggleRight className="h-4 w-4" />} tone="success" />
         <StatCard title="全站公告" value={globalCount} sub="GLOBAL 类型" icon={<Globe2 className="h-4 w-4" />} />
-        <StatCard title="展示方式" value="3 种" sub="弹窗 / 跑马灯 / 强制阅读" icon={<Eye className="h-4 w-4" />} />
+        <StatCard title="发布通道" value="4 通道" sub="弹窗 / 跑马灯 / 强制阅读 / 站内信" icon={<Eye className="h-4 w-4" />} />
       </div>
 
       <AnnouncementsTable

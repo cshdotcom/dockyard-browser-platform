@@ -58,13 +58,14 @@ interface HarRow { id: string; size: string; createdAt: string }
 interface RunLogRow { id: string; status: string; log: string; startedAt: string }
 
 export function WorkspaceDetail({
-  workspace, shares, scripts, harRecords, runLogs,
+  workspace, shares, scripts, harRecords, runLogs, publicCdpEndpoint,
 }: {
   workspace: WorkspaceDetailData
   shares: ShareRow[]
   scripts: ScriptRow[]
   harRecords: HarRow[]
   runLogs: RunLogRow[]
+  publicCdpEndpoint?: string
 }) {
   const router = useRouter()
   const [busy, setBusy] = React.useState<string | null>(null)
@@ -211,7 +212,7 @@ export function WorkspaceDetail({
         )}
         {!isVnc && (
           <TabsContent value="cdp" className="mt-4">
-            <CdpPanel workspace={workspace} canOperate={canOperate} />
+            <CdpPanel workspace={workspace} canOperate={canOperate} publicCdpEndpoint={publicCdpEndpoint} />
           </TabsContent>
         )}
         <TabsContent value="network" className="mt-4 space-y-4">
@@ -363,7 +364,10 @@ function IsolationPanel({ hardening, containerRef }: { hardening: Record<string,
       ok: h.oomHardKill !== false,
       icon: <Gauge className="h-4 w-4" />,
       title: "资源硬限制",
-      desc: `CPU ${String(h.cpuLimit ?? "-")} 核 / 内存 ${String(h.memLimitMb ?? "-")}MB / Pids ${String(h.pidsLimit ?? "-")}，超限 OOM 硬终止`,
+      desc:
+        (h as { pidsLimitMode?: string }).pidsLimitMode === "skipped-shared-uid" || h.pidsLimit === 0
+          ? `CPU ${String(h.cpuLimit ?? "-")} 核 / 内存 ${String(h.memLimitMb ?? "-")}MB（同用户模式：进程数上限已降级跳过，内存上限兜底）`
+          : `CPU ${String(h.cpuLimit ?? "-")} 核 / 内存 ${String(h.memLimitMb ?? "-")}MB / Pids ${String(h.pidsLimit ?? "-")}（专用用户 prlimit-uid），超限 OOM 硬终止`,
     },
     {
       ok: h.allowInternalNetwork !== true,
@@ -436,7 +440,7 @@ function IsolationPanel({ hardening, containerRef }: { hardening: Record<string,
   )
 }
 // ================= CDP 控制面板 =================
-function CdpPanel({ workspace, canOperate }: { workspace: WorkspaceDetailData; canOperate: boolean }) {
+function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: WorkspaceDetailData; canOperate: boolean; publicCdpEndpoint?: string }) {
   const [throttle, setThrottle] = React.useState({ download: 0, upload: 0, latency: 0 })
   const [domain, setDomain] = React.useState("")
   const [busy, setBusy] = React.useState(false)
@@ -468,12 +472,19 @@ function CdpPanel({ workspace, canOperate }: { workspace: WorkspaceDetailData; c
           <CardDescription>所有 CDP 指令经平台网关 Route Handler 转发（限速+黑名单拦截），不直连底层 Chrome</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
+          {publicCdpEndpoint && (
+            <div className="rounded-md border border-teal-200 bg-teal-50 dark:bg-teal-950/30 p-2.5">
+              <div className="text-xs text-muted-foreground mb-1">公网网关端点（外部工具接入用）</div>
+              <code className="text-xs font-mono break-all">{publicCdpEndpoint}</code>
+              <p className="text-[11px] text-muted-foreground mt-1">内网穿透/域名部署场景：Puppeteer/Playwright/自定义脚本经此端点鉴权转发，无需访问内部网络</p>
+            </div>
+          )}
           <div className="flex items-center justify-between rounded-md border p-2.5">
             <span className="text-muted-foreground">Steel 会话ID</span>
             <code className="text-xs font-mono">{workspace.steelSessionId ?? "-"}</code>
           </div>
           <div className="flex items-center justify-between rounded-md border p-2.5">
-            <span className="text-muted-foreground">CDP 端点</span>
+            <span className="text-muted-foreground">内部 CDP 端点</span>
             <code className="text-xs font-mono">{workspace.cdpUrl ?? "-"}</code>
           </div>
           <div className="flex items-center justify-between rounded-md border p-2.5">

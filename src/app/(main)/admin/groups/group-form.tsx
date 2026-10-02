@@ -105,6 +105,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
   const [qSessions, setQSessions] = React.useState(20)
   const [qNovnc, setQNovnc] = React.useState(8)
   const [qDisk, setQDisk] = React.useState(4096)
+  const [qBandwidth, setQBandwidth] = React.useState(0)
   const [reservedEnabled, setReservedEnabled] = React.useState(false)
   const [rSessions, setRSessions] = React.useState(2)
   const [rNovnc, setRNovnc] = React.useState(1)
@@ -129,6 +130,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
         setQSessions(q.sessions ?? 20)
         setQNovnc(q.novncSessions ?? 8)
         setQDisk(q.diskMb ?? 4096)
+        setQBandwidth(q.proxyBandwidthMb ?? 0)
       } else {
         setQuotaEnabled(false)
       }
@@ -183,7 +185,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       allowSecureLocationAccess,
       vncSessionMaxMinutes: vncLimitEnabled ? vncLimitMinutes : 0,
       tags,
-      quota: quotaEnabled ? { sessions: qSessions, novncSessions: qNovnc, diskMb: qDisk } : undefined,
+      quota: quotaEnabled ? { sessions: qSessions, novncSessions: qNovnc, diskMb: qDisk, proxyBandwidthMb: qBandwidth } : undefined,
       reservedQuota: reservedEnabled ? { sessions: rSessions, novncSessions: rNovnc } : undefined,
     }
 
@@ -330,6 +332,10 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
               <div className="space-y-1.5">
                 <Label className="text-xs">磁盘</Label>
                 <PrecisionInput value={qDisk} onChange={setQDisk} min={0} max={10000000} suffix="MB" />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">代理带宽</Label>
+                <PrecisionInput value={qBandwidth} onChange={setQBandwidth} min={0} max={10000000} suffix="MB" />
               </div>
             </div>
           )}

@@ -80,8 +80,8 @@ export function LoginForm({ from, allowRegister }: { from?: string; allowRegiste
       }
       toast.success("登录成功")
       const dest = searchParams.get("from") || from || "/dashboard"
+      // push+refresh 同帧竞态会取消导航（历史 Bug：登录成功却停留登录页）；push 自带 RSC 拉取
       router.push(dest)
-      router.refresh()
     },
     [router, searchParams, from]
   )

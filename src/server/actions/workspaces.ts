@@ -546,23 +546,45 @@ export async function exportWorkspaceConfigAction(input: unknown): Promise<Actio
   })
 }
 
-// ---- 生成HAR（网络记录导出）----
-export async function exportHarAction(input: unknown): Promise<ActionResult<{ harAvailable: boolean; recordId?: string }>> {
+// ---- 生成HAR（网络记录导出：网关 CDP Network 缓存 → 标准 HAR 1.2）----
+export async function exportHarAction(input: unknown): Promise<ActionResult<{ harAvailable: boolean; recordId?: string; entries?: number }>> {
   return actionHandler(async () => {
     const ctx = await requireAuth()
     const { id } = zodValidate(z.object({ id: z.string() }), input)
     const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
     if (!ws) throw new Error("工作区不存在")
     if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作")
+    if (!rateLimit(`harexport:${ctx.userId}`, 6, 60_000).allowed) throw new Error("HAR 导出过于频繁，请稍后再试")
+
+    // 数据源：CDP 网关网络事件环形缓冲（每工作区最近 300 条请求/响应行）
+    const { networkLogSnapshot } = await import("@/lib/external/cdp-control")
+    const { parseNetworkLines, buildHarDocument } = await import("@/lib/har-builder")
+    const drafts = parseNetworkLines(networkLogSnapshot(id))
+
+    // 有实时缓冲 → 每次导出生成新记录（拿到最新网络流量）；
+    // 无缓冲（无 CDP 流量/会话未活跃）→ 复用最近一条持久化记录
+    if (drafts.length > 0) {
+      const { doc, sizeBytes } = buildHarDocument(drafts, { workspaceId: ws.id, workspaceName: ws.name, uuid: ws.uuid, mode: ws.mode })
+      const rec = await db.harRecord.create({
+        data: { workspaceId: id, userId: ctx.userId, harJson: JSON.stringify(doc), sizeBytes },
+      })
+      await writeAudit({
+        operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "HAR_EXPORT",
+        resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
+        after: { entries: drafts.length, sizeBytes },
+      })
+      return { harAvailable: true, recordId: rec.id, entries: drafts.length }
+    }
+
     const existing = await db.harRecord.findFirst({ where: { workspaceId: id, deletedAt: null }, orderBy: { createdAt: "desc" } })
     if (existing) {
       await writeAudit({
         operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "HAR_EXPORT",
         resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
       })
-      return { harAvailable: true, recordId: existing.id }
+      return { harAvailable: true, recordId: existing.id, entries: JSON.parse(existing.harJson || "{}")?.log?.entries?.length ?? 0 }
     }
-    // 无持久化HAR时：创建记录（演示环境无真实CDP流量；生产由网关CDP事件缓存填充）
+    // 无持久化HAR时：创建空记录（entries 由后续 CDP 流量填充；下载时如缓冲有数据会实时补充）
     const harJson = JSON.stringify({
       log: {
         version: "1.2",
@@ -577,7 +599,7 @@ export async function exportHarAction(input: unknown): Promise<ActionResult<{ ha
       operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "HAR_EXPORT",
       resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
     })
-    return { harAvailable: true, recordId: rec.id }
+    return { harAvailable: true, recordId: rec.id, entries: 0 }
   })
 }
 

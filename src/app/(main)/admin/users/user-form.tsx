@@ -61,6 +61,7 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
   const [qSessions, setQSessions] = React.useState(10)
   const [qNovnc, setQNovnc] = React.useState(4)
   const [qDisk, setQDisk] = React.useState(2048)
+  const [qBandwidth, setQBandwidth] = React.useState(0)
 
   React.useEffect(() => {
     if (!open) return
@@ -78,6 +79,7 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
         setQSessions(quota.sessions ?? 10)
         setQNovnc(quota.novncSessions ?? 4)
         setQDisk(quota.diskMb ?? 2048)
+        setQBandwidth(quota.proxyBandwidthMb ?? 0)
       } else {
         setQuotaEnabled(false)
       }
@@ -134,6 +136,7 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
             sessions: qSessions,
             novncSessions: qNovnc,
             diskMb: qDisk,
+            proxyBandwidthMb: qBandwidth,
           }
         : undefined
 
@@ -272,7 +275,7 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
             <Switch checked={quotaEnabled} onCheckedChange={setQuotaEnabled} />
           </div>
           {quotaEnabled && (
-            <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
+            <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
               <div className="space-y-1.5">
                 <Label className="text-xs">并发会话配额</Label>
                 <PrecisionInput value={qSessions} onChange={setQSessions} min={0} max={100000} suffix="个" />
@@ -284,6 +287,10 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
               <div className="space-y-1.5">
                 <Label className="text-xs">磁盘配额</Label>
                 <PrecisionInput value={qDisk} onChange={setQDisk} min={0} max={10000000} suffix="MB" />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">代理带宽配额</Label>
+                <PrecisionInput value={qBandwidth} onChange={setQBandwidth} min={0} max={10000000} suffix="MB" />
               </div>
             </div>
           )}

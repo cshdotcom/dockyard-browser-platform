@@ -181,6 +181,9 @@ export const sessionCookieSecure: boolean =
       : AUTH_PUBLIC_URL.startsWith("https://")
 
 export const authOptions: NextAuthOptions = {
+  // 内网穿透/反向代理/域名部署：信任请求 Host 头（配合 PUBLIC_BASE_URL / NEXTAUTH_URL 使用）
+  // 未开启时 NextAuth 在生产环境仅认 NEXTAUTH_URL，反代 Host 与其不一致会直接拒绝回调
+  trustHost: true,
   session: {
     strategy: "jwt",
     maxAge: 30 * 24 * 3600, // 载体有效期；实际会话时长由 LoginSession.expiresAt 强制约束

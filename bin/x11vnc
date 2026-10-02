@@ -1,0 +1,4 @@
+#!/bin/sh
+# x11vnc 用户目录包装（无 root 环境）：补齐解压依赖库路径
+export LD_LIBRARY_PATH="/home/z/my-project/bin/ext/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec /home/z/my-project/bin/ext/usr/bin/x11vnc "$@"

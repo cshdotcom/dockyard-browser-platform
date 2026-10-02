@@ -8,6 +8,7 @@ import { toast } from "sonner"
 import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
+import { UserAvatar } from "@/components/shared/user-avatar"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -37,6 +38,7 @@ export interface AdminUserRow {
   username: string
   email: string | null
   displayName: string | null
+  hasAvatar: boolean
   role: string
   enabled: boolean
   frozen: boolean
@@ -209,12 +211,15 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
       title: "用户",
       sortable: true,
       render: (row: AdminUserRow) => (
-        <div className="min-w-0">
-          <p className="font-medium truncate" title={row.displayName || row.username}>
-            {row.username}
-            {row.displayName ? <span className="ml-1.5 text-xs text-muted-foreground">{row.displayName}</span> : null}
-          </p>
-          <p className="text-xs text-muted-foreground truncate" title={row.email || ""}>{row.email || "未绑定邮箱"}</p>
+        <div className="flex items-center gap-2.5 min-w-0">
+          <UserAvatar userId={row.hasAvatar ? row.id : null} name={row.displayName || row.username} size={34} />
+          <div className="min-w-0">
+            <p className="font-medium truncate" title={row.displayName || row.username}>
+              {row.username}
+              {row.displayName ? <span className="ml-1.5 text-xs text-muted-foreground">{row.displayName}</span> : null}
+            </p>
+            <p className="text-xs text-muted-foreground truncate" title={row.email || ""}>{row.email || "未绑定邮箱"}</p>
+          </div>
         </div>
       ),
     },

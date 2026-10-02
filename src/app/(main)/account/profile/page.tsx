@@ -9,6 +9,7 @@ import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
 import { Globe, HardDrive, Camera, KeyRound, UserCog } from "lucide-react"
 import { ProfileForm } from "./profile-form"
+import { AvatarCard } from "./avatar-card"
 
 // 个人资料：显示名 / 界面偏好（主题、每页条数）+ 个人配额仪表盘 + 个人统计
 export const metadata = { title: "个人资料" }
@@ -97,6 +98,13 @@ export default async function ProfilePage() {
         <StatCard title="快照数量" value={snapshotCount} sub="浏览器配置快照" icon={<Camera className="h-4 w-4" />} />
         <StatCard title="API 令牌数" value={tokenCount} sub="未删除的有效令牌" icon={<KeyRound className="h-4 w-4" />} />
       </div>
+
+      {/* 头像上传（独立空间存储） */}
+      <AvatarCard
+        userId={ctx.userId}
+        name={user.displayName || user.username}
+        hasAvatar={!!user.avatarPath}
+      />
 
       {/* 资料表单 */}
       <ProfileForm

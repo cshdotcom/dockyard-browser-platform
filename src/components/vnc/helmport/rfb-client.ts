@@ -258,12 +258,14 @@ export class HelmPortRfb {
         }
 
         // 请求我方像素格式：32bpp LE truecolor（R16 G8 B0）
+        // 注意：字节序标志位（offset 6）0=小端 —— 服务端按 LE 存储像素值 (R<<16)|(G<<8)|B，
+        // 线上字节序为 [B, G, R, pad]；真实 x11vnc 与桥演示引擎均按此输出（blitRaw 同序映射）
         const setFmt = new Uint8Array(20)
         setFmt[0] = 0 // SetPixelFormat
         // bytes 4..19：Pixel Format
         setFmt[4] = 32
         setFmt[5] = 24
-        setFmt[6] = 1 // little endian
+        setFmt[6] = 0 // 小端（big-endian-flag=0；历史 Bug：误设 1 导致 R 通道恒为 pad 字节 0）
         setFmt[7] = 1 // true color
         set16(setFmt, 8, 255)
         set16(setFmt, 10, 255)
@@ -365,20 +367,26 @@ export class HelmPortRfb {
               })
             }
             off += payloadLen
-            // 布局变更：w/h 为帧缓冲断尺寸，x 为请求结果码
-            this.fbW = w
-            this.fbH = h
-            this.canvas.width = w
-            this.canvas.height = h
-            this.ctx = this.canvas.getContext("2d", { alpha: false })
-            if (this.ctx) {
-              this.ctx.fillStyle = "#070b0e"
-              this.ctx.fillRect(0, 0, w, h)
+            // 【历史 Bug 修复】真实 x11vnc 对每个全帧请求都会附带一条 EDS 矩形（尺寸未变、结果码 0）。
+            // 旧实现无条件重设 canvas 尺寸（任何 width 赋值都会清空画布！）+ 深色回填 + 再发全帧请求
+            // → 形成「帧绘制 → EDS 擦黑 → 重请求 → 新帧」的无限擦除循环，画布永远显示深色填充。
+            // 修正：仅当帧缓冲尺寸或屏布局真实变化时才重设画布/回填/请求全量重绘。
+            const sizeChanged = w !== this.fbW || h !== this.fbH || JSON.stringify(screens) !== JSON.stringify(this.lastDesktopSize?.screens || null)
+            if (sizeChanged) {
+              this.fbW = w
+              this.fbH = h
+              this.canvas.width = w
+              this.canvas.height = h
+              this.ctx = this.canvas.getContext("2d", { alpha: false })
+              if (this.ctx) {
+                this.ctx.fillStyle = "#070b0e"
+                this.ctx.fillRect(0, 0, w, h)
+              }
+              // 尺寸变更后请求全量重绘（仅在真实变更时）
+              this.requestFramebufferUpdate(false)
             }
             this.lastDesktopSize = { width: w, height: h, screens, resultCode: x }
             this.opts.onDesktopSize?.(this.lastDesktopSize)
-            // 尺寸变更后请求全量重绘
-            this.requestFramebufferUpdate(false)
           } else if (enc === ENC_CURSOR) {
             const pixels = w * h * 4
             const maskBytes = Math.ceil(w / 8) * h
@@ -445,8 +453,19 @@ export class HelmPortRfb {
   private blitRaw(x: number, y: number, w: number, h: number, pixels: Uint8Array) {
     if (!this.ctx) return
     const img = this.ctx.createImageData(w, h)
-    // 我方请求格式：LE 32bpp BGRA 字节序（B,G,R,0）
-    img.data.set(pixels.subarray(0, w * h * 4))
+    const d = img.data
+    // 我方请求格式：LE 32bpp truecolor（R16 G8 B0）→ 线上字节序 [B, G, R, pad]
+    // 【历史 Bug 修复】旧实现直接 img.data.set(pixels)：
+    //   ① pad 字节落入 alpha 通道（碰巧被 alpha:false 画布忽略）
+    //   ② R/B 通道错位（big-endian 请求下 R 通道恒为 pad=0 → 全画面偏暗绿）
+    // 演示引擎（桥）与真实 x11vnc 均按 [B,G,R,0] 输出 —— 统一显式映射
+    for (let i = 0, n = w * h; i < n; i++) {
+      const o = i * 4
+      d[o] = pixels[o + 2] // R ← byte2
+      d[o + 1] = pixels[o + 1] // G ← byte1
+      d[o + 2] = pixels[o] // B ← byte0
+      d[o + 3] = 255 // A 不透明
+    }
     this.ctx.putImageData(img, x, y)
   }
 
@@ -465,7 +484,14 @@ export class HelmPortRfb {
       out.height = h
       const ctx = out.getContext("2d")!
       const img = ctx.createImageData(w, h)
-      img.data.set(pixels)
+      // 光标像素同帧格式 [B,G,R,pad] → 显式通道映射（与 blitRaw 一致）
+      for (let i = 0, n = w * h; i < n; i++) {
+        const o = i * 4
+        img.data[o] = pixels[o + 2]
+        img.data[o + 1] = pixels[o + 1]
+        img.data[o + 2] = pixels[o]
+        img.data[o + 3] = 255
+      }
       // 掩码：1 = 透明
       for (let row = 0; row < h; row++) {
         for (let col = 0; col < w; col++) {

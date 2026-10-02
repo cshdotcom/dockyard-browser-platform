@@ -172,6 +172,14 @@ docker run -d --name dockyard --network host \
 > 部署可选环境变量：`BUILTIN_CRON`（默认 1，镜像内置定时调度器，每 `CRON_INTERVAL_SEC` 秒（默认 300）触发一次引擎任务，可与外部 cron 并存）；`DOCKER_API_URL` 指向宿主 Docker Engine 时即可编排真实硬隔离浏览器沙箱。
 >
 > **会话 Cookie 安全属性（登录成功却登不进的处理）**：`COOKIE_SECURE` 缺省 `auto` —— 仅当 `AUTH_PUBLIC_URL` / `AUTH_URL` 为 `https://` 时启用 `Secure`；通过 `http://IP:端口` 明文访问时自动关闭，否则浏览器会丢弃带 `Secure` 的 Cookie（表现：提示登录成功但跳转被弹回登录页）。HTTPS 反代部署时可设 `COOKIE_SECURE=1` 强制开启。
+>
+> **公开域名配置（内网穿透 / 反向代理 / 域名部署）**：`PUBLIC_BASE_URL`（或 `APP_PUBLIC_URL` / `AUTH_PUBLIC_URL` / `AUTH_URL` / `NEXTAUTH_URL` 任一）设置为平台对外可达地址（如 `https://workspace.example.cn`）后：
+> - 登录回调/重定向固定使用该域名（NextAuth `trustHost` 已启用，兼容任意 Host 头反代）
+> - 工作区详情页展示**公网 CDP 网关端点**（`<域名>/api/cdp/command`）——外部工具（Puppeteer/Playwright/脚本）经此端点鉴权转发，无需触达内部网络；内部 `ws://steel-internal/...` 端点仅作运维参考
+> - 未配置时自动使用请求 Host（网关同源转发场景无需任何配置）
+> ```bash
+> docker run -e PUBLIC_BASE_URL=https://workspace.example.cn ... ghcr.io/cshdotcom/dockyard-browser-platform
+> ```
 
 ### 外部服务对接（生产环境）
 | 环境变量 | 说明 | 缺省行为 |

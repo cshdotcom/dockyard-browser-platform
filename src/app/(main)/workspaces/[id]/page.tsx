@@ -2,6 +2,7 @@ import { notFound } from "next/navigation"
 import { db } from "@/lib/db"
 import { requireAuth, userGroupIds } from "@/lib/permissions"
 import { fmtDate, fmtBytes } from "@/lib/utils-server"
+import { ENV } from "@/lib/env"
 import { WorkspaceDetail } from "./detail-tabs"
 
 export const metadata = { title: "工作区详情" }
@@ -41,6 +42,12 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
     : []
 
   const shareMap = new Map(shareTargets.map((u) => [u.id, u]))
+
+  // 公网 CDP 网关端点（PUBLIC_BASE_URL 等环境变量配置后展示，内网穿透/域名部署场景）
+  // 外部工具（Puppeteer/Playwright/自定义脚本）应使用该端点，而非内部 ws://steel-internal 地址
+  const publicCdpEndpoint = ENV.publicBaseUrl
+    ? `${ENV.publicBaseUrl}/api/cdp/command`
+    : ""
 
   // 四层生效策略（单沙箱 > 用户 > 用户组 > 全局）：详情页展示与沙箱级覆盖面板数据源
   const { resolveAccessPolicies } = await import("@/lib/domain-policy")
@@ -103,6 +110,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
       scripts={scripts.map((s) => ({ id: s.id, name: s.name, description: s.description ?? "", scope: s.scope }))}
       harRecords={harRecords.map((h) => ({ id: h.id, size: fmtBytes(h.sizeBytes), createdAt: fmtDate(h.createdAt) }))}
       runLogs={runLogs.map((l) => ({ id: l.id, status: l.status, log: l.log ?? "", startedAt: fmtDate(l.startedAt) }))}
+      publicCdpEndpoint={publicCdpEndpoint}
     />
   )
 }

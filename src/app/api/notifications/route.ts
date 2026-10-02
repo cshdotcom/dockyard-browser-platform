@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
       code: 0,
       msg: "ok",
       data: {
-        items: items.map((i) => ({ id: i.id, title: i.title, content: i.content, type: i.type, readAt: i.readAt?.toISOString() ?? null, createdAt: i.createdAt.toISOString() })),
+        items: items.map((i) => ({ id: i.id, title: i.title, content: i.content, type: i.type, link: i.link || null, readAt: i.readAt?.toISOString() ?? null, createdAt: i.createdAt.toISOString() })),
         unread,
       },
     })

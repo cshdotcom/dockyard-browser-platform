@@ -1,13 +1,17 @@
 "use client"
 
-// 公告管理交互：CRUD 弹窗（GLOBAL/GROUP/USER 范围选择器 + POPUP/MARQUEE/FORCE_VIEW 展示方式）+ 预览弹窗
+// 公告管理交互：CRUD 弹窗（GLOBAL/GROUP/USER 范围选择器 + 多选发布通道 + MD 编辑器）+ 预览弹窗
+// r15：内容 Markdown/HTML 双支持（轻量编辑器工具栏）；发布通道多选：展示方式（弹窗/跑马灯/强制阅读）
+// + 站内信（通知铃）可叠加或单独发送
 
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Eye, Loader2, Megaphone, Pencil, Plus, Search, Trash2 } from "lucide-react"
+import { BellRing, Eye, Loader2, Megaphone, Pencil, Plus, Search, Trash2 } from "lucide-react"
 import { DataTable } from "@/components/shared/data-table"
 import { ConfirmDialog } from "@/components/shared/confirm"
+import { AnnouncementContent, AnnouncementSummary, contentToPlainText } from "@/components/announcements/announcement-content"
+import { AnnouncementEditor } from "@/components/announcements/announcement-editor"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -18,7 +22,6 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
-import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 import { upsertAnnouncementAction, toggleAnnouncementAction, deleteAnnouncementAction } from "@/server/actions/announcements"
 
@@ -31,7 +34,10 @@ export interface AnnouncementRow {
   groupName: string | null
   userId: string | null
   targetUsername: string | null
-  displayType: string // POPUP | MARQUEE | FORCE_VIEW
+  displayType: string // 主展示方式（兼容字段）
+  displayTypes: string[] // 多选发布通道（含 POPUP/MARQUEE/FORCE_VIEW）
+  notifyInbox: boolean // 站内信通道
+  notifiedAt: string | null // 站内信已投递时间
   enabled: boolean
   creatorName: string
   createdAt: string
@@ -70,11 +76,16 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
   const [fType, setFType] = React.useState<"GLOBAL" | "GROUP" | "USER">("GLOBAL")
   const [fGroupId, setFGroupId] = React.useState("")
   const [fUserId, setFUserId] = React.useState("")
-  const [fDisplay, setFDisplay] = React.useState<"POPUP" | "MARQUEE" | "FORCE_VIEW">("POPUP")
+  const [fDisplays, setFDisplays] = React.useState<string[]>(["POPUP"]) // 多选展示方式
+  const [fNotifyInbox, setFNotifyInbox] = React.useState(false) // 站内信通道
   const [fEnabled, setFEnabled] = React.useState(true)
   // 用户搜索器
   const [userSearch, setUserSearch] = React.useState("")
   const [pickedUser, setPickedUser] = React.useState<{ id: string; username: string } | null>(null)
+
+  const toggleDisplay = (d: string, on: boolean) => {
+    setFDisplays((prev) => (on ? Array.from(new Set([...prev, d])) : prev.filter((x) => x !== d)))
+  }
 
   const pushQuery = (patch: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString())
@@ -92,7 +103,8 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
     setFType("GLOBAL")
     setFGroupId("")
     setFUserId("")
-    setFDisplay("POPUP")
+    setFDisplays(["POPUP"])
+    setFNotifyInbox(false)
     setFEnabled(true)
     setUserSearch("")
     setPickedUser(null)
@@ -106,7 +118,8 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
     setFType(row.type as "GLOBAL" | "GROUP" | "USER")
     setFGroupId(row.groupId || "")
     setFUserId(row.userId || "")
-    setFDisplay(row.displayType as "POPUP" | "MARQUEE" | "FORCE_VIEW")
+    setFDisplays(row.displayTypes?.length ? row.displayTypes : [row.displayType])
+    setFNotifyInbox(!!row.notifyInbox)
     setFEnabled(row.enabled)
     const u = userOptions.find((x) => x.id === row.userId)
     setPickedUser(u ? { id: u.id, username: u.username } : null)
@@ -131,6 +144,10 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
       toast.error("请搜索并选择目标用户")
       return
     }
+    if (fDisplays.length === 0 && !fNotifyInbox) {
+      toast.error("至少选择一种发布通道：展示方式（弹窗/跑马灯/强制阅读）或站内信")
+      return
+    }
     setBusy("form")
     try {
       const res = await upsertAnnouncementAction({
@@ -140,11 +157,19 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
         type: fType,
         groupId: fType === "GROUP" ? fGroupId : undefined,
         userId: fType === "USER" ? fUserId : undefined,
-        displayType: fDisplay,
+        displayTypes: fDisplays,
+        notifyInbox: fNotifyInbox,
         enabled: fEnabled,
       })
       if (res.code === 0) {
-        toast.success(editing ? "公告已更新" : "公告已创建")
+        const delivered = res.data?.inboxDelivered
+        toast.success(
+          editing
+            ? "公告已更新"
+            : fNotifyInbox
+              ? `公告已创建${delivered != null ? `，站内信已投递 ${delivered} 位用户` : ""}`
+              : "公告已创建",
+        )
         setFormOpen(false)
         router.refresh()
       } else {
@@ -235,7 +260,9 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
             render: (r) => (
               <div className="min-w-0">
                 <p className="text-sm font-medium truncate max-w-56" title={r.title}>{r.title}</p>
-                <p className="text-xs text-muted-foreground truncate max-w-56" title={r.content}>{r.content}</p>
+                <p className="text-xs text-muted-foreground truncate max-w-56" title={contentToPlainText(r.content, 200)}>
+                  <AnnouncementSummary content={r.content} maxLen={60} />
+                </p>
               </div>
             ),
           },
@@ -262,9 +289,21 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
             },
           },
           {
-            key: "displayType",
-            title: "展示方式",
-            render: (r) => <Badge variant="outline">{DISPLAY_LABEL[r.displayType] || r.displayType}</Badge>,
+            key: "channels",
+            title: "发布通道",
+            render: (r) => (
+              <div className="flex flex-wrap gap-1">
+                {(r.displayTypes?.length ? r.displayTypes : [r.displayType]).map((d) => (
+                  <Badge key={d} variant="outline" className="text-[11px]">{DISPLAY_LABEL[d] || d}</Badge>
+                ))}
+                {r.notifyInbox && (
+                  <Badge key="inbox" className="bg-violet-600 hover:bg-violet-600 text-white text-[11px]">
+                    <BellRing className="mr-0.5 h-2.5 w-2.5" />站内信
+                  </Badge>
+                )}
+                {!r.displayTypes?.length && !r.notifyInbox && <Badge variant="outline" className="text-[11px]">未设置</Badge>}
+              </div>
+            ),
           },
           {
             key: "enabled",
@@ -311,7 +350,7 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
               <Megaphone className="h-4 w-4 text-teal-600" />
               {editing ? "编辑公告" : "新建公告"}
             </DialogTitle>
-            <DialogDescription>范围类型决定投放对象；展示方式决定用户端呈现形态（可随时预览）</DialogDescription>
+            <DialogDescription>范围决定投放对象；发布通道可多选组合（含站内信）；内容支持 Markdown 与直接 HTML</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1.5">
@@ -319,8 +358,8 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
               <Input value={fTitle} onChange={(e) => setFTitle(e.target.value)} placeholder="如：平台升级维护通知" maxLength={100} />
             </div>
             <div className="space-y-1.5">
-              <Label>公告内容</Label>
-              <Textarea value={fContent} onChange={(e) => setFContent(e.target.value)} rows={5} placeholder="支持多行文本，用户端按展示方式渲染" maxLength={5000} />
+              <Label>公告内容（Markdown / HTML）</Label>
+              <AnnouncementEditor value={fContent} onChange={setFContent} rows={9} />
             </div>
             <div className="space-y-1.5">
               <Label>范围类型</Label>
@@ -398,18 +437,45 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
               </div>
             )}
             <div className="space-y-1.5">
-              <Label>展示方式</Label>
-              <RadioGroup value={fDisplay} onValueChange={(v) => setFDisplay(v as "POPUP" | "MARQUEE" | "FORCE_VIEW")} className="flex gap-4">
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <RadioGroupItem value="POPUP" /> 弹窗（POPUP）
+              <Label>发布通道（可多选组合；站内信可与其他通道叠加，也可单独发送）</Label>
+              <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                {(["POPUP", "MARQUEE", "FORCE_VIEW"] as const).map((d) => (
+                  <label
+                    key={d}
+                    className={cn(
+                      "flex cursor-pointer items-center gap-2.5 rounded-md border px-3 py-2.5 text-sm transition",
+                      fDisplays.includes(d) ? "border-teal-300 bg-teal-50/70 dark:bg-teal-950/30" : "hover:bg-muted/60",
+                    )}
+                  >
+                    <Checkbox checked={fDisplays.includes(d)} onCheckedChange={(v) => toggleDisplay(d, v === true)} />
+                    <span className="font-medium">{DISPLAY_LABEL[d]}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {d === "POPUP" ? "登录后弹窗一次" : d === "MARQUEE" ? "顶部滚动公告条" : "必须阅读确认"}
+                    </span>
+                  </label>
+                ))}
+                <label
+                  className={cn(
+                    "flex cursor-pointer items-center gap-2.5 rounded-md border px-3 py-2.5 text-sm transition",
+                    fNotifyInbox ? "border-violet-300 bg-violet-50/70 dark:bg-violet-950/30" : "hover:bg-muted/60",
+                  )}
+                >
+                  <Checkbox checked={fNotifyInbox} onCheckedChange={(v) => setFNotifyInbox(v === true)} />
+                  <span className="font-medium flex items-center gap-1">
+                    <BellRing className="h-3.5 w-3.5 text-violet-500" /> 站内信（通知铃）
+                  </span>
+                  <span className="text-xs text-muted-foreground">发送到用户消息中心；可单独发送</span>
                 </label>
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <RadioGroupItem value="MARQUEE" /> 跑马灯（MARQUEE）
-                </label>
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <RadioGroupItem value="FORCE_VIEW" /> 强制阅读（FORCE_VIEW）
-                </label>
-              </RadioGroup>
+              </div>
+              {fDisplays.length === 0 && !fNotifyInbox && (
+                <p className="text-xs text-red-600">至少选择一种发布通道（当前未选择任何通道）</p>
+              )}
+              {fDisplays.length === 0 && fNotifyInbox && (
+                <p className="text-xs text-violet-600">仅站内信：公告不会弹窗/滚动，只发送到目标用户消息中心（通知铃）</p>
+              )}
+              {editing?.notifiedAt && fNotifyInbox && (
+                <p className="text-xs text-muted-foreground">站内信已于 {editing.notifiedAt} 投递过（不会重复发送；范围变更后新增用户不补发）</p>
+              )}
             </div>
             <div className="flex items-center justify-between rounded-md border p-3">
               <div>
@@ -429,7 +495,7 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
         </DialogContent>
       </Dialog>
 
-      {/* 预览弹窗：按展示方式模拟 */}
+      {/* 预览弹窗：按展示方式模拟（内容按 MD/HTML 渲染，与用户端一致） */}
       {previewTarget && (
         <Dialog open onOpenChange={(v) => !v && setPreviewTarget(null)}>
           <DialogContent className={cn(previewTarget.displayType === "MARQUEE" ? "max-w-2xl p-0 overflow-hidden" : "max-w-lg")}>
@@ -442,8 +508,8 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
                   </DialogTitle>
                   <DialogDescription>预览：弹窗展示（用户登录后弹出一次）</DialogDescription>
                 </DialogHeader>
-                <div className="rounded-md border p-4">
-                  <p className="text-sm whitespace-pre-wrap max-h-64 overflow-y-auto">{previewTarget.content}</p>
+                <div className="rounded-md border p-4 max-h-72 overflow-y-auto">
+                  <AnnouncementContent content={previewTarget.content} />
                 </div>
                 <DialogFooter>
                   <Button onClick={() => setPreviewTarget(null)}>知道了</Button>
@@ -454,7 +520,7 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
               <>
                 <DialogHeader className="px-6 pt-6">
                   <DialogTitle>跑马灯预览</DialogTitle>
-                  <DialogDescription>预览：页面顶部滚动公告条（循环滚动）</DialogDescription>
+                  <DialogDescription>预览：页面顶部滚动公告条（循环滚动，纯文本摘要）</DialogDescription>
                 </DialogHeader>
                 <div className="px-6 pb-2">
                   <div className="overflow-hidden rounded-md border bg-muted">
@@ -462,7 +528,7 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
                       className="whitespace-nowrap py-2 text-sm"
                       style={{ animation: "dy-marquee 14s linear infinite" }}
                     >
-                      🔔 {previewTarget.title} —— {previewTarget.content}
+                      🔔 {previewTarget.title} —— <AnnouncementSummary content={previewTarget.content} maxLen={80} />
                     </div>
                   </div>
                   <style>{`@keyframes dy-marquee { 0% { transform: translateX(100%); } 100% { transform: translateX(-100%); } }`}</style>
@@ -510,13 +576,13 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
   )
 }
 
-// 强制阅读预览：勾选“我已阅读”后才能关闭
+// 强制阅读预览：勾选“我已阅读”后才能关闭（内容 MD 渲染）
 function ForceViewPreview({ row, onDone }: { row: AnnouncementRow; onDone: () => void }) {
   const [checked, setChecked] = React.useState(false)
   return (
     <div className="space-y-3">
-      <div className="rounded-md border border-red-200 bg-red-50 dark:bg-red-950/20 p-4 max-h-56 overflow-y-auto">
-        <p className="text-sm whitespace-pre-wrap">{row.content}</p>
+      <div className="rounded-md border border-red-200 bg-red-50 dark:bg-red-950/20 p-4 max-h-64 overflow-y-auto">
+        <AnnouncementContent content={row.content} />
       </div>
       <label className="flex items-center gap-2 text-sm cursor-pointer">
         <Checkbox checked={checked} onCheckedChange={(v) => setChecked(v === true)} />

@@ -18,6 +18,7 @@ const zQuota = z.object({
   sessions: zPrecision("会话配额", 0, 100000).optional(),
   novncSessions: zPrecision("NoVNC配额", 0, 100000).optional(),
   diskMb: zPrecision("磁盘配额", 0, 10000000).optional(),
+  proxyBandwidthMb: zPrecision("代理带宽配额(MB)", 0, 10000000).optional(),
 })
 
 // 获取某组的全部后代ID（防循环）
@@ -47,11 +48,12 @@ async function descendantIds(groupId: string): Promise<Set<string>> {
 
 
 // 清理配额对象（去除undefined键，规范为JSON输入）
-function cleanQuota(q: { sessions?: number; novncSessions?: number; diskMb?: number }): Record<string, number> {
+function cleanQuota(q: { sessions?: number; novncSessions?: number; diskMb?: number; proxyBandwidthMb?: number }): Record<string, number> {
   const out: Record<string, number> = {}
   if (q.sessions !== undefined) out.sessions = q.sessions
   if (q.novncSessions !== undefined) out.novncSessions = q.novncSessions
   if (q.diskMb !== undefined) out.diskMb = q.diskMb
+  if (q.proxyBandwidthMb !== undefined) out.proxyBandwidthMb = q.proxyBandwidthMb
   return out
 }
 

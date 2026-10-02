@@ -37,17 +37,30 @@ export default async function AnnouncementsPage() {
     : []
   const readSet = new Set(reads.map((r) => r.announcementId))
 
-  const rows: AnnouncementRow[] = anns.map((a) => ({
-    id: a.id,
-    title: a.title,
-    content: a.content,
-    type: a.type,
-    typeLabel: TYPE_LABEL[a.type] || a.type,
-    displayType: a.displayType,
-    displayLabel: DISPLAY_LABEL[a.displayType] || a.displayType,
-    read: readSet.has(a.id),
-    createdAt: fmtDate(a.createdAt),
-  }))
+  const rows: AnnouncementRow[] = anns.map((a) => {
+    // 多选发布通道解析（旧数据回退单值 displayType）
+    let displayTypes: string[] = []
+    try {
+      const parsed = JSON.parse(a.displayTypes || "[]")
+      if (Array.isArray(parsed)) displayTypes = parsed.filter((x) => typeof x === "string")
+    } catch { /* ignore */ }
+    // 仅站内信公告（无展示通道）不进入公告列表渲染（只在通知铃呈现）
+    return {
+      id: a.id,
+      title: a.title,
+      content: a.content,
+      type: a.type,
+      typeLabel: TYPE_LABEL[a.type] || a.type,
+      displayType: a.displayType,
+      displayLabel: DISPLAY_LABEL[a.displayType] || a.displayType,
+      displayTypes,
+      notifyInbox: !!a.notifyInbox,
+      read: readSet.has(a.id),
+      createdAt: fmtDate(a.createdAt),
+    }
+  })
+  // 列表展示：至少有一种展示通道的公告（纯站内信公告只在通知铃/消息中心出现）
+  const displayRows = rows.filter((r) => (r.displayTypes?.length ? r.displayTypes : [r.displayType]).length > 0)
 
   const unreadCount = rows.filter((r) => !r.read).length
 
@@ -61,13 +74,13 @@ export default async function AnnouncementsPage() {
       </div>
 
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard title="可见公告" value={rows.length} sub="启用中" icon={<Megaphone className="h-4 w-4" />} />
+        <StatCard title="可见公告" value={displayRows.length} sub="含展示通道（弹窗/跑马灯/强制阅读）" icon={<Megaphone className="h-4 w-4" />} />
         <StatCard title="未读" value={unreadCount} sub={unreadCount > 0 ? "包含弹窗与强制阅读公告" : "全部已读"} icon={<Megaphone className="h-4 w-4" />} tone={unreadCount > 0 ? "warning" : "success"} />
         <StatCard title="全站公告" value={globalCount} sub="GLOBAL" icon={<Globe2 className="h-4 w-4" />} />
         <StatCard title="组 / 定向" value={groupCount + userCount} sub={`组 ${groupCount} · 定向 ${userCount}`} icon={<Users className="h-4 w-4" />} />
       </div>
 
-      <AnnouncementsView rows={rows} />
+      <AnnouncementsView rows={displayRows} />
     </div>
   )
 }

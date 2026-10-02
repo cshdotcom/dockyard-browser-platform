@@ -19,6 +19,7 @@ const zQuota = z.object({
   sessions: zPrecision("会话配额", 0, 100000).optional(),
   novncSessions: zPrecision("NoVNC配额", 0, 100000).optional(),
   diskMb: zPrecision("磁盘配额", 0, 10000000).optional(),
+  proxyBandwidthMb: zPrecision("代理带宽配额(MB)", 0, 10000000).optional(),
 })
 
 const zRole = z.enum(["SUPER_ADMIN", "ADMIN", "GROUP_ADMIN", "USER"])

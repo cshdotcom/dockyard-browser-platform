@@ -1,0 +1,648 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: LibVNCServer
+Source: https://github.com/LibVNC/libvncserver/releases
+Comment: Excluding webclients/* because it contains .jars without source.
+Files-Excluded:
+ webclients/*
+
+Files: .appveyor.yml
+ .clang-format
+ .github/FUNDING.yml
+ .github/ISSUE_TEMPLATE/bug_report.md
+ .github/ISSUE_TEMPLATE/feature_request.md
+ .github/workflows/ci.yml
+ .github/workflows/cifuzz.yml
+ .github/workflows/codeql-analysis.yml
+ .gitignore
+ .gitmodules
+ AUTHORS
+ CMakeLists.txt
+ CONTRIBUTING.md
+ ChangeLog
+ Doxyfile
+ HISTORY.md
+ NEWS.md
+ SECURITY.md
+ cmake/Modules/FindFFMPEG.cmake
+ cmake/Modules/FindLZO.cmake
+ cmake/Modules/LibVNCServerConfig.cmake.in
+ cmake/Toolchain-cross-mingw32-linux.cmake
+ deps/sasl-fix-snprintf-macro.patch
+ examples/client/SDLvncviewer.c
+ examples/client/backchannel.c
+ examples/client/ppmtest.c
+ examples/client/sshtunnel.c
+ examples/server/README.md
+ examples/server/backchannel.c
+ examples/server/blooptest.c
+ examples/server/camera.c
+ examples/server/colourmaptest.c
+ examples/server/filetransfer.c
+ examples/server/fontsel.c
+ examples/server/pnmshow.c
+ examples/server/pnmshow24.c
+ examples/server/radon.h
+ examples/server/regiontest.c
+ examples/server/repeater.c
+ examples/server/rotate.c
+ examples/server/rotatetemplate.c
+ examples/server/simple.c
+ examples/server/simple15.c
+ examples/server/vncev.c
+ examples/server/x11.c
+ examples/server/zippy.c
+ include/rfb/default8x16.h
+ include/rfb/rfbconfig.h.cmakein
+ src/common/base64.h
+ src/common/crypto.h
+ src/common/sha-private.h
+ src/libvncclient/libvncclient.pc.cmakein
+ src/libvncserver/draw.c
+ src/libvncserver/font.c
+ src/libvncserver/libvncserver.pc.cmakein
+ src/libvncserver/private.h
+ src/libvncserver/rfbssl.h
+ src/libvncserver/scale.h
+ src/libvncserver/selbox.c
+ src/libvncserver/ultra.c
+ src/libvncserver/ws_decode.c
+ src/libvncserver/ws_decode.h
+ test/cargstest.c
+ test/copyrecttest.c
+ test/encodingstest.c
+ test/fuzz_server.c
+ test/includetest.sh
+ test/wstestdata.inc
+ utils/bdf2c.pl
+ utils/consolefont2c.pl
+Copyright: NONE
+License: GPL-2+
+
+Files: examples/server/storepasswd.c
+ src/libvncserver/cutpaste.c
+ src/libvncserver/hextile.c
+ src/libvncserver/rre.c
+ src/libvncserver/tableinit24.c
+ src/libvncserver/tableinitcmtemplate.c
+ src/libvncserver/tableinittctemplate.c
+ src/libvncserver/tabletrans24template.c
+ src/libvncserver/tabletranstemplate.c
+ src/libvncserver/translate.c
+Copyright: 1999, AT&T Laboratories Cambridge.
+  2001, Dan McGuirk <mcguirk@incompleteness.net>
+License: GPL-2+
+
+Files: src/libvncserver/tightvnc-filetransfer/filelistinfo.c
+ src/libvncserver/tightvnc-filetransfer/filelistinfo.h
+ src/libvncserver/tightvnc-filetransfer/filetransfermsg.c
+ src/libvncserver/tightvnc-filetransfer/filetransfermsg.h
+ src/libvncserver/tightvnc-filetransfer/handlefiletransferrequest.c
+ src/libvncserver/tightvnc-filetransfer/handlefiletransferrequest.h
+ src/libvncserver/tightvnc-filetransfer/rfbtightproto.h
+ src/libvncserver/tightvnc-filetransfer/rfbtightserver.c
+Copyright: 2005, Novell, Inc.
+License: GPL-2
+
+Files: src/common/turbojpeg.c
+ src/common/turbojpeg.h
+ test/tjbench.c
+ test/tjunittest.c
+ test/tjutil.c
+ test/tjutil.h
+Copyright: 2009-2012, D. R. Commander
+  2011, D. R. Commander
+License: BSD-3-clause
+
+Files: src/libvncserver/zrle.c
+ src/libvncserver/zrleencodetemplate.c
+ src/libvncserver/zrleoutstream.c
+ src/libvncserver/zrleoutstream.h
+ src/libvncserver/zrlepalettehelper.c
+ src/libvncserver/zrlepalettehelper.h
+Copyright: 2002, RealVNC Ltd.
+  2003, Sun Microsystems, Inc.
+License: GPL-2+
+
+Files: src/common/vncauth.c
+ src/libvncclient/corre.c
+ src/libvncclient/hextile.c
+ src/libvncclient/rre.c
+ src/libvncclient/vncviewer.c
+Copyright: 1999, AT&T Laboratories Cambridge
+License: GPL-2+
+
+Files: src/libvncclient/ultra.c
+ src/libvncclient/zlib.c
+ src/libvncserver/zlib.c
+Copyright: 1999, AT&T Laboratories Cambridge
+  2000, Tridia Corporation
+License: GPL-2+
+
+Files: src/common/crypto_included.c
+ src/common/crypto_libgcrypt.c
+ src/common/crypto_openssl.c
+Copyright: 2011, Gernot Tenchio
+  2019, Christian Beier
+License: GPL-2+
+
+Files: src/common/lzoconf.h
+ src/common/lzodefs.h
+ src/common/minilzo.h
+Copyright: 1996-2014, Markus Franz Xaver Johannes Oberhumer
+License: GPL-2+
+
+Files: test/wsmaketestframe.py
+ test/wstest.c
+Copyright: 2017, Andreas Weigel
+License: BSD-2-clause
+
+Files: examples/client/qt5client.cpp
+ examples/server/androidvncserver.c
+Copyright: NONE
+License: GPL-2+
+
+Files: src/libvncclient/listen.c
+ src/libvncclient/sockets.c
+Copyright: 1999, AT&T Laboratories Cambridge
+  2011-2012, Christian Beier <dontmind@freeshell.org>
+License: GPL-2+
+
+Files: src/libvncserver/corre.c
+ src/libvncserver/stats.c
+Copyright: 1999, AT&T Laboratories Cambridge
+  2001, Dan McGuirk <mcguirk@incompleteness.net>
+  2002, RealVNC Ltd.
+License: GPL-2+
+
+Files: include/rfb/threading.h
+ src/common/sockets.h
+Copyright: 2020, Christian Beier <dontmind@freeshell.org>
+  2022, Christian Beier <dontmind@freeshell.org>
+License: GPL-2+
+
+Files: src/libvncserver/rfbssl_gnutls.c
+ src/libvncserver/rfbssl_openssl.c
+Copyright: 2011, Gernot Tenchio
+License: GPL-2+
+
+Files: src/libvncclient/tls.h
+ src/libvncclient/tls_gnutls.c
+Copyright: 2009, Vic Lee.
+License: GPL-2+
+
+Files: src/libvncserver/cargs.c
+ src/libvncserver/main.c
+Copyright: 1999, AT&T Laboratories Cambridge
+  2001, Dan McGuirk <mcguirk@incompleteness.net>
+  2001, Johannes E. Schindelin <Johannes.Schindelin@gmx.de>
+License: GPL-2+
+Comment:
+ Assuming GPL-2+ from 'GPL (latest version)' written in 1999-2001.
+
+Files: test/bmp.c
+ test/bmp.h
+Copyright: 2004, Landmark Graphics Corporation
+  2005, Sun Microsystems, Inc.
+  2010, 2012, D. R. Commander
+  2011, D. R. Commander
+License: wxWin
+
+Files: src/common/sha.h
+ src/common/sha1.c
+Copyright: 2011, IETF Trust and the persons identified as
+License: BSD-3-clause
+
+Files: include/rfb/rfbregion.h
+ src/libvncserver/rfbregion.c
+Copyright: 2001, James "Wez" Weatherall, Johannes E. Schindelin
+License: GPL-2+
+Comment:
+ No license named in file header, assuming license as found in COPYING
+ file.
+
+Files: src/common/zywrletemplate.c
+Copyright: 2006, BY Hitachi Systems & Services, Ltd.
+License: BSD-3-clause
+
+Files: examples/client/vnc2mpg.c
+Copyright: 2003, Fabrice Bellard, 2004 Johannes E. Schindelin
+  2017, Tyrel M. McQueen
+License: Expat
+
+Files: src/libvncserver/sockets.c
+Copyright: 1999, AT&T Laboratories Cambridge
+  2001, Dan McGuirk <mcguirk@incompleteness.net>
+  2005, Rohit Kumar, Johannes E. Schindelin
+  2011-2012, Christian Beier <dontmind@freeshell.org>
+License: GPL-2+
+
+Files: src/libvncserver/httpd.c
+Copyright: 1999, AT&T Laboratories Cambridge
+  2002, RealVNC Ltd.
+  2011-2012, Christian Beier <dontmind@freeshell.org>
+License: GPL-2+
+
+Files: src/libvncserver/cursor.c
+Copyright: 1999, AT&T Laboratories Cambridge
+  2000-2001, Const Kaplinsky.
+License: GPL-2+
+
+Files: src/libvncserver/tight.c
+Copyright: 1999, AT&T Laboratories Cambridge
+  2000-2001, Const Kaplinsky
+  2004, Landmark Graphics Corporation
+  2005-2008, Sun Microsystems, Inc.
+  2010-2012, D. R. Commander
+License: GPL-2+
+
+Files: include/rfb/rfbclient.h
+Copyright: 1999, AT&T Laboratories Cambridge
+  2000, Tridia Corporation
+  2000-2001, Const Kaplinsky
+  2017, D. R. Commander
+License: GPL-2+
+
+Files: include/rfb/rfbproto.h
+Copyright: 1999, AT&T Laboratories Cambridge
+  2000, Tridia Corporation
+  2000-2002, Constantin Kaplinsky
+  2001, Harakan Software
+  2004-2008, Sun Microsystems, Inc.
+  2005, Rohit Kumar, Johannes E. Schindelin
+  2009-2010, D. R. Commander
+License: GPL-2+
+
+Files: src/libvncclient/rfbclient.c
+Copyright: 1999, AT&T Laboratories Cambridge.
+  2000, Tridia Corporation
+  2000-2002, Constantin Kaplinsky
+License: GPL-2+
+
+Files: src/libvncserver/rfbserver.c
+Copyright: 1999, AT&T Laboratories Cambridge.
+  2001, Dan McGuirk <mcguirk@incompleteness.net>.
+  2002, RealVNC Ltd.
+  2005, Rohit Kumar, Johannes E. Schindelin
+  2011-2012, D. R. Commander
+License: GPL-2+
+
+Files: include/rfb/rfb.h
+Copyright: 1999, AT&T Laboratories Cambridge
+  2001, Dan McGuirk <mcguirk@incompleteness.net>
+  2002, RealVNC Ltd.
+  2005, Rohit Kumar <rokumar@novell.com>
+License: GPL-2+
+
+Files: src/libvncserver/scale.c
+Copyright: 1999, AT&T Laboratories Cambridge
+  2001, Dan McGuirk <mcguirk@incompleteness.net>
+  2002, RealVNC Ltd.
+  2005, Rohit Kumar, Johannes E. Schindelin
+License: GPL-2+
+
+Files: src/libvncserver/auth.c
+Copyright: 1999, AT&T Laboratories Cambridge
+  2001, Dan McGuirk <mcguirk@incompleteness.net>
+  2005, Rohit Kumar, Johannes E. Schindelin
+License: GPL-2+
+
+Files: src/common/sockets.c
+Copyright: 2022, Christian Beier
+License: GPL-2+
+
+Files: src/libvncclient/tls_none.c
+Copyright: 2012, Christian Beier
+License: GPL-2+
+
+Files: src/libvncclient/tight.c
+Copyright: 2000-2001, Const Kaplinsky
+  2004, Landmark Graphics Corporation
+  2004-2008, Sun Microsystems, Inc.
+  2017, 2019, D. R. Commander
+License: GPL-2+
+
+Files: src/libvncclient/cursor.c
+Copyright: 2001-2002, Constantin Kaplinsky
+License: GPL-2+
+
+Files: src/libvncserver/websockets.c
+Copyright: 2010, Joel Martin
+License: GPL-2+
+
+Files: README.md
+Copyright: 2001-2003, Johannes E. Schindelin
+License: GPL-2+
+
+Files: examples/server/example.c
+ examples/server/cursors.c
+ src/libvncserver/rfbssl_none.c
+ src/libvncclient/zrle.c
+Copyright: 2001, Johannes E. Schindelin <Johannes.Schindelin@gmx.de>
+  2005, Johannes E. Schindelin <Johannes.Schindelin@gmx.de>
+  2011, Johannes Schindelin
+License: GPL-2+
+
+Files: utils/git2cl.pl
+Copyright: 1999, Karl Fogel <kfogel@red-bean.com>
+  2001-2004, Martyn J. Pearce <fluffy@cpan.org>
+  2007, Luis Mondesi <lemsx1@gmail.com>
+  2007-2008, Simon Josefsson <simon@josefsson.org>
+License: GPL-2+
+
+Files: src/common/minilzo.c
+Copyright: 1996-2014, Markus Franz Xaver Johannes Oberhumer
+License: GPL-2+
+
+Files: examples/client/gtkvncviewer.c
+Copyright: 2007, Mateus Cesar Groess
+License: GPL-2+
+
+Files: src/libvncclient/tls_openssl.c
+Copyright: 2009, Vic Lee
+  2012, Philip Van Hoof <philip@codeminded.be>
+License: GPL-2+
+
+Files: src/libvncserver/zrletypes.h
+Copyright: 2002, RealVNC Ltd.
+License: GPL-2+
+
+Files: src/libvncclient/sasl.h
+Copyright: 2017, S. Waterman
+License: GPL-2+
+
+Files: src/libvncclient/trle.c
+Copyright: 2017, Wiki Wang <wikiwang@live.com>
+License: GPL-2+
+
+Files: src/common/base64.c
+Copyright: 1995, International Business Machines, Inc.
+  1996, Internet Software Consortium.
+License: ISC
+
+Files: src/libvncclient/sasl.c
+Copyright: 2006, Anthony Liguori <anthony@codemonkey.ws>
+  2009-2010, Daniel P. Berrange <dan@berrange.com>
+License: LGPL-2+
+
+Files: src/common/d3des.h
+ src/common/d3des.c
+Copyright: 1988-1992, Richard Outerbridge
+  1999, AT&T Laboratories Cambridge.
+License: public-domain~d3des
+
+Files: cmake/Modules/FindSDL2.cmake
+Copyright: 2003-2009, Kitware, Inc.
+License: BSD-3-clause
+Comment:
+ BSD license like used for many other CMake modules, that
+ is BSD-3-clause.
+
+Files: include/rfb/keysym.h
+Copyright: 0xafb
+  1987, 1994, X Consortium
+  1987, Digital Equipment Corporation, Maynard, Massachusetts
+  1987, Digital Equipment Corporation, Maynard, Massachusetts.
+  1987, X Consortium
+License: X11
+
+Files: debian/*
+Copyright: 2011-2015, Luca Falavigna <dktrkranz@debian.org>
+  2015-2017, Peter Spiess-Knafl <dev@spiessknafl.at>
+  2019-2025, Mike Gabriel <mike.gabriel@das-netzwerkteam.de>
+License: GPL-2+
+
+License: public-domain~d3des
+ This software is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+License: GPL-2+
+ This package is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.
+ .
+ This package is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this package; if not, write to the Free Software
+ Foundation, Inc., 31 Milk Street, # 960789, Boston, MA 02196, USA
+ .
+ On Debian systems, the full text of the GNU General Public License
+ version 2 can be found in the file `/usr/share/common-licenses/GPL-2'.
+
+License: LGPL-2+
+ This package is free software; you can redistribute it and/or modify
+ it under the terms of the GNU Lesser General Public License as published by
+ the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.
+ .
+ This package is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU Lesser General Public License
+ along with this package; if not, write to the Free Software
+ Foundation, Inc., 31 Milk Street, # 960789, Boston, MA 02196, USA
+ .
+ On Debian systems, the full text of the GNU Lesser General Public License
+ version 2 can be found in the file `/usr/share/common-licenses/LGPL-2'.
+
+License: Expat
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
+
+License: ISC
+ Permission to use, copy, modify, and distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS" AND INTERNET SOFTWARE CONSORTIUM DISCLAIMS
+ ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES
+ OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL INTERNET SOFTWARE
+ CONSORTIUM BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL
+ DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR
+ PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS
+ ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS
+ SOFTWARE.
+
+License: BSD-3-clause
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted provided that the following conditions
+ are met:
+ .
+ 1. Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+ .
+ 2. Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+ .
+ 3. The name of the author may not be used to endorse or promote products
+    derived from this software without specific prior written permission.
+ .
+ THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR
+ IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT,
+ INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+ IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ POSSIBILITY OF SUCH DAMAGE.
+
+License: BSD-2-clause
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted provided that the following conditions are met:
+ .
+ - Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+ - Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+ .
+ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS",
+ AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
+ LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ POSSIBILITY OF SUCH DAMAGE.
+
+License: GPL-2
+ This package is free software; you can redistribute it and/or modify
+ it under the terms of version 2 of the GNU General Public License
+ as published by the Free Software Foundation.
+ .
+ This package is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this package; if not, write to the Free Software
+ Foundation, Inc., 31 Milk Street, # 960789, Boston, MA 02196, USA
+ .
+ On Debian systems, the full text of the GNU General Public License
+ version 2 can be found in the file `/usr/share/common-licenses/GPL-2'.
+
+License: X11
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ -
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+ X CONSORTIUM BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+ AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ .
+ Except as contained in this notice, the name of the X Consortium shall not be
+ used in advertising or otherwise to promote the sale, use or other dealings
+ in this Software without prior written authorization from the X Consortium.
+ .
+ .
+ Copyright 1987 by Digital Equipment Corporation, Maynard, Massachusetts.
+ .
+                        All Rights Reserved
+ .
+ Permission to use, copy, modify, and distribute this software and its
+ documentation for any purpose and without fee is hereby granted,
+ provided that the above copyright notice appear in all copies and that
+ both that copyright notice and this permission notice appear in
+ supporting documentation, and that the name of Digital not be
+ used in advertising or publicity pertaining to distribution of the
+ software without specific, written prior permission.
+ .
+ DIGITAL DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE, INCLUDING
+ ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO EVENT SHALL
+ DIGITAL BE LIABLE FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR
+ ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+ WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS
+ SOFTWARE.
+
+License: wxWin
+               wxWindows Library Licence, Version 3.1
+               ======================================
+ .
+ Copyright (C) 1998-2005 Julian Smart, Robert Roebling et al
+ .
+ Everyone is permitted to copy and distribute verbatim copies
+ of this licence document, but changing it is not allowed.
+ .
+                      WXWINDOWS LIBRARY LICENCE
+    TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+ .
+ This library is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Library General Public Licence as published by
+ the Free Software Foundation; either version 2 of the Licence, or (at
+ your option) any later version.
+ .
+ This library is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Library
+ General Public Licence for more details.
+ .
+ You should have received a copy of the GNU Library General Public Licence
+ along with this software, usually in a file named COPYING.LIB.  If not,
+ write to the Free Software Foundation, Inc., 31 Milk Street, # 960789,
+ Boston, MA 02196, USA.
+ .
+ EXCEPTION NOTICE
+ .
+ 1. As a special exception, the copyright holders of this library give
+ permission for additional uses of the text contained in this release of
+ the library as licenced under the wxWindows Library Licence, applying
+ either version 3.1 of the Licence, or (at your option) any later version of
+ the Licence as published by the copyright holders of version
+ 3.1 of the Licence document.
+ .
+ 2. The exception is that you may use, copy, link, modify and distribute
+ under your own terms, binary object code versions of works based
+ on the Library.
+ .
+ 3. If you copy code from files distributed under the terms of the GNU
+ General Public Licence or the GNU Library General Public Licence into a
+ copy of this library, as this licence permits, the exception does not
+ apply to the code that you add in this way.  To avoid misleading anyone as
+ to the status of such modified files, you must delete this exception
+ notice from such code and/or adjust the licensing conditions notice
+ accordingly.
+ .
+ 4. If you write modifications of your own for this library, it is your
+ choice whether to permit this exception to apply to your modifications.
+ If you do not wish that, you must delete the exception notice from such
+ code and/or adjust the licensing conditions notice accordingly.

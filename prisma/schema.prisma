@@ -22,6 +22,8 @@ model User {
   username            String    @unique
   email               String?   @unique
   displayName         String?
+  avatarPath          String?   // 用户头像存储相对路径（独立空间：storage/avatars/<userId>/avatar.webp）
+  avatarUpdatedAt     DateTime? // 头像更新时间（ETag/缓存失效用）
   passwordHash        String?
   role                String    @default("USER") // SUPER_ADMIN | ADMIN | GROUP_ADMIN | USER
   enabled             Boolean   @default(true)
@@ -1092,7 +1094,10 @@ model Announcement {
   type           String   @default("GLOBAL") // GLOBAL | GROUP | USER
   groupId        String?
   userId         String?
-  displayType    String   @default("POPUP") // POPUP | MARQUEE | FORCE_VIEW
+  displayType    String   @default("POPUP") // POPUP | MARQUEE | FORCE_VIEW（主展示方式 = displayTypes 首项，兼容旧数据）
+  displayTypes   String?  // 多选展示方式（JSON 数组，如 ["POPUP","MARQUEE"]；空数组=仅站内信）
+  notifyInbox    Boolean  @default(false) // 站内信通道（发送到用户通知铃/站内信）
+  notifiedAt     DateTime? // 站内信已投递时间（幂等防重发：投递一次后永不重发）
   enabled        Boolean  @default(true)
   createdByUserId String?
   createdAt      DateTime @default(now())

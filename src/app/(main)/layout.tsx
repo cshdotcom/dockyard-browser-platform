@@ -23,6 +23,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
   }
 
   const unread = await db.notice.count({ where: { userId: ctx.userId, readAt: null } })
+  const me = await db.user.findUnique({ where: { id: ctx.userId }, select: { avatarPath: true } })
   const maintenance = await getConfigBool("maintenance.enabled", false)
   const maintenanceMessage = await getConfig<string>("maintenance.message", "系统维护中")
 
@@ -95,7 +96,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
 
   return (
     <AppShell
-      user={{ username: ctx.username, displayName: ctx.displayName, email: ctx.email, role: ctx.role }}
+      user={{ id: ctx.userId, username: ctx.username, displayName: ctx.displayName, email: ctx.email, role: ctx.role, hasAvatar: !!me?.avatarPath }}
       menuGroups={menuGroups}
       unreadCount={unread}
       maintenance={maintenance}

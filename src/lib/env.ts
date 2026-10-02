@@ -77,6 +77,20 @@ export const ENV = {
   get embeddedBrowserBin() {
     return process.env.EMBEDDED_BROWSER_BIN || "" // 开发/特殊环境手动指定 chromium 二进制
   },
+  // ---- 公开访问基地址（内网穿透/反代/域名部署）----
+  // 优先级：PUBLIC_BASE_URL > APP_PUBLIC_URL > AUTH_PUBLIC_URL > AUTH_URL > NEXTAUTH_URL
+  // 设置后：NextAuth 回调/重定向、CDP 公网网关端点展示、HelmPort 桥地址拼接均使用该域名；
+  // 未设置时自动使用请求 Host（网关同源转发，需反代正确传递 Host 头）。
+  get publicBaseUrl() {
+    const v =
+      process.env.PUBLIC_BASE_URL ||
+      process.env.APP_PUBLIC_URL ||
+      process.env.AUTH_PUBLIC_URL ||
+      process.env.AUTH_URL ||
+      process.env.NEXTAUTH_URL ||
+      ""
+    return v.replace(/\/+$/, "")
+  },
 }
 
 // 外部服务是否可用（不可用时适配器自动降级为模拟模式，业务链路仍完整可跑）

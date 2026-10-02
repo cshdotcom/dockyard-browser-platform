@@ -11,6 +11,7 @@ import {
   ChevronLeft, Menu, LogOut, Search, UserCog, MonitorSmartphone,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { UserAvatar } from "@/components/shared/user-avatar"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -38,10 +39,12 @@ export interface MenuGroup {
 }
 
 export interface ShellUser {
+  id?: string
   username: string
   displayName?: string | null
   email?: string | null
   role: string
+  hasAvatar?: boolean
 }
 
 interface AppShellProps {
@@ -149,9 +152,11 @@ export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenan
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="sm" className="gap-2 shrink-0">
-                    <div className="h-7 w-7 rounded-full bg-teal-600/15 text-teal-700 dark:text-teal-300 flex items-center justify-center text-xs font-semibold">
-                      {(user.displayName || user.username).slice(0, 1).toUpperCase()}
-                    </div>
+                    <UserAvatar
+                      userId={user.hasAvatar && user.id ? user.id : null}
+                      name={user.displayName || user.username}
+                      size={28}
+                    />
                     <span className="hidden sm:inline text-sm">{user.displayName || user.username}</span>
                     <Badge variant="outline" className="hidden lg:inline text-[10px]">{roleLabel[user.role] || user.role}</Badge>
                   </Button>
@@ -176,8 +181,8 @@ export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenan
                     onClick={async () => {
                       await fetch("/api/auth/logout", { method: "POST" }).catch(() => {})
                       await signOut({ redirect: false })
+                      // push+refresh 竞态会取消导航；push 自带 RSC 拉取
                       router.push("/login")
-                      router.refresh()
                     }}
                   >
                     <LogOut className="mr-2 h-4 w-4" /> 退出登录
@@ -222,9 +227,10 @@ export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenan
 }
 
 function NotificationBell({ initial }: { initial: number }) {
-  const [items, setItems] = React.useState<{ id: string; title: string; content: string; readAt: string | null; createdAt: string }[]>([])
+  const [items, setItems] = React.useState<{ id: string; title: string; content: string; type: string; link: string | null; readAt: string | null; createdAt: string }[]>([])
   const [count, setCount] = React.useState(initial)
   const [open, setOpen] = React.useState(false)
+  const router = useRouter()
 
   const load = React.useCallback(async () => {
     try {
@@ -272,11 +278,31 @@ function NotificationBell({ initial }: { initial: number }) {
         <div className="max-h-96 overflow-y-auto">
           {items.length === 0 && <p className="py-6 text-center text-sm text-muted-foreground">暂无通知</p>}
           {items.map((n) => (
-            <div key={n.id} className={cn("px-3 py-2.5 border-b last:border-0", !n.readAt && "bg-teal-600/5")}>
-              <p className="text-sm font-medium leading-tight">{n.title}</p>
+            <button
+              key={n.id}
+              type="button"
+              className={cn(
+                "block w-full text-left px-3 py-2.5 border-b last:border-0 transition",
+                !n.readAt && "bg-teal-600/5",
+                n.link ? "cursor-pointer hover:bg-muted/70" : "cursor-default",
+              )}
+              onClick={() => {
+                if (n.link) {
+                  setOpen(false)
+                  router.push(n.link)
+                }
+              }}
+            >
+              <p className="text-sm font-medium leading-tight flex items-center gap-1.5">
+                {n.type === "ANNOUNCEMENT" && <Megaphone className="h-3 w-3 text-violet-500 shrink-0" />}
+                {n.title}
+              </p>
               <p className="mt-0.5 text-xs text-muted-foreground line-clamp-2">{n.content}</p>
-              <p className="mt-1 text-[10px] text-muted-foreground">{new Date(n.createdAt).toLocaleString("zh-CN")}</p>
-            </div>
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                {new Date(n.createdAt).toLocaleString("zh-CN")}
+                {n.link && <span className="ml-1 text-teal-600">点击查看 →</span>}
+              </p>
+            </button>
           ))}
         </div>
       </DropdownMenuContent>

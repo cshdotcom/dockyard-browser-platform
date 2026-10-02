@@ -319,8 +319,9 @@ function CreateDialog({
         toast.success("工作区创建成功")
         onOpenChange(false)
         setForm({ ...form, name: "" })
+        // 注意：push 与 refresh 同帧调用会触发 App Router 竞态（refresh 取消挂起的导航）
+        // —— 表现为「创建成功但停留在列表页」。push 自身会拉取新页面 RSC，无需再 refresh。
         router.push(`/workspaces/${res.data?.id}`)
-        router.refresh()
       } else toast.error(res.msg)
     } finally { setBusy(false) }
   }

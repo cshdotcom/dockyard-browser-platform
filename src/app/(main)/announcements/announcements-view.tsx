@@ -9,7 +9,8 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { AlertTriangle, CheckCircle2, Globe2, Loader2, Megaphone, Users, User as UserIcon, Volume2 } from "lucide-react"
+import { AlertTriangle, CheckCircle2, Globe2, Loader2, Megaphone, Users, User as UserIcon, Volume2, BellRing } from "lucide-react"
+import { AnnouncementContent, contentToPlainText } from "@/components/announcements/announcement-content"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -26,6 +27,8 @@ export interface AnnouncementRow {
   typeLabel: string
   displayType: string
   displayLabel: string
+  displayTypes: string[] // 多选发布通道
+  notifyInbox: boolean // 站内信通道
   read: boolean
   createdAt: string
 }
@@ -49,19 +52,20 @@ export function AnnouncementsView({ rows }: { rows: AnnouncementRow[] }) {
   const [localRead, setLocalRead] = React.useState<Set<string>>(new Set())
   const isRead = (r: AnnouncementRow) => r.read || localRead.has(r.id)
 
-  // 跑马灯公告（不论已读，持续展示）
-  const marqueeRows = rows.filter((r) => r.displayType === "MARQUEE")
-  const marqueeText = marqueeRows.map((r) => `【${r.title}】${r.content.replace(/\s+/g, " ").slice(0, 80)}`).join("　　◆　　")
+  // 跑马灯公告（多选通道：displayTypes 含 MARQUEE 即滚动）
+  const marqueeRows = rows.filter((r) => (r.displayTypes?.length ? r.displayTypes : [r.displayType]).includes("MARQUEE"))
+  const marqueeText = marqueeRows.map((r) => `【${r.title}】${contentToPlainText(r.content, 80)}`).join("　　◆　　")
 
-  // 强制阅读队列：未读的 FORCE_VIEW 按发布时间从旧到新逐条展示
+  // 强制阅读队列：未读的 FORCE_VIEW 按发布时间从旧到新逐条展示（多选通道任含即生效）
+  const inChannels = (r: AnnouncementRow, d: string) => (r.displayTypes?.length ? r.displayTypes : [r.displayType]).includes(d)
   const [forceQueue, setForceQueue] = React.useState<AnnouncementRow[]>(() =>
     rows
-      .filter((r) => r.displayType === "FORCE_VIEW" && !isRead(r))
+      .filter((r) => inChannels(r, "FORCE_VIEW") && !isRead(r))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   )
   // 弹窗队列：未读的 POPUP（强制阅读处理完后依次弹出）
   const [popupQueue, setPopupQueue] = React.useState<AnnouncementRow[]>(() =>
-    rows.filter((r) => r.displayType === "POPUP" && !isRead(r))
+    rows.filter((r) => inChannels(r, "POPUP") && !isRead(r))
   )
 
   const [marking, setMarking] = React.useState(false)
@@ -151,9 +155,7 @@ export function AnnouncementsView({ rows }: { rows: AnnouncementRow[] }) {
             <CardContent className="flex-1 overflow-hidden py-4">
               <ScrollArea className="h-full max-h-[52vh] pr-3">
                 <h2 className="text-xl font-semibold mb-3">{currentForce.title}</h2>
-                <p className="text-sm whitespace-pre-line leading-relaxed text-muted-foreground">
-                  {currentForce.content}
-                </p>
+                <AnnouncementContent content={currentForce.content} />
               </ScrollArea>
             </CardContent>
             <div className="border-t p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
@@ -199,9 +201,7 @@ export function AnnouncementsView({ rows }: { rows: AnnouncementRow[] }) {
             </DialogDescription>
           </DialogHeader>
           <ScrollArea className="max-h-72 pr-3">
-            <p className="text-sm whitespace-pre-line leading-relaxed">
-              {currentPopup?.content}
-            </p>
+            <AnnouncementContent content={currentPopup?.content || ""} />
           </ScrollArea>
           <DialogFooter>
             <Button onClick={confirmPopup} disabled={marking} className="bg-teal-600 hover:bg-teal-700">
@@ -235,7 +235,14 @@ export function AnnouncementsView({ rows }: { rows: AnnouncementRow[] }) {
                     <Badge variant="outline" className="text-[10px] gap-1 font-normal">
                       {TYPE_ICON[r.type]} {r.typeLabel}
                     </Badge>
-                    <Badge variant="secondary" className="text-[10px] font-normal">{r.displayLabel}</Badge>
+                    {(r.displayTypes?.length ? r.displayTypes : [r.displayType]).map((d) => (
+                      <Badge key={d} variant="secondary" className="text-[10px] font-normal">{r.displayLabel || d}</Badge>
+                    ))}
+                    {r.notifyInbox && (
+                      <Badge variant="secondary" className="text-[10px] font-normal gap-1">
+                        <BellRing className="h-2.5 w-2.5 text-violet-500" />站内信
+                      </Badge>
+                    )}
                     <span>{r.createdAt}</span>
                   </CardDescription>
                 </div>
@@ -254,9 +261,7 @@ export function AnnouncementsView({ rows }: { rows: AnnouncementRow[] }) {
               </div>
             </CardHeader>
             <CardContent>
-              <p className="text-sm whitespace-pre-line leading-relaxed text-muted-foreground">
-                {r.content}
-              </p>
+              <AnnouncementContent content={r.content} className="text-muted-foreground" />
             </CardContent>
           </Card>
         ))}
