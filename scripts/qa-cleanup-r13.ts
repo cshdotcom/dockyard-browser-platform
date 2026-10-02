@@ -3,8 +3,8 @@ import { PrismaClient } from "@prisma/client"
 const db = new PrismaClient()
 
 async function main() {
-  // 1. QA 公告（标题含 QA 走查 / 上线 / 2FA 提醒的测试公告）
-  const anns = await db.announcement.findMany({ where: { title: { in: ["平台升级维护通知（QA 走查）", "新增功能上线：批量操作与全局搜索", "安全提醒：请及时开启 2FA 双因素认证"] } }, select: { id: true } })
+  // 1. QA 公告（本轮与历史走查标题全集）
+  const anns = await db.announcement.findMany({ where: { title: { in: ["平台升级维护通知（QA 走查）", "新增功能上线：批量操作与全局搜索", "安全提醒：请及时开启 2FA 双因素认证", "v1.6 发布：公告系统增强上线", "维护通知：今晚 02:00 短暂停机升级"] } }, select: { id: true } })
   const annIds = anns.map((a) => a.id)
   if (annIds.length) {
     await db.announcementRead.deleteMany({ where: { announcementId: { in: annIds } } })

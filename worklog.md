@@ -471,3 +471,22 @@ Stage Summary:
 - 用户 13 项需求清单：公告系统（✅实时/跑马灯所有页/合并+N/弹窗/详情已读/MD+HTML/时效/持续显示/今日不提醒可控/批量停用删除/停用即消失）、审计分级（✅普通用户自己/管理员全量筛选/回滚映射表）、2FA 强制（✅前批已备 force2faSetup 门控+用户/组管理开关）、批量操作（✅全站含告警/备份/任务/公告）、长列表滚动（✅）、备份下载（✅路由新建）、HAR 下载（✅路由新建）、沙箱共享（✅精确用户名搜索+临时链接+权限+兑换）、插件策略下发（✅前批 crx 四级作用域+多选批量）、全局搜索（✅前批 /api/search+筛选）、单容器日志（✅start.sh 双通道）、内网穿透域名（前批 PUBLIC_BASE_URL 链路已备）全部落地
 - 新功能文件：global-announcer.tsx / audit-rollback.ts / /api/announcements/visible / /api/files/download / /api/har/download / /workspaces/shared / /audit
 - 已知边界：persistAfterRead 的"每次刷新仍弹"为会话级语义（同会话关闭后不重弹、刷新/新标签页重弹），符合"已读后仍持续显示"需求
+
+---
+Task ID: 19
+Agent: main
+Task: r13 收尾终态 — 下载路由缺失补齐（真实修复）+ QA 截图重建 + CI 偶发失败重跑 + 数据清理终验
+
+Work Log:
+- 【收尾核查】上轮工作日志声称 /api/files/download 与 /api/har/download 已交付，但 git 历史（--diff-filter=A）与文件系统双通道核查：两路由从未提交（commit message 提及、diff 无文件）——前端 backups-table.tsx:106 与 detail-tabs.tsx:811/831 的调用恒 404（HTML 404 页为证）
+- 【补齐实现】src/app/api/files/download/route.ts：FileMeta 类别权限分级（BACKUP=仅超管 / PROFILE+上传=所有者 / 工作区附件=所有者/ADMIN+/被共享未撤销未过期/GROUP_ADMIN 本组 / shareTo 名单）+ storageKey 归一化路径穿越防护（resolve 后必须落在 storageLocalPath 内，拦截记 DANGER 审计 blocked=path-traversal）+ fs.createReadStream → Readable.toWeb 流式响应 + RFC5987 双文件名（ASCII fallback + UTF-8 filename*）+ 30/min 限流 + FILE_DOWNLOAD 审计 + X-Content-Type-Options: nosniff
+- 【补齐实现】src/app/api/har/download/route.ts：recordId 查 HarRecord → 三重校验（工作区所有者 / ADMIN+ / 被共享）+ HAR 1.2 JSON 附件（文件名含工作区名+uuid 前 8 位，非法字符清洗）+ 12/min 限流 + FILE_DOWNLOAD 审计
+- 【QA 重走 17 截图】agent-browser 全链路：公告创建（时效/持续显示/允许跳过表单）→ dashboard 跑马灯+强制阅读弹窗并存 → 我已阅读 → 已读后跑马灯持续（弹窗不重弹，语义正确）→ 跑马灯点击详情弹窗（MD 渲染 + 已读徽章/未读已读按钮 + 今日不再提醒受控）→ 第二条公告自动 POPUP（"知道了（标为已读）"）→ 多条合并 +1 折叠（管理页顶部跑马灯同样生效）→ 管理端全选批量停用（开关 false×2）→ 用户端跑马灯/弹窗全消失（停用即生效）→ /audit admin 视角（操作人筛选+级别/资源/时间筛选）→ 批量停用审计详情 → 回滚（toast"已恢复 2 个资源"+开关恢复 true+AUDIT_ROLLBACK 可逆）→ demo 隔离视角（仅自己 LOGIN 1 条+无操作人筛选+无回滚）→ demo 创建工作区 → 共享管理弹窗（"adm"搜索建议→"admin 精确匹配 超级管理员"置顶徽章→确认→"超级管理员只读"+24h 过期+撤销）→ 创建临时链接（token/只读/生效中/72h/备注/已用 0 次）→ admin 兑换（"你已拥有该工作区的共享授权"·只读观看）
+- 【下载双路由实测】admin 下载备份 200+attachment+RFC5987+x-sqlite3+Content-Length 1179648 精确匹配；HAR 200+application/json+HAR1.2 文档体+附件名；demo 下载备份 40300"备份文件仅超级管理员可下载"；storageKey 篡改为 backups/../../../etc/passwd → 40300"非法的文件路径"+DANGER 审计落库（extraJson blocked=path-traversal 实证）；demo 下载自己工作区 HAR 放行（所有者语义正确）
+- 【环境事件】QA 中途 dev 服务器进程消失（非 OOM，内存 3.0Gi 空闲）：run-detached.py 分离重启恢复；QA 数据清理（qa-cleanup-r13.ts 标题清单扩充至 5 条全量覆盖）→ 终验 0 公告/0 工作区/0 链接/0 HAR/0 备份/0 共享，仅剩种子 admin+demo+默认组（prisma/seed.ts 原生产物，保留正确），登录类审计 7 条属系统正常记录
+- 【CI】ca87cdd 的 Build & Push Docker Image 失败（bunx next build exit 132 = QEMU arm64 模拟 SIGILL 偶发；与 41 秒前同代码 e4a3161 成功构建对照证实）→ API rerun-failed-jobs → 重跑 success 全绿
+- 【交付】download/qa-r13-screenshots.zip（17 张 JPEG 713KB，PNG 2.3MB 压缩 62%）；lint 零错误；next build 全绿（两路由确认编译：.next/server/app/api/{files,har}/download/route.js）
+
+Stage Summary:
+- r13 真实闭环：上轮日志与仓库不一致的缺口（两下载路由）被发现并补齐实现，前端 404 调用全部接通；13 项需求全部实测验证（公告全局层/审计分级回滚/共享授权/批量操作/下载修复）；测试数据全清、CI 全绿、交付物重建
+- 【丢失根因修正（重要）】上轮"路由未提交"的真凶不是未写文件，而是 .gitignore:64 的 `download/` 规则无路径锚定 → 任意层级 download 目录全被静默忽略 → src/app/api/{files,har}/download/ 两路由目录被吞（本地 QA 一直 200、git 仓库恒缺文件、CI 镜像 404 的"本地好远程坏"之谜）；修复：`download/` → `/download/`（仅忽略仓库根交付目录）+ upload/ 同步锚定 + git check-ignore 复验两路由不再被忽略

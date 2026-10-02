@@ -61,8 +61,9 @@ storage/
 dev.log
 server.log
 agent-ctx/
-download/
-upload/
+# 仅忽略仓库根的用户交付/上传目录（前导斜杠锚定，避免误伤 src/app/api/*/download 路由目录）
+/download/
+/upload/
 skills/
 .zscripts/
 tmp-cookies.txt
