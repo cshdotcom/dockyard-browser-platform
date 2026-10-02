@@ -16,7 +16,8 @@
 //
 // 进程隔离模型：
 //   · 每平台用户一个 Linux 用户（dyu-<hash>，root 环境自动创建）—— Profile/下载目录
-//     700 权限互不可读；prlimit --nproc 按 UID 生效（进程数硬上限）
+//     700 权限互不可读；prlimit --nproc 按 UID 生效（进程数硬上限）——
+//     仅独立用户形态启用；同用户模式跳过（见 createEmbeddedSandbox nproc 语义注释）
 //   · 监督循环：浏览器任何形式退出（关闭窗口/崩溃/OOM/被杀）1 秒内同一 Profile 拉起
 //   · USR1 → 浏览器进程级重启（策略刷新后即时生效通道，与容器模式语义一致）
 //   · 状态落盘 state.json —— 平台重启后自动重新收养（re-adopt）存活沙箱
@@ -339,7 +340,8 @@ export function embeddedHardeningSummary(spec: EmbeddedSandboxSpec, linuxUser: s
     restartPolicy: "always",
     supervisorLoop: true,
     nonRootUser: linuxUser || process.env.USER || "current-user",
-    pidsLimit: spec.pidsLimit ?? 256,
+    pidsLimit: linuxUser ? (spec.pidsLimit ?? 256) : 0, // 0 = 同用户模式已跳过 nproc（UID 共享计数不可用）
+    pidsLimitMode: linuxUser ? ("prlimit-uid" as const) : ("skipped-shared-uid" as const),
     memLimitMb: spec.memLimitMb ?? 1024,
     cpuLimit: spec.cpuLimit ?? 1,
     networkIsolated: false, // 单容器共享网络命名空间；网络面由 Chromium 托管策略管控
@@ -422,6 +424,17 @@ export async function createEmbeddedSandbox(spec: EmbeddedSandboxSpec): Promise<
   // ---- 生成每沙箱 chromium 内层启动脚本（unshare -Urm 挂载命名空间内执行）----
   // bind 挂载每沙箱策略文件 → /etc/chromium/policies/managed/dockyard.json
   //（视图仅本进程树可见；宿主与其他沙箱不受影响，见文件头注释）
+  //
+  // 【nproc 语义修正（根因修复）】prlimit --nproc=<N> 按【UID】计数进程数：
+  //   · 独立用户形态（容器内 dyu-<hash> 专用用户）：上限仅作用于该沙箱专用用户，语义正确；
+  //   · 同用户模式（非 root 开发环境 / useradd 降级）：平台进程（dev 服务器、
+  //     ws-hub、vnc-bridge 等）与沙箱共享同一 UID —— nproc 会把整个 UID 的
+  //     全部进程计入上限，导致 chromium fork 失败 → 监督循环崩溃拉起死循环。
+  //     此形态跳过 nproc（进程数隔离降级），资源面由内存上限
+  //     （js-flags max-old-space-size + memLimitMb）兜底。
+  const nprocExec = linuxUser
+    ? `exec prlimit --nproc=${pidsLimit} --`
+    : `# 同用户模式：跳过 prlimit --nproc（按 UID 计数会把平台共享进程计入上限）\n# 资源面由内存上限（js-flags max-old-space-size）兜底\nexec`
   const proxyArgs = spec.proxyUrl ? `--proxy-server=${spec.proxyUrl}` : ""
   const inner = `#!/bin/sh
 # 由嵌入式沙箱引擎生成（沙箱 ${id}）
@@ -434,7 +447,7 @@ if [ -n "$DY_POLICY_FILE" ] && [ -f "$DY_POLICY_FILE" ]; then
     echo "[emb] WARN: /etc/chromium/policies/managed/dockyard.json 不存在 → 以全局基线运行" >>"$DY_LOG_DIR/policy.log"
   fi
 fi
-exec prlimit --nproc=${pidsLimit} -- "${bins.chrome}" \\
+${nprocExec} "${bins.chrome}" \\
   --user-data-dir="\${DY_PROFILE_DIR}" \\
   --no-sandbox --disable-gpu --no-first-run \\
   --disable-session-crashed-bubble --hide-crash-restore-bubble \\
