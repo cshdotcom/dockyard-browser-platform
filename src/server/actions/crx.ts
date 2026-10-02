@@ -241,6 +241,7 @@ export async function saveCrxPolicyEntryAction(input: unknown): Promise<ActionRe
     if (!conflict.ok) throw bizError(ErrorCode.PARAM_ERROR, conflict.message || "配置冲突")
     // 沙箱数量上限
     if (p.scopeType === "SANDBOX") {
+      if (!p.scopeId) throw bizError(ErrorCode.PARAM_ERROR, "沙箱级作用域必须指定 scopeId")
       const limit = await checkSandboxForcelistLimit(p.scopeId, 1)
       if (!limit.ok) throw bizError(ErrorCode.CONFLICT, limit.message)
     }

@@ -1,6 +1,7 @@
 "use client"
 
 // 用户组 新建/编辑 表单弹窗：父组树形选择（防循环）/ 配额 / 预留配额 / 继承 / 强制2FA / 标签
+// r14（22-c）：组级闲置超时策略（继承全局/无限/自定义分钟 + 锁定开关；编辑时拉取当前策略回显）
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
@@ -16,8 +17,9 @@ import { Switch } from "@/components/ui/switch"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { PrecisionInput } from "@/components/shared/confirm"
-import { createGroupAction, updateGroupAction } from "@/server/actions/groups"
+import { createGroupAction, updateGroupAction, getGroupIdlePolicyAction, setGroupIdleTimeoutAction } from "@/server/actions/groups"
 
 export interface GroupTreeNodeInfo {
   id: string
@@ -112,6 +114,15 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
   const [rSessions, setRSessions] = React.useState(2)
   const [rNovnc, setRNovnc] = React.useState(1)
 
+  // r14（22-c）：组级闲置超时策略（inherit=继承全局默认 / unlimited=0 无限 / limit=自定义分钟 + 锁定开关）
+  const [idleMode, setIdleMode] = React.useState<"inherit" | "unlimited" | "limit">("inherit")
+  const [idleMinutes, setIdleMinutes] = React.useState(60)
+  const [idleLocked, setIdleLocked] = React.useState(false)
+  const [idleInitial, setIdleInitial] = React.useState<{ minutes: number | null; locked: boolean } | null>(null)
+  const [idleGlobalDefault, setIdleGlobalDefault] = React.useState(60)
+  const [idleAffected, setIdleAffected] = React.useState<number | null>(null)
+  const [idleLoading, setIdleLoading] = React.useState(false)
+
   React.useEffect(() => {
     if (!open) return
     if (mode === "edit" && group) {
@@ -145,6 +156,28 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       } else {
         setReservedEnabled(false)
       }
+      // r14（22-c）：拉取当前组级闲置超时策略回显（groups-tree 行数据不含新字段，弹层自取）
+      setIdleInitial(null)
+      setIdleMode("inherit")
+      setIdleMinutes(60)
+      setIdleLocked(false)
+      setIdleLoading(true)
+      getGroupIdlePolicyAction({ id: group.id })
+        .then((res) => {
+          if (res.code === 0 && res.data) {
+            const d = res.data
+            setIdleMode(d.minutes == null ? "inherit" : d.minutes === 0 ? "unlimited" : "limit")
+            if (d.minutes != null && d.minutes > 0) setIdleMinutes(d.minutes)
+            setIdleLocked(d.locked)
+            setIdleInitial({ minutes: d.minutes, locked: d.locked })
+            setIdleGlobalDefault(d.globalDefault)
+            setIdleAffected(d.affectedMembers)
+          } else {
+            toast.error(res.msg || "闲置超时策略加载失败")
+          }
+        })
+        .catch(() => toast.error("闲置超时策略加载失败"))
+        .finally(() => setIdleLoading(false))
     } else {
       setName("")
       setDescription("")
@@ -162,6 +195,11 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       setReservedEnabled(false)
       setRSessions(2)
       setRNovnc(1)
+      setIdleMode("inherit")
+      setIdleMinutes(60)
+      setIdleLocked(false)
+      setIdleInitial(null)
+      setIdleAffected(null)
     }
   }, [open, mode, group])
 
@@ -195,11 +233,27 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
 
     setBusy(true)
     try {
+      // r14（22-c）：闲置超时策略取值（null=继承全局默认，0=无限，N=分钟）
+      const idleMinutesValue: number | null =
+        idleMode === "inherit" ? null : idleMode === "unlimited" ? 0 : Math.max(1, Math.min(43200, Math.round(idleMinutes)))
+
       const res =
         mode === "edit" && group
           ? await updateGroupAction({ id: group.id, ...payload })
           : await createGroupAction(payload)
       if (res.code === 0) {
+        // r14（22-c）：保存组级闲置超时策略（创建：非默认才落库；编辑：与拉取初值比对变化才落库，避免审计噪声）
+        const targetId = mode === "edit" && group ? group.id : res.data?.id
+        const idleChanged =
+          mode === "edit"
+            ? !idleInitial || idleMinutesValue !== idleInitial.minutes || idleLocked !== idleInitial.locked
+            : idleMinutesValue !== null || idleLocked
+        if (targetId && idleChanged) {
+          const idleRes = await setGroupIdleTimeoutAction({ id: targetId, minutes: idleMinutesValue, locked: idleLocked })
+          if (idleRes.code !== 0) {
+            toast.warning(`闲置超时策略保存失败：${idleRes.msg}（其余字段已保存）`)
+          }
+        }
         toast.success(mode === "edit" ? "用户组已更新" : "用户组创建成功")
         onOpenChange(false)
         router.refresh()
@@ -313,6 +367,49 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
                 <span className="text-xs text-muted-foreground">分钟</span>
                 <Switch checked={vncLimitEnabled} onCheckedChange={(b) => { setVncLimitEnabled(b); if (b && vncLimitMinutes <= 0) setVncLimitMinutes(120) }} />
               </div>
+            </div>
+            <div className="flex items-center justify-between rounded-md border px-3 py-2">
+              <div className="min-w-0 pr-2">
+                <span className="text-sm flex items-center gap-1.5">
+                  沙箱闲置超时
+                  {idleLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+                </span>
+                <p className="text-[10px] text-muted-foreground">组级策略：成员创建/编辑工作区时的默认闲置超时（沙箱级/用户级覆盖优先）</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Select value={idleMode} onValueChange={(v) => setIdleMode(v as "inherit" | "unlimited" | "limit")}>
+                  <SelectTrigger className="h-8 w-32 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">继承全局默认</SelectItem>
+                    <SelectItem value="unlimited">无限（0）</SelectItem>
+                    <SelectItem value="limit">限制时长</SelectItem>
+                  </SelectContent>
+                </Select>
+                {idleMode === "limit" && (
+                  <Input
+                    type="number"
+                    min={1}
+                    max={43200}
+                    value={idleMinutes}
+                    onChange={(e) => setIdleMinutes(Math.max(1, Math.min(43200, Number(e.target.value) || 60)))}
+                    className="h-8 w-20"
+                  />
+                )}
+                {idleMode === "limit" && <span className="text-xs text-muted-foreground">分钟</span>}
+              </div>
+            </div>
+            <div className="flex items-center justify-between rounded-md border px-3 py-2">
+              <div className="min-w-0 pr-2">
+                <span className="text-sm">锁定闲置超时</span>
+                <p className="text-[10px] text-muted-foreground">
+                  开启后组内成员创建/编辑工作区时不可自行调整闲置超时（用户级锁定优先；管理员不受限）
+                  {idleMode === "inherit" && idleGlobalDefault != null && (
+                    <span> · 当前全局默认 {idleGlobalDefault > 0 ? `${Math.round(idleGlobalDefault)} 分钟` : "无限"}</span>
+                  )}
+                  {idleAffected != null && <span> · 影响成员 {idleAffected} 人</span>}
+                </p>
+              </div>
+              <Switch checked={idleLocked} onCheckedChange={setIdleLocked} />
             </div>
           </div>
         </div>

@@ -61,8 +61,8 @@ function ipInCidr(ip: string, cidr: string): boolean {
   }
 }
 
-// 行为画像更新（每类操作调用）
-export async function trackBehavior(userId: string, kind: "CREATE" | "DELETE" | "RESTORE" | "MCP_CALL" | "VNC_MIN" | "BATCH" | "RISK") {
+// 行为画像更新（每类操作调用；LOGIN=轻量活跃度标记，仅刷新 lastActiveAt 语义不计数）
+export async function trackBehavior(userId: string, kind: "CREATE" | "DELETE" | "RESTORE" | "MCP_CALL" | "VNC_MIN" | "BATCH" | "RISK" | "LOGIN") {
   const inc: Record<string, number> = {}
   if (kind === "CREATE") inc.resourcesCreated = 1
   if (kind === "DELETE") inc.resourcesDeleted = 1

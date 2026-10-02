@@ -303,3 +303,73 @@ export async function deleteWebhookRuleAction(input: unknown): Promise<ActionRes
     return { id: rule.id }
   })
 }
+
+// ---- Webhook 规则批量操作（前端批量工具栏接线：启停/删除）----
+const batchWebhookSchema = z.object({ ids: z.array(zId).min(1).max(200), enabled: z.boolean().optional() })
+
+export async function batchToggleWebhookRulesAction(
+  input: unknown,
+): Promise<ActionResult<{ affected: number; failed?: { id: string; reason: string }[] }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAdmin()
+    const p = zodValidate(batchWebhookSchema, input)
+    if (p.enabled === undefined) throw bizError(ErrorCode.PARAM_ERROR, "缺少 enabled 参数")
+    const affected: string[] = []
+    const failed: { id: string; reason: string }[] = []
+    for (const id of p.ids) {
+      try {
+        const r = await toggleWebhookRuleAction({ id, enabled: p.enabled })
+        if (r.code === 0) affected.push(id)
+        else failed.push({ id, reason: r.msg })
+      } catch (e) {
+        failed.push({ id, reason: e instanceof Error ? e.message : "操作失败" })
+      }
+    }
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "WEBHOOK_BATCH_TOGGLE",
+      resourceType: "WEBHOOK",
+      resourceId: "batch:" + affected.length,
+      resourceName: `Webhook 批量${p.enabled ? "启用" : "停用"}`,
+      before: { total: p.ids.length },
+      after: { affected: affected.length, failed: failed.length, enabled: p.enabled },
+      severity: "WARN",
+    })
+    return { affected: affected.length, ...(failed.length ? { failed } : {}) }
+  })
+}
+
+export async function batchDeleteWebhookRulesAction(
+  input: unknown,
+): Promise<ActionResult<{ affected: number; failed?: { id: string; reason: string }[] }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAdmin()
+    const p = zodValidate(batchWebhookSchema.omit({ enabled: true }), input)
+    const affected: string[] = []
+    const failed: { id: string; reason: string }[] = []
+    for (const id of p.ids) {
+      try {
+        const r = await deleteWebhookRuleAction({ id })
+        if (r.code === 0) affected.push(id)
+        else failed.push({ id, reason: r.msg })
+      } catch (e) {
+        failed.push({ id, reason: e instanceof Error ? e.message : "操作失败" })
+      }
+    }
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "WEBHOOK_BATCH_DELETE",
+      resourceType: "WEBHOOK",
+      resourceId: "batch:" + affected.length,
+      resourceName: "Webhook 批量删除",
+      before: { total: p.ids.length },
+      after: { affected: affected.length, failed: failed.length },
+      severity: "WARN",
+    })
+    return { affected: affected.length, ...(failed.length ? { failed } : {}) }
+  })
+}

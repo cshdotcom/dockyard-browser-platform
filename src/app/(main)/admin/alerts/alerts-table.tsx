@@ -34,7 +34,9 @@ export interface AlertRow {
 
 const LEVEL_META: Record<string, { label: string; cls: string }> = {
   INFO: { label: "INFO", cls: "bg-sky-600 hover:bg-sky-600" },
+  WARNING: { label: "WARNING", cls: "bg-amber-500 hover:bg-amber-500" },
   WARN: { label: "WARN", cls: "bg-amber-500 hover:bg-amber-500" },
+  ERROR: { label: "ERROR", cls: "bg-orange-600 hover:bg-orange-600" },
   CRITICAL: { label: "CRITICAL", cls: "bg-red-600 hover:bg-red-600" },
 }
 

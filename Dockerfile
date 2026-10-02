@@ -4,7 +4,7 @@
 #   · Next.js 主服务(standalone) + WS枢纽(3003/3004) + VNC网关桥(3005)
 #   · 每工作区嵌入式沙箱进程树：Xvfb + Chromium + x11vnc（同容器内编排）
 #   · sing-box 代理进程（同容器进程模式，不再需要外部容器/镜像）
-#   · Prisma(SQLite) + 全部依赖
+#   · Prisma（SQLite 默认；可选 PostgreSQL：DATABASE_PROVIDER=postgres + DATABASE_URL）+ 全部依赖
 # 部署：支持 host 网络模式 / 桥接模式；零 Docker-in-Docker、零外部镜像依赖
 # ============================================================
 
@@ -21,7 +21,10 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # 数据库 schema 生成 Prisma Client（构建时需要）
+# [22-d] 双客户端：默认 SQLite（@prisma/client）+ 可选 PostgreSQL（独立产物
+#   node_modules/@prisma/client-postgres —— prisma/schema.postgres.prisma 由主 schema 派生）
 RUN bunx prisma generate
+RUN bunx prisma generate --schema prisma/schema.postgres.prisma
 # Next.js standalone 构建（产物自带 server.js + 精简 node_modules）
 ENV DATABASE_URL="file:/app/db/build-placeholder.db"
 RUN bunx next build
@@ -88,6 +91,7 @@ ENV NODE_ENV=production \
     WS_EVENT_PORT=3004 \
     VNC_BRIDGE_PORT=3005 \
     BROWSER_RUNTIME=auto \
+    DATABASE_PROVIDER=sqlite \
     DATABASE_URL="file:/app/db/custom.db" \
     STORAGE_LOCAL_PATH=/app/storage \
     HOSTNAME=0.0.0.0
@@ -103,6 +107,13 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/mini-services ./mini-services
 COPY --from=builder /app/src/lib/config.ts ./src/lib/config.ts
+# [22-d] PostgreSQL 支持：
+#   · 双 Prisma Client（sqlite 默认 + postgres 可选）查询引擎显式落镜像（NFT 动态加载路径无法静态追踪）
+#   · db/postgres（init.sql / audit_triggers.sql / apply-triggers.ts）→ /app/prisma/postgres
+#     （不放在 /app/db —— 该路径是数据卷挂载点，旧卷挂载会遮蔽镜像内文件）
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/node_modules/@prisma/client-postgres ./node_modules/@prisma/client-postgres
+COPY --from=builder /app/db/postgres ./prisma/postgres
 
 # 启动/停止/守护/自检 + 嵌入式沙箱监督脚本
 COPY docker/start.sh docker/stop.sh docker/healthcheck.sh docker/entrypoint-guard.sh /app/docker/

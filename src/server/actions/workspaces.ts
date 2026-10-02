@@ -4,7 +4,7 @@ import { z } from "zod"
 import crypto from "crypto"
 import { Prisma } from "@prisma/client"
 import { db } from "@/lib/db"
-import { requireAuth, checkSessionQuota, userGroupIds, requireWritableMode, requirePermission } from "@/lib/permissions"
+import { requireAuth, checkSessionQuota, userGroupIds, requireWritableMode, requirePermission, requireAdmin } from "@/lib/permissions"
 import { actionHandler, type ActionResult } from "@/lib/api"
 import { writeAudit } from "@/lib/audit"
 import { encrypt, decrypt, randomHex } from "@/lib/crypto"
@@ -23,6 +23,7 @@ import { ENV } from "@/lib/env"
 import { moveToRecycle } from "@/lib/recycle"
 import { getConfigBool, getConfig, getConfigNumber } from "@/lib/config"
 import { assertShareAllowed } from "@/lib/share-policy"
+import { resolveIdlePolicyForUser, isAdminRole, fmtIdleBrief } from "@/lib/idle-policy"
 
 // ============================================================
 // 浏览器工作区业务 Server Actions
@@ -107,7 +108,7 @@ const createSchema = z.object({
   proxyNodeId: z.string().optional().nullable(),
   profileSnapshotId: z.string().optional().nullable(),
   ttlMinutes: zPrecision("TTL", 0, 525600).optional().default(0),
-  idleTimeoutMinutes: zPrecision("闲置超时", 1, 1440).optional().default(60),
+  idleTimeoutMinutes: zPrecision("闲置超时", 0, 1440).optional().default(60), // 0=无限（永不闲置回收）
   resolution: z.string().optional().default("1920x1080"),
   tags: z.string().optional().default(""),
 })
@@ -141,6 +142,13 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
 
     // 代理节点权限校验
     if (p.proxyNodeId) await checkProxyAccess(ctx.userId, p.proxyNodeId)
+
+    // r14（22-c）：闲置超时四级策略链解析（沙箱>用户>组>全局）
+    // 表单默认值=策略链解析值（页面传入）；锁定态普通用户传入值被忽略并静默采用解析值（审计留痕）
+    const idlePolicy = await resolveIdlePolicyForUser(ctx.userId, ctx.role)
+    let idleMinutes = p.idleTimeoutMinutes ?? idlePolicy.defaultMinutes
+    const idleIgnoredByPolicy = !isAdminRole(ctx.role) && idlePolicy.locked && idleMinutes !== idlePolicy.defaultMinutes
+    if (idleIgnoredByPolicy) idleMinutes = idlePolicy.defaultMinutes
 
     // 模板加载（继承配置）
     let templateConfig: Record<string, unknown> = {}
@@ -193,7 +201,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           cdpUrl: session.cdpUrl,
           networkPolicyJson: netPolicyJson(netPolicy, domPolicy, endPolicy, filePolicy),
           ttlMinutes: p.ttlMinutes || (await getConfigNumber("workspace.defaultTtlMinutes", 0)),
-          idleTimeoutMinutes: p.idleTimeoutMinutes || (await getConfigNumber("workspace.defaultIdleTimeoutMin", 60)),
+          idleTimeoutMinutes: idleMinutes,
           createdByUserId: ctx.userId,
         },
       })
@@ -204,7 +212,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_CREATE",
         resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
         ownerUserId: ctx.userId, createdByUserId: ctx.userId,
-        after: { mode: "cdp_light", steelSessionId: session.sessionId, proxy: proxyInfo.proxyNodeName, simulated: session.simulated },
+        after: { mode: "cdp_light", steelSessionId: session.sessionId, proxy: proxyInfo.proxyNodeName, simulated: session.simulated, idleTimeoutMinutes: idleMinutes, ...(idleIgnoredByPolicy ? { idlePolicy: { lockedBy: idlePolicy.lockSource, enforced: fmtIdleBrief(idleMinutes), submittedIgnored: p.idleTimeoutMinutes } } : {}) },
       })
       return { id: ws.id, uuid: ws.uuid, cdpUrl: session.cdpUrl, mode: "cdp_light" }
     } else {
@@ -258,7 +266,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           hardeningJson: hardeningJsonInput,
           networkPolicyJson: netPolicyJson(netPolicy, domPolicy, endPolicy, filePolicy),
           ttlMinutes: p.ttlMinutes,
-          idleTimeoutMinutes: p.idleTimeoutMinutes,
+          idleTimeoutMinutes: idleMinutes,
           createdByUserId: ctx.userId,
         },
       })
@@ -269,7 +277,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_CREATE",
         resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
         ownerUserId: ctx.userId, createdByUserId: ctx.userId,
-        after: { mode: "novnc_full", novncSessionId: novnc.novncSessionId, resolution: p.resolution },
+        after: { mode: "novnc_full", novncSessionId: novnc.novncSessionId, resolution: p.resolution, idleTimeoutMinutes: idleMinutes, ...(idleIgnoredByPolicy ? { idlePolicy: { lockedBy: idlePolicy.lockSource, enforced: fmtIdleBrief(idleMinutes), submittedIgnored: p.idleTimeoutMinutes } } : {}) },
       })
       return { id: ws.id, uuid: ws.uuid, mode: "novnc_full" }
     }
@@ -568,6 +576,104 @@ export async function searchShareTargetUsersAction(input: unknown): Promise<Acti
   })
 }
 
+// ---- r22b：批量共享（多选用户一次授权；逐个校验，部分失败汇总返回） ----
+export async function shareWorkspaceBatchAction(input: unknown): Promise<ActionResult<{
+  success: number
+  failures: { username: string; reason: string }[]
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    await requirePermission(ctx.userId, "blockShareWorkspace", "管理员已禁止分享工作区")
+    const { workspaceId, targetUsernames, permission, expireHours } = zodValidate(
+      z.object({
+        workspaceId: z.string(),
+        targetUsernames: z.array(z.string().min(1).max(64)).min(1, "请至少选择一个用户").max(20, "单次最多共享 20 个用户"),
+        permission: z.enum(["VIEW", "OPERATE"]),
+        expireHours: zPrecision("共享时长", 0, 8760).optional().default(0),
+      }),
+      input
+    )
+    // 四级共享管控门禁（与单人共享同一管控链）
+    await assertShareAllowed({ userId: ctx.userId, workspaceId, role: ctx.role })
+    const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN") throw new Error("只有所有者可以共享工作区")
+
+    const failures: { username: string; reason: string }[] = []
+    let success = 0
+    const expireAt = expireHours > 0 ? new Date(Date.now() + expireHours * 3600_000) : null
+    // 输入去重（同一用户只处理一次）
+    const usernames = [...new Set(targetUsernames.map((u) => u.trim()).filter(Boolean))]
+    for (const username of usernames) {
+      try {
+        const target = await db.user.findFirst({ where: { username, deletedAt: null } })
+        if (!target) throw new Error("用户不存在")
+        if (target.id === ws.userId) throw new Error("不能共享给自己")
+        await db.workspaceShare.upsert({
+          where: { workspaceId_targetUserId: { workspaceId, targetUserId: target.id } },
+          update: { permission, expireAt, revokedAt: null },
+          create: {
+            workspaceId, targetUserId: target.id, permission, expireAt,
+            createdByUserId: ctx.userId,
+          },
+        })
+        success++
+      } catch (e) {
+        failures.push({ username, reason: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_SHARE",
+      resourceType: "WORKSPACE", resourceId: workspaceId, resourceName: ws.name,
+      ownerUserId: ws.userId, createdByUserId: ws.createdByUserId,
+      after: { targetUsers: usernames, permission, expireHours, success, failCount: failures.length, failures },
+    })
+    return { success, failures }
+  })
+}
+
+// ---- r22b：接收者名单（发起人/管理员视角：共享弹窗内展示 + 单个移除） ----
+export async function listWorkspaceShareRecipientsAction(input: unknown): Promise<ActionResult<{
+  items: {
+    id: string
+    targetUsername: string
+    targetDisplayName: string | null
+    permission: string
+    expireAt: string | null
+    revokedAt: string | null
+    status: "active" | "revoked" | "expired"
+    createdAt: string
+  }[]
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { workspaceId } = zodValidate(z.object({ workspaceId: z.string() }), input)
+    const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null }, select: { id: true, userId: true } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权查看该工作区的共享名单")
+
+    const rows = await db.workspaceShare.findMany({ where: { workspaceId }, orderBy: { createdAt: "desc" } })
+    const userIds = [...new Set(rows.map((r) => r.targetUserId))]
+    const users = userIds.length
+      ? await db.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true, displayName: true } })
+      : []
+    const uMap = new Map(users.map((u) => [u.id, u]))
+    const now = Date.now()
+    return {
+      items: rows.map((r) => ({
+        id: r.id,
+        targetUsername: uMap.get(r.targetUserId)?.username || r.targetUserId,
+        targetDisplayName: uMap.get(r.targetUserId)?.displayName ?? null,
+        permission: r.permission,
+        expireAt: r.expireAt?.toISOString() ?? null,
+        revokedAt: r.revokedAt?.toISOString() ?? null,
+        status: r.revokedAt ? "revoked" : r.expireAt && r.expireAt.getTime() < now ? "expired" : "active",
+        createdAt: r.createdAt.toISOString(),
+      })),
+    }
+  })
+}
+
 // ---- 临时分享链接（带有效期 + 权限 + 次数上限；已登录用户访问即自动绑定共享） ----
 export async function createWorkspaceShareLinkAction(input: unknown): Promise<ActionResult<{
   linkId: string; token: string; url: string; permission: string; expireAt: string | null; maxUses: number
@@ -776,7 +882,7 @@ export async function updateWorkspaceAction(input: unknown): Promise<ActionResul
         id: z.string(),
         name: z.string().min(1).max(64).optional(),
         ttlMinutes: zPrecision("TTL", 0, 525600).optional(),
-        idleTimeoutMinutes: zPrecision("闲置超时", 1, 1440).optional(),
+        idleTimeoutMinutes: zPrecision("闲置超时", 0, 1440).optional(), // 0=无限（永不闲置回收）
         tags: z.string().optional(),
       }),
       input
@@ -784,12 +890,19 @@ export async function updateWorkspaceAction(input: unknown): Promise<ActionResul
     const ws = await db.browserWorkspace.findFirst({ where: { id, deletedAt: null } })
     if (!ws) throw new Error("工作区不存在")
     if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作")
+
+    // r14（22-c）：闲置超时策略锁定 —— 普通用户传入值被忽略并静默采用解析值（审计留痕）
+    const idlePolicy = await resolveIdlePolicyForUser(ctx.userId, ctx.role)
+    const idleLockedForUser = !isAdminRole(ctx.role) && idlePolicy.locked
+    const idleIgnoredByPolicy = idleLockedForUser && idleTimeoutMinutes !== undefined && idleTimeoutMinutes !== idlePolicy.defaultMinutes
+    const effectiveIdle = idleLockedForUser && idleTimeoutMinutes !== undefined ? idlePolicy.defaultMinutes : idleTimeoutMinutes
+
     await db.browserWorkspace.update({
       where: { id },
       data: {
         ...(name ? { name } : {}),
         ...(ttlMinutes !== undefined ? { ttlMinutes } : {}),
-        ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
+        ...(effectiveIdle !== undefined ? { idleTimeoutMinutes: effectiveIdle } : {}),
         ...(tags !== undefined ? { tags: tags.split(",").map((t) => t.trim()).filter(Boolean) } : {}),
       },
     })
@@ -797,9 +910,42 @@ export async function updateWorkspaceAction(input: unknown): Promise<ActionResul
       operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_UPDATE",
       resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
       before: { name: ws.name, ttl: ws.ttlMinutes, idle: ws.idleTimeoutMinutes },
-      after: { name, ttlMinutes, idleTimeoutMinutes, tags },
+      after: { name, ttlMinutes, idleTimeoutMinutes: effectiveIdle, tags, ...(idleIgnoredByPolicy ? { idlePolicy: { lockedBy: idlePolicy.lockSource, enforced: fmtIdleBrief(idlePolicy.defaultMinutes), submittedIgnored: idleTimeoutMinutes } } : {}) },
     })
     return null
+  })
+}
+
+// ---- r14（22-c）：管理员强制覆写 TTL / 闲置超时（idle 0=无限支持）----
+// 与 admin-workspaces.forceUpdateTtlAction 同语义，但 idleTimeoutMinutes 允许 0（无限）；
+// 供管理端改 TTL 弹窗在闲置超时=0 时走本 action（既有 action 的 zod 下限为 1，边界内不可改）
+export async function adminForceUpdateWorkspaceTimersAction(input: unknown): Promise<ActionResult<{ id: string }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAdmin()
+    const p = zodValidate(
+      z.object({
+        id: z.string(),
+        ttlMinutes: zPrecision("TTL", 0, 525600),
+        idleTimeoutMinutes: zPrecision("闲置超时", 0, 525600), // 0=无限
+      }),
+      input,
+    )
+    const ws = await db.browserWorkspace.findFirst({ where: { id: p.id, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    const expireAt = p.ttlMinutes > 0 ? new Date(Date.now() + p.ttlMinutes * 60_000) : null
+    const updated = await db.browserWorkspace.update({
+      where: { id: p.id },
+      data: { ttlMinutes: p.ttlMinutes, idleTimeoutMinutes: p.idleTimeoutMinutes, expireAt },
+    })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "ADMIN_FORCE_UPDATE_TTL",
+      resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
+      ownerUserId: ws.userId, createdByUserId: ws.createdByUserId,
+      severity: "WARN",
+      before: { ttlMinutes: ws.ttlMinutes, idleTimeoutMinutes: ws.idleTimeoutMinutes, expireAt: ws.expireAt },
+      after: { ttlMinutes: updated.ttlMinutes, idleTimeoutMinutes: updated.idleTimeoutMinutes, expireAt: updated.expireAt, note: `闲置超时 ${fmtIdleBrief(p.idleTimeoutMinutes)}` },
+    })
+    return { id: p.id }
   })
 }
 

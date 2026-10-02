@@ -76,7 +76,8 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
       const idleLimit = ws.idleTimeoutMinutes * 60_000
       const ttlMs = ws.ttlMinutes * 60_000
       const ageMs = now - ws.createdAt.getTime()
-      const idleExpired = idleMs > idleLimit
+      // 0=无限（永不闲置回收）：与 TTL 语义对齐
+      const idleExpired = ws.idleTimeoutMinutes > 0 && idleMs > idleLimit
       const ttlExpired = ws.ttlMinutes > 0 && ageMs > ttlMs
       if (idleExpired || ttlExpired) {
         const reason = ttlExpired ? "TTL到期" : "闲置超时"
@@ -339,7 +340,6 @@ export const TASKS: Record<string, (log: (m: string) => void) => Promise<TaskRes
         }
         const model = tableMap[e.resourceType] as string | undefined
         if (model) {
-          // @ts-expect-error 动态表访问
           await (db as unknown as Record<string, { deleteMany: (a: { where: { id: string } }) => Promise<unknown> }>)[model].deleteMany({ where: { id: e.resourceId } })
         }
         await db.recycleBin.delete({ where: { id: e.id } })

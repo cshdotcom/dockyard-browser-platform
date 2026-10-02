@@ -7,14 +7,23 @@ import { AnnouncementsView, type AnnouncementRow } from "./announcements-view"
 
 // 用户侧公告页：对当前用户可见的公告（GLOBAL / GROUP∈我的组 / USER=我）
 // 展示形态：POPUP 弹窗（未读自动弹出）/ MARQUEE 跑马灯 / FORCE_VIEW 全屏强制阅读
+// r22：支持 ?focus=<id> 定位（站内信「查看详情」落地：自动打开详情弹窗）；仅站内信公告也纳入列表回看
 export const metadata = { title: "平台公告" }
 
 const DISPLAY_LABEL: Record<string, string> = { POPUP: "弹窗", MARQUEE: "跑马灯", FORCE_VIEW: "强制阅读" }
 const TYPE_LABEL: Record<string, string> = { GLOBAL: "全站", GROUP: "用户组", USER: "定向" }
 
-export default async function AnnouncementsPage() {
+export default async function AnnouncementsPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>
+}) {
   const ctx = await requireAuth()
   const gids = await userGroupIds(ctx.userId)
+  // focus 定位参数：站内信「查看详情」跳转 /announcements?focus=<id>（自动打开详情弹窗）
+  const sp = await searchParams
+  const focusRaw = sp.focus
+  const focusId = typeof focusRaw === "string" && focusRaw ? focusRaw : Array.isArray(focusRaw) ? focusRaw[0] : undefined
 
   const now = new Date()
   const base = {
@@ -70,6 +79,12 @@ export default async function AnnouncementsPage() {
   })
   // 列表展示：至少有一种展示通道的公告（纯站内信公告只在通知铃/消息中心出现）
   const displayRows = rows.filter((r) => (r.displayTypes?.length ? r.displayTypes : [r.displayType]).length > 0)
+  // focus 落地：站内信「查看详情」指向的公告若为仅站内信（无展示通道），也纳入列表以打开详情弹窗
+  let listRows = displayRows
+  if (focusId) {
+    const target = rows.find((r) => r.id === focusId)
+    if (target && !displayRows.some((r) => r.id === focusId)) listRows = [...displayRows, target]
+  }
 
   const unreadCount = rows.filter((r) => !r.read).length
 
@@ -89,7 +104,7 @@ export default async function AnnouncementsPage() {
         <StatCard title="组 / 定向" value={groupCount + userCount} sub={`组 ${groupCount} · 定向 ${userCount}`} icon={<Users className="h-4 w-4" />} />
       </div>
 
-      <AnnouncementsView rows={displayRows} />
+      <AnnouncementsView rows={listRows} focusId={focusId} />
     </div>
   )
 }

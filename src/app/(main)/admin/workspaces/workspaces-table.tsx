@@ -3,8 +3,9 @@
 // 工作区管控交互表格（增强版）：
 //   · 列显隐配置（localStorage 持久化，默认精简视图）
 //   · 全景列：归属双用户/模式/状态/运行时长/时间三列/容器健康/代理出口/策略快照/TTL/调用统计/删除记录
-//   · 批量筛选：用户/状态/模式/代理/创建时间范围/活跃时间范围/运行时长下限 + 活跃/回收站双视图
+//   · 批量筛选：用户（r14 22-c：默认仅自己 + 搜索多选 + 全选）/状态/模式/代理/创建时间范围/活跃时间范围/运行时长下限 + 活跃/回收站双视图
 //   · 7 种单行强制操作 + 6 种批量操作（逐条 try/catch 结果报告）
+//   · r14（22-c）：改 TTL 弹窗闲置超时支持 0=无限（idle=0 走 adminForceUpdateWorkspaceTimersAction）
 
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
@@ -12,6 +13,7 @@ import { toast } from "sonner"
 import {
   Loader2, MoreHorizontal, Square, RotateCw, Trash2, Flame, Unplug, Timer, UserRoundCog, Anchor,
   AlertTriangle, X, Columns3, ShieldCheck, ShieldX, Container, History, ArrowRightLeft, Share2,
+  UsersRound, Search,
 } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
@@ -23,10 +25,12 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import {
   forceStopWorkspaceAction, forceRestartWorkspaceAction, forceRecycleWorkspaceAction, forcePurgeWorkspaceAction,
   forceDisconnectVncAction, forceUpdateTtlAction, transferWorkspaceAction, batchWorkspaceAction, setWorkspaceVncLimitAction,
 } from "@/server/actions/admin-workspaces"
+import { adminForceUpdateWorkspaceTimersAction } from "@/server/actions/workspaces"
 
 export interface AdminWorkspaceRow {
   id: string
@@ -95,6 +99,8 @@ interface Props {
   userOptions: UserOption[]
   proxyOptions: { id: string; name: string }[]
   transferTargets: UserOption[]
+  /** r14（22-c）：当前管理员（默认用户筛选=仅自己） */
+  currentAdmin: { id: string; username: string }
 }
 
 interface BatchOutcome {
@@ -129,7 +135,7 @@ function loadVisibleCols(view: "active" | "deleted"): Set<ColKey> {
 }
 
 export function WorkspacesTable(props: Props) {
-  const { rows, total, page, pageSize, keyword, sortField, sortOrder, filters, view, userOptions, proxyOptions, transferTargets } = props
+  const { rows, total, page, pageSize, keyword, sortField, sortOrder, filters, view, userOptions, proxyOptions, transferTargets, currentAdmin } = props
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -254,6 +260,26 @@ export function WorkspacesTable(props: Props) {
     } finally {
       setBusy("")
     }
+  }
+
+  // r14（22-c）：批量改 TTL（idle=0 无限形态）——既有批量 action zod 下限为 1（边界内不可改），
+  // 故 idle<1 时逐条调用 adminForceUpdateWorkspaceTimersAction 并按既有失败汇总格式聚合
+  const runBatchIdleZero = async () => {
+    if (sel.length === 0) return
+    setBusy("batch-idle0")
+    const failures: { id: string; reason: string }[] = []
+    let successCount = 0
+    for (const id of sel) {
+      try {
+        const res = await adminForceUpdateWorkspaceTimersAction({ id, ttlMinutes: batchTtl.ttl, idleTimeoutMinutes: batchTtl.idle })
+        if (res.code === 0) successCount++
+        else failures.push({ id, reason: res.msg || "操作失败" })
+      } catch (e) {
+        failures.push({ id, reason: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    setBusy("")
+    reportBatch("批量改 TTL（闲置超时=无限）", { successCount, failCount: failures.length, failures })
   }
 
   // ---- 筛选表单的本地状态（提交时一次性合并到 URL） ----
@@ -523,20 +549,13 @@ export function WorkspacesTable(props: Props) {
           </button>
         </div>
 
-        <Select
-          value={filters.user || undefined}
-          onValueChange={(v) => pushQuery({ page: "1", user: v === "__all__" ? undefined : v })}
-        >
-          <SelectTrigger className="w-40"><SelectValue placeholder="按用户筛选" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="__all__">全部用户</SelectItem>
-            {userOptions.map((u) => (
-              <SelectItem key={u.id} value={u.id}>
-                {u.username}{u.role !== "USER" ? `（${u.role === "SUPER_ADMIN" ? "超管" : u.role === "ADMIN" ? "管理员" : "组管理员"}）` : ""}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {/* r14（22-c）：用户筛选器（默认仅自己 + 搜索多选 + 全选） */}
+        <UserFilterPopover
+          userOptions={userOptions}
+          currentAdmin={currentAdmin}
+          filters={filters}
+          pushQuery={pushQuery}
+        />
 
         <Select
           value={filters.proxy || undefined}
@@ -623,14 +642,13 @@ export function WorkspacesTable(props: Props) {
           )}
         </form>
 
-        {filters.user && (
-          <Badge variant="outline" className="gap-1">
-            用户: {userOptions.find((u) => u.id === filters.user)?.username || filters.user}
-            <button type="button" onClick={() => pushQuery({ page: "1", user: undefined })} className="ml-1 hover:text-foreground">
-              <X className="h-3 w-3" />
-            </button>
-          </Badge>
-        )}
+        {/* r14（22-c）：当前用户筛选作用域徽章（默认=仅自己，提示明显） */}
+        <UserScopeBadge
+          userOptions={userOptions}
+          currentAdmin={currentAdmin}
+          filters={filters}
+          pushQuery={pushQuery}
+        />
 
         {/* ---- 列显隐配置 ---- */}
         <div className="ml-auto">
@@ -816,8 +834,9 @@ export function WorkspacesTable(props: Props) {
               <PrecisionInput value={ttlForm.ttl} onChange={(v) => setTtlForm({ ...ttlForm, ttl: v })} min={0} max={525600} suffix="分" />
             </div>
             <div className="space-y-1.5">
-              <Label>闲置超时（分钟）</Label>
-              <PrecisionInput value={ttlForm.idle} onChange={(v) => setTtlForm({ ...ttlForm, idle: v })} min={1} max={525600} suffix="分" />
+              <Label>闲置超时（分钟，0=无限）</Label>
+              <PrecisionInput value={ttlForm.idle} onChange={(v) => setTtlForm({ ...ttlForm, idle: v })} min={0} max={525600} suffix="分" />
+              <p className="text-[10px] text-muted-foreground">0=无限（永不闲置回收）；四级链：沙箱＞用户＞组＞全局</p>
             </div>
           </div>
           <DialogFooter>
@@ -827,7 +846,12 @@ export function WorkspacesTable(props: Props) {
               disabled={busy === "ttl"}
               onClick={async () => {
                 if (!ttlTarget) return
-                await callAction("ttl", () => forceUpdateTtlAction({ id: ttlTarget.id, ttlMinutes: ttlForm.ttl, idleTimeoutMinutes: ttlForm.idle }))
+                // r14（22-c）：idle=0（无限）走新 action（既有 forceUpdateTtlAction zod 下限为 1）
+                await callAction("ttl", () =>
+                  ttlForm.idle >= 1
+                    ? forceUpdateTtlAction({ id: ttlTarget.id, ttlMinutes: ttlForm.ttl, idleTimeoutMinutes: ttlForm.idle })
+                    : adminForceUpdateWorkspaceTimersAction({ id: ttlTarget.id, ttlMinutes: ttlForm.ttl, idleTimeoutMinutes: ttlForm.idle }),
+                )
                 setTtlTarget(null)
               }}
             >
@@ -966,21 +990,27 @@ export function WorkspacesTable(props: Props) {
               <PrecisionInput value={batchTtl.ttl} onChange={(v) => setBatchTtl({ ...batchTtl, ttl: v })} min={0} max={525600} suffix="分" />
             </div>
             <div className="space-y-1.5">
-              <Label>闲置超时（分钟）</Label>
-              <PrecisionInput value={batchTtl.idle} onChange={(v) => setBatchTtl({ ...batchTtl, idle: v })} min={1} max={525600} suffix="分" />
+              <Label>闲置超时（分钟，0=无限）</Label>
+              <PrecisionInput value={batchTtl.idle} onChange={(v) => setBatchTtl({ ...batchTtl, idle: v })} min={0} max={525600} suffix="分" />
+              <p className="text-[10px] text-muted-foreground">0=无限（永不闲置回收）；逐条执行失败不影响其他</p>
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBatchTtlOpen(false)}>取消</Button>
             <Button
               className="bg-teal-600 hover:bg-teal-700"
-              disabled={busy === "batch-TTL"}
+              disabled={busy === "batch-TTL" || busy === "batch-idle0"}
               onClick={async () => {
                 setBatchTtlOpen(false)
-                await runBatch("批量改 TTL", "TTL", { ttlMinutes: batchTtl.ttl, idleTimeoutMinutes: batchTtl.idle })
+                // r14（22-c）：idle=0（无限）走新 action 逐条执行（既有批量 action zod 下限为 1）
+                if (batchTtl.idle < 1) {
+                  await runBatchIdleZero()
+                } else {
+                  await runBatch("批量改 TTL", "TTL", { ttlMinutes: batchTtl.ttl, idleTimeoutMinutes: batchTtl.idle })
+                }
               }}
             >
-              批量覆写
+              {busy === "batch-idle0" && <Loader2 className="h-4 w-4 mr-1 animate-spin" />} 批量覆写
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1046,6 +1076,280 @@ export function WorkspacesTable(props: Props) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  )
+}
+
+// ============================================================
+// r14（22-c）：用户筛选作用域解析（与 page.tsx 服务端逻辑对齐）
+//   mine（默认，无参数）→ 仅当前管理员自己的工作区
+//   custom（scope=custom + users=多选 ID）→ 所选用户的工作区
+//   all（scope=all，即「全选」）→ 全部用户
+//   legacy（旧版单选 user 参数）→ 单个用户（兼容历史链接）
+// ============================================================
+function parseUserScope(filters: Record<string, string>): { scope: "all" | "custom" | "legacy" | "mine"; selectedIds: string[] } {
+  if (filters.scope === "all") return { scope: "all", selectedIds: [] }
+  const usersRaw = (filters.users || "").split(",").map((s) => s.trim()).filter(Boolean)
+  if (filters.scope === "custom" && usersRaw.length) return { scope: "custom", selectedIds: usersRaw }
+  if (filters.user) return { scope: "legacy", selectedIds: [filters.user] }
+  return { scope: "mine", selectedIds: [] }
+}
+
+function roleTag(role: string): string {
+  if (role === "SUPER_ADMIN") return "超管"
+  if (role === "ADMIN") return "管理员"
+  if (role === "GROUP_ADMIN") return "组管理员"
+  return ""
+}
+
+// ---- 用户筛选器弹层：独立搜索栏 + 多选勾选 + 全选/清空 ----
+function UserFilterPopover({
+  userOptions,
+  currentAdmin,
+  filters,
+  pushQuery,
+}: {
+  userOptions: UserOption[]
+  currentAdmin: { id: string; username: string }
+  filters: Record<string, string>
+  pushQuery: (patch: Record<string, string | undefined>) => void
+}) {
+  const { scope, selectedIds } = parseUserScope(filters)
+  const [search, setSearch] = React.useState("")
+  const [draft, setDraft] = React.useState<string[]>(selectedIds)
+  const [open, setOpen] = React.useState(false)
+
+  React.useEffect(() => {
+    if (open) {
+      setDraft(parseUserScope(filters).selectedIds)
+      setSearch("")
+    }
+  }, [open, filters])
+
+  const kw = search.trim().toLowerCase()
+  const filteredUsers = kw
+    ? userOptions.filter(
+        (u) =>
+          u.username.toLowerCase().includes(kw) ||
+          (u.displayName || "").toLowerCase().includes(kw),
+      )
+    : userOptions
+
+  const toggleDraft = (id: string) =>
+    setDraft((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+
+  const triggerLabel =
+    scope === "all"
+      ? "全部用户"
+      : scope === "custom"
+        ? `已选 ${selectedIds.length} 个用户`
+        : scope === "legacy"
+          ? userOptions.find((u) => u.id === selectedIds[0])?.username || "单个用户"
+          : "仅我的"
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" className="h-8 gap-1.5">
+          <UsersRound className="h-3.5 w-3.5" />
+          用户筛选：{triggerLabel}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-80 p-3">
+        <div className="space-y-2">
+          {/* 快捷作用域 */}
+          <div className="grid grid-cols-2 gap-1.5">
+            <Button
+              type="button"
+              size="sm"
+              variant={scope === "mine" ? "default" : "outline"}
+              className="h-8 text-xs"
+              onClick={() => {
+                pushQuery({ page: "1", scope: undefined, users: undefined, user: undefined })
+                setOpen(false)
+              }}
+            >
+              仅我的（{currentAdmin.username}）
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={scope === "all" ? "default" : "outline"}
+              className="h-8 text-xs"
+              onClick={() => {
+                pushQuery({ page: "1", scope: "all", users: undefined, user: undefined })
+                setOpen(false)
+              }}
+            >
+              全部用户（全选）
+            </Button>
+          </div>
+
+          {/* 独立搜索栏 */}
+          <div className="relative">
+            <Search className="h-3.5 w-3.5 absolute left-2.5 top-2.5 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="搜索用户名 / 显示名…"
+              className="h-8 pl-8 text-xs"
+            />
+            {search && (
+              <button type="button" onClick={() => setSearch("")} className="absolute right-2 top-2 text-muted-foreground hover:text-foreground">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* 多选列表（max-h + overflow-y-auto 滚动规范） */}
+          <div className="rounded-md border max-h-64 overflow-y-auto divide-y">
+            {filteredUsers.length === 0 && (
+              <p className="px-3 py-6 text-xs text-muted-foreground text-center">无匹配用户</p>
+            )}
+            {filteredUsers.map((u) => {
+              const tag = roleTag(u.role)
+              const isMe = u.id === currentAdmin.id
+              return (
+                <label
+                  key={u.id}
+                  className="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-muted/60"
+                >
+                  <input
+                    type="checkbox"
+                    checked={draft.includes(u.id)}
+                    onChange={() => toggleDraft(u.id)}
+                    className="accent-teal-600"
+                  />
+                  <span className="font-medium">{u.username}</span>
+                  {u.displayName && <span className="text-muted-foreground truncate">{u.displayName}</span>}
+                  {isMe && <Badge variant="secondary" className="text-[9px] px-1 py-0">我</Badge>}
+                  {tag && <Badge variant="outline" className="text-[9px] px-1 py-0">{tag}</Badge>}
+                </label>
+              )
+            })}
+          </div>
+
+          {/* 列表操作：全选（当前搜索结果）/ 清空选择 */}
+          <div className="flex items-center justify-between text-[11px]">
+            <button
+              type="button"
+              className="text-teal-600 hover:underline disabled:opacity-50"
+              disabled={filteredUsers.length === 0}
+              onClick={() =>
+                setDraft((prev) => {
+                  const ids = filteredUsers.map((u) => u.id)
+                  const allSelected = ids.every((id) => prev.includes(id))
+                  return allSelected ? prev.filter((id) => !ids.includes(id)) : [...new Set([...prev, ...ids])]
+                })
+              }
+            >
+              {filteredUsers.every((u) => draft.includes(u.id)) && filteredUsers.length > 0 ? "取消本列表全选" : "全选本列表"}
+            </button>
+            <button type="button" className="text-muted-foreground hover:text-foreground hover:underline" onClick={() => setDraft([])}>
+              清空选择
+            </button>
+            <span className="text-muted-foreground">已勾选 {draft.length}</span>
+          </div>
+
+          {/* 应用 */}
+          <div className="flex items-center justify-between gap-2 pt-1">
+            <p className="text-[10px] text-muted-foreground leading-4">
+              {draft.length === 0 ? "不选用户 = 恢复默认（仅显示我的工作区）" : `将只显示 ${draft.length} 个所选用户的工作区`}
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              className="h-8 shrink-0 bg-teal-600 hover:bg-teal-700"
+              onClick={() => {
+                if (draft.length === 0) {
+                  pushQuery({ page: "1", scope: undefined, users: undefined, user: undefined })
+                } else {
+                  pushQuery({ page: "1", scope: "custom", users: draft.join(","), user: undefined })
+                }
+                setOpen(false)
+              }}
+            >
+              应用筛选
+            </Button>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+// ---- 当前作用域徽章：默认态明显提示「仅显示我的工作区」+ 多选胶囊 ----
+function UserScopeBadge({
+  userOptions,
+  currentAdmin,
+  filters,
+  pushQuery,
+}: {
+  userOptions: UserOption[]
+  currentAdmin: { id: string; username: string }
+  filters: Record<string, string>
+  pushQuery: (patch: Record<string, string | undefined>) => void
+}) {
+  const { scope, selectedIds } = parseUserScope(filters)
+
+  if (scope === "mine") {
+    return (
+      <Badge variant="outline" className="gap-1 border-amber-300 text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30">
+        当前：仅显示我的工作区（{currentAdmin.username}）
+      </Badge>
+    )
+  }
+  if (scope === "all") {
+    return (
+      <Badge variant="outline" className="gap-1 border-teal-300 text-teal-700 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/30">
+        当前：全部用户的工作区
+        <button
+          type="button"
+          title="恢复默认（仅显示我的）"
+          onClick={() => pushQuery({ page: "1", scope: undefined, users: undefined, user: undefined })}
+          className="ml-1 hover:text-foreground"
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </Badge>
+    )
+  }
+
+  // custom / legacy：所选用户胶囊（逐个可移除；移除最后一个 → 恢复默认「仅我的」）
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      <span className="text-xs text-muted-foreground">用户筛选：</span>
+      {selectedIds.slice(0, 8).map((id) => {
+        const u = userOptions.find((x) => x.id === id)
+        return (
+          <Badge key={id} variant="secondary" className="gap-1">
+            {u?.username || id.slice(0, 8)}
+            <button
+              type="button"
+              title="移除该用户"
+              onClick={() => {
+                const next = selectedIds.filter((x) => x !== id)
+                if (next.length === 0) {
+                  pushQuery({ page: "1", scope: undefined, users: undefined, user: undefined })
+                } else {
+                  pushQuery({ page: "1", scope: "custom", users: next.join(","), user: undefined })
+                }
+              }}
+              className="ml-0.5 hover:text-foreground"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </Badge>
+        )
+      })}
+      {selectedIds.length > 8 && <span className="text-xs text-muted-foreground">+{selectedIds.length - 8}</span>}
+      <button
+        type="button"
+        className="text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+        onClick={() => pushQuery({ page: "1", scope: undefined, users: undefined, user: undefined })}
+      >
+        清空（恢复仅我的）
+      </button>
     </div>
   )
 }

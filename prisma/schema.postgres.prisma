@@ -8,6 +8,9 @@
 
 generator client {
   provider = "prisma-client-js"
+
+  // [22-d] 独立产物目录：node_modules/@prisma/client-postgres（与 sqlite 默认 client 并存）
+  output   = "../node_modules/@prisma/client-postgres"
 }
 
 datasource db {
@@ -48,6 +51,9 @@ model User {
   allowSecureLocationAccess Boolean? // 允许访问容器内安全位置（CDP/VNC本机端口、file://、平台内部端点）
   // —— VNC 会话时长上限（分钟，null=继承用户组，0=不限；三级优先级：沙箱>用户>用户组）——
   vncSessionMaxMinutes      Int?
+  // —— 闲置超时四级策略链（分钟；沙箱>用户>用户组>全局默认；0=无限即永不闲置回收）——
+  idleTimeoutMinutes     Int? // null=继承用户组
+  idleTimeoutLocked      Boolean @default(false) // true=管理员锁定：用户创建/编辑沙箱时不可自行调整闲置超时
   loginSessionCount   Int       @default(0)
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -194,6 +200,8 @@ model Group {
   allowInternalNetwork       Boolean  @default(false) // 组级：允许访问内网（成员默认继承）
   allowSecureLocationAccess  Boolean  @default(false) // 组级：允许访问容器内安全位置
   vncSessionMaxMinutes       Int? // 组级 VNC 会话时长上限（分钟，null=继承全局默认，0=不限）
+  idleTimeoutMinutes         Int? // 组级闲置超时（分钟，null=继承全局默认，0=无限）
+  idleTimeoutLocked          Boolean @default(false) // true=组内成员不可自行调整闲置超时（沙箱级仍可由管理员改）
   policy           Json? // 组级权限锁 / 生命周期默认策略
   createdByUserId  String?
   createdAt        DateTime @default(now())
@@ -560,7 +568,7 @@ model BrowserWorkspace {
   novncFps           Float     @default(0)
   novncActiveMin     Float     @default(0)
   ttlMinutes         Float     @default(0) // 0=不限
-  idleTimeoutMinutes Float     @default(60)
+  idleTimeoutMinutes Float     @default(60) // 闲置超时（分钟；0=无限即永不闲置回收；四级策略链：沙箱>用户>用户组>全局默认）
   vncSessionMaxMinutes Int? // 沙箱级 VNC 会话时长上限（分钟；null=继承用户/用户组，0=不限）
   shareDisabled    Boolean   @default(false) // r13c：沙箱级共享否决（管理员总列表可设；true=该工作区禁止任何新共享/链接，既有共享可在总列表撤销）
   // —— 沙箱级网络访问策略覆盖（四层解析最高优先；null=继承用户/用户组/全局）——

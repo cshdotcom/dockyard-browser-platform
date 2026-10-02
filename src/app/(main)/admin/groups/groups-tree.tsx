@@ -5,7 +5,7 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { ChevronDown, ChevronRight, FileDown, FileUp, MoreHorizontal, Plus, Trash2, X, Loader2 } from "lucide-react"
+import { ChevronDown, ChevronRight, FileDown, FileUp, MoreHorizontal, Plus, Trash2, X, Loader2, UserX } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -15,6 +15,7 @@ import {
 import { ConfirmDialog } from "@/components/shared/confirm"
 import { deleteGroupAction } from "@/server/actions/groups"
 import { batchDeleteGroupsAction } from "@/server/actions/batch"
+import { adminEvictGroupSharesAction, adminShareEvictPreviewAction } from "@/server/actions/admin-share-evict"
 import { BatchFailuresDialog } from "@/components/shared/batch-ui"
 import { GroupFormDialog } from "./group-form"
 import {
@@ -72,6 +73,40 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
   const [copyGroup, setCopyGroup] = React.useState<AdminGroupNode | null>(null)
   const [deleteGroup, setDeleteGroup] = React.useState<AdminGroupNode | null>(null)
   const [importOpen, setImportOpen] = React.useState(false)
+
+  // r22b：清退本组成员收到的共享（接收者维度批量撤销；超管/ADMIN）
+  const [evictGroup, setEvictGroup] = React.useState<AdminGroupNode | null>(null)
+  const [evictGroupCount, setEvictGroupCount] = React.useState<{ memberCount: number; activeCount: number } | null>(null)
+  const [evictGroupBusy, setEvictGroupBusy] = React.useState(false)
+
+  const openEvictGroup = (node: AdminGroupNode) => {
+    setEvictGroup(node)
+    setEvictGroupCount(null)
+    void adminShareEvictPreviewAction({ kind: "GROUP", id: node.id })
+      .then((res) => {
+        setEvictGroupCount(res.code === 0 ? { memberCount: res.data?.memberCount ?? 0, activeCount: res.data?.activeCount ?? 0 } : null)
+      })
+      .catch(() => setEvictGroupCount(null))
+  }
+
+  const runEvictGroup = async () => {
+    if (!evictGroup) return
+    setEvictGroupBusy(true)
+    try {
+      const res = await adminEvictGroupSharesAction({ groupId: evictGroup.id })
+      if (res.code === 0) {
+        toast.success(`已清退组「${evictGroup.name}」（${res.data?.memberCount ?? 0} 名成员）：撤销 ${res.data?.revoked ?? 0} 条生效共享`)
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "清退失败")
+    } finally {
+      setEvictGroupBusy(false)
+      setEvictGroup(null)
+    }
+  }
 
   // ---- 批量选择与批量删除（多选框 + 逐条失败隔离） ----
   const [selGroups, setSelGroups] = React.useState<string[]>([])
@@ -230,6 +265,9 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
                 <DropdownMenuItem onClick={() => { setProxiesGroup(node) }}>代理绑定</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setLocksGroup(node) }}>权限锁</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setCopyGroup(node) }}>复制组</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => openEvictGroup(node)}>
+                  <UserX className="mr-1.5 h-4 w-4 text-rose-600" /> 清退组内收到的共享
+                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onClick={() => {
@@ -379,6 +417,18 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
         requirePhrase="DELETE"
         destructive
         onConfirm={doDelete}
+      />
+
+      {/* r22b：清退本组成员收到的共享（确认时展示将撤销条数） */}
+      <ConfirmDialog
+        open={!!evictGroup}
+        onOpenChange={(v) => { if (!v && !evictGroupBusy) setEvictGroup(null) }}
+        title="清退组内收到的共享"
+        description={`确认清退用户组 ${evictGroup?.name || ""} 全体成员收到的全部工作区共享？\n· 成员 ${evictGroupCount?.memberCount ?? evictGroup?.userCount ?? 0} 名，将撤销其作为接收者的生效共享 ${evictGroupCount ? `${evictGroupCount.activeCount} 条` : "…（统计中）"}\n· 相关成员立即失去访问权，不影响工作区所有权与他人\n· 审计记录保留，可由所有者重新共享恢复`}
+        destructive
+        confirmText="确认清退"
+        loading={evictGroupBusy}
+        onConfirm={runEvictGroup}
       />
 
       {/* 导入JSON */}

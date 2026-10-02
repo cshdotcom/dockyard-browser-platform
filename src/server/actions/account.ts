@@ -306,6 +306,7 @@ export async function changeEmailAction(input: unknown): Promise<ActionResult> {
     const user = await db.user.findUnique({ where: { id: ctx.userId } })
     if (!user) throw new Error("用户不存在")
     if (!user.email) throw new Error("当前账号未绑定邮箱")
+    if (!user.passwordHash) throw new Error("当前账号未设置密码，无法校验")
     if (!(await verifyPassword(password, user.passwordHash))) {
       await writeSecurityEvent({ userId: ctx.userId, username: ctx.username, eventType: "EMAIL_CHANGE", success: false, detail: "密码校验失败" })
       throw new Error("密码错误")

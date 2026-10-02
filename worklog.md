@@ -563,3 +563,95 @@ Stage Summary:
 - 企业级共享权限体系完整落地：四级管控 + 总列表精确撤销（用户原话全部覆盖：用户端有按钮/后台精确到用户·组·沙箱·策略/取消共享/移除某个被共享者/总列表控制）
 - VNC 跨域名三形态（统一域名/独立域名/独立端口）全部可用 + 文档；CRX 三级批量下发补齐
 - 待办（下一轮）：502 健康检查细化、邮件配置保存、长列表滚动、Pids 面板、2FA 门控验证、全局搜索、内网穿透实测
+
+---
+Task ID: 21
+Agent: main
+Task: r14 批次启动 — x11vnc 权限根因修复 + schema 迁移 + 邮件配置感知修复；分派四路子代理
+
+Work Log:
+- 【P0 根因修复】用户报「创建重度 VNC 报错：x11vnc 未就绪 / /app/storage/sandboxes/emb-*/logs/x11vnc.log Permission denied」：平台以 root mkdir logs 目录（755），sandbox-launch.sh 经 setpriv 降权 DY_USER 运行 x11vnc，-o 打开 root 目录内文件 EACCES → x11vnc 立即退出 → waitRfbUp 超时。修复：sandbox-launch.sh chown 块扩展 $LOG_DIR（chown -R DY_USER + chmod 700，root supervisor 写 supervisor.log/state.json 不受影响）+ start_vnc 抽函数（预创建日志+chown 双保险）
+- 【VNC 自愈】主循环新增 x11vnc 存活检测（意外退出 → 同端口重建 VNC 服务，与 Xvfb 重建对齐）
+- 【schema 迁移】User +idleTimeoutMinutes Int?(null=继承组,0=无限) +idleTimeoutLocked Boolean；Group 同两字段；BrowserWorkspace.idleTimeoutMinutes 语义注释 0=无限；prisma db push + generate 完成
+- 【engine bug】idleExpired 原 `idleMs > idleLimit` 在 idleTimeoutMinutes=0 时恒真（立即回收）→ 修正为 `>0 &&`（0=无限，与 TTL 语义对齐）
+- 【邮件配置实测】diag-smtp-config.ts 验证 setConfig→DB→getAllConfig 全链路落库正常（8 个 smtp.* 键、版本快照、还原）。症状根因=生效感知：失败信息不带配置上下文、无生效值回显、路由缓存。修复：verifySmtp 失败 message 附「使用已保存配置 host:port」、SmtpCard 新增「当前生效（数据库）」徽章行（router.refresh 后实时同步）、保存 toast 带落库摘要、admin/config/page force-dynamic
+- 【分派】四路子代理并行：A=公告/站内信增强（搜索+弹窗→详情+已读）、B=共享系统增强（多选+外链+清退）、C=工作区筛选+闲置超时 UI+插件搜索、D=外部浏览器+PostgreSQL+跨域
+
+Stage Summary:
+- x11vnc 权限根因（用户报错闭环）已修；VNC 进程自愈补齐；闲置超时四级策略链 schema 落地；0=无限语义修正；邮件配置感知增强
+
+---
+Task ID: 22-a
+Agent: full-stack-developer subagent A（公告系统与站内信全面增强）
+Task: 用户原话需求落地：①用户/管理端公告页均可关键词搜索 ②站内信点击先开小弹窗（摘要+已读+查看详情）再跳公告页 ③弹窗交互对齐 global-announcer ④公告点击开详情且长内容滚动不溢出 ⑤已读即时生效（视觉+计数）
+
+Work Log:
+- 【API】src/app/api/notifications/route.ts 新增 PATCH 单条标记已读：{ id } → findFirst(id+userId) 归属校验（防越权）→ 已读幂等返回 → readAt=now；与既有 GET/PUT(全部已读) 同通道，站内信小弹窗「标记已读」调用
+- 【站内信小弹窗】app-shell.tsx NotificationBell 重构：点击通知条目不再直接跳转，先打开小 Dialog（类型图标 ANNOUNCEMENT/ALERT/TOKEN_EXPIRE/SECURITY/SYSTEM + 标题 + ≤200 字摘要（超长截断+提示）max-h-56 滚动 + 时间）；footer 三键：关闭 / 标记已读（PATCH 成功 → 本地 items readAt 置位+setSelected 更新+未读计数减一，按钮原地变「已读于 …」徽章，交互风格对齐 global-announcer 详情弹窗）/ 查看详情（ANNOUNCEMENT 或带 link 才显示；点击 → fire-and-forget 标已读 + router.push(link)；无 link 通知按钮不渲染）；下拉条目加未读圆点+未读字样，「详情 →」提示改为点击开弹窗语义
+- 【用户公告页搜索】announcements-view.tsx 重构：新增搜索栏（Input+清空按钮+匹配计数），客户端实时过滤标题+正文（contentToPlainText 剥 MD/HTML 语法后匹配），空态显示「未找到匹配「kw」的公告」
+- 【公告详情弹窗（用户端）】卡片改为摘要形态（line-clamp-2 纯文本预览+「点击查看详情 →」），点击卡片（含键盘 Enter/Space）打开详情 Dialog：类型/通道徽章+发布时间 → AnnouncementContent 完整 MD/HTML 渲染于 ScrollArea max-h-[60vh]（实测长文 scrollH 817 > clientH 328 正常滚动）→ footer 标为已读（markAnnouncementReadAction+本地即时更新+router.refresh）/关闭；卡片保留原「标为已读」按钮（stopPropagation）
+- 【focus 落地】announcements/page.tsx 支持 ?focus=<id>（searchParams 解析）：目标公告若为仅站内信（无展示通道）也纳入列表（listRows 追加）→ AnnouncementsView 自动打开详情弹窗 + 卡片 ring 高亮 + scrollIntoView 滚动到可见；站内信「查看详情」link(/announcements?focus=id) 全链路打通（含仅站内信公告场景）
+- 【双渲染修复】announcements-view.tsx 移除页内跑马灯/FORCE_VIEW/POPUP 队列（与 GlobalAnnouncer 全局层在 /announcements 页重复渲染双弹窗双跑马灯的显示错乱）——展示通道统一由全局层呈现，本页专注列表+搜索+详情
+- 【管理端】announcements-table.tsx：①标题列改可点击 button（group-hover 变色+下划线提示「点击查看详情」）打开统一详情预览 Dialog：九项元信息网格（类型/范围/创建人/发布通道/显示时效/状态/已读后仍显示/允许今日不再提醒/创建时间）+ AnnouncementContent 于 ScrollArea max-h-[50vh]（长文实测 scrollH 817>271 滚动）+ 关闭/编辑公告快捷键（openEdit 直通编辑表单）②修复搜索框不可见 bug：page.tsx keyword={q.keyword ?? ""}（原 undefined 传参致 DataTable 不渲染搜索表单——服务端 LIKE(title/content) 一直在但入口隐藏，用户「管理里公告可搜索」诉求的真正缺口）；筛选提示文案同步更新
+- 【QA 实测（agent-browser 独立 session，admin/Admin@2026）】12 截图 download/qa-22a/：用户页搜索三态（命中过滤/空态/清空恢复）·卡片点击详情滚动·详情内标已读·focus 落地自动开弹窗+高亮·铃铛小弹窗（公告/系统无 link 两形态）·标记已读后按钮变徽章+计数 2→1（DB readAt 落库实证）·查看详情→跳转 focus 页+通知自动已读（DB 实证）·管理端搜索（标题命中/正文「限高滚动」命中/多结果）·行点击详情九元信息+长文滚动·编辑快捷键直通表单
+- 【环境事件】QA 中途 dev 服务器进程消失（与 Task 19 同现象，疑并行代理干扰）→ scripts/run-detached.py 分离重启恢复（pid 5491）；期间发现默认 agent-browser 会话被并行代理复用（页面被劫持到 /workspaces）→ 改用 --session q22a 隔离会话完成全部验证
+- 【质量门】eslint 六路径 0 error 0 warning；GET /announcements、/admin/announcements 307（未登录重定向，编译正常）；PATCH /api/notifications 未登录 40100 鉴权正常；QA 数据清理（QA-22a 前缀公告/通知/已读记录全清，终验 0/0/0）；未 git commit（主代理统一提交）
+
+Stage Summary:
+- 用户五条原话需求全部落地并浏览器实测闭环：双端公告搜索（管理端入口隐藏 bug 一并修复）、站内信「小弹窗→详情」两级交互、已读即时生效（视觉+计数+DB）、公告详情弹窗长内容限高滚动不溢出、focus 定位含仅站内信公告回看
+- 站内信通知铃从「点击即跳转」升级为「摘要弹窗→确认跳转」企业级交互；用户公告页与全局公告层职责分离（消除双渲染显示错乱）
+- 交付物：6 文件修改（notifications route/app-shell/用户页 2 文件/管理端 2 文件）+ QA 种子脚本 scripts/qa-seed-22a.ts + 12 张验证截图
+
+---
+Task ID: 22-b
+Agent: full-stack-developer subagent（B 路：共享系统增强）
+Task: r22b 共享系统增强 — 多选用户共享 + 接收者名单移除 + 外链登录门控回跳 + 管理员按用户/组强制清退
+
+Work Log:
+- 开工前通读 r13c 共享四级管控体系（share-policy.ts / admin-workspaces.ts / shares-table.tsx / share-dialogs.tsx / workspaces.ts 共享段落），全部改动与既有 action 并存、命名零冲突
+- 【多选共享】share-dialogs.tsx 重构：搜索建议改 Checkbox 勾选多选（可连续选多个），选中列表胶囊展示（单个 X 移除+已选计数）；新建 shareWorkspaceBatchAction（workspaces.ts：zod 校验 1-20 个用户/去重/逐个 try-catch 部分失败汇总返回 failures[{username,reason}]/批量审计 WORKSPACE_SHARE 含成败明细）；部分失败保留弹窗展示琥珀色失败明细块，全成功自动关闭
+- 【接收者名单+踢出】弹窗新增「接收者名单」区（listWorkspaceShareRecipientsAction 新建：所有者/ADMIN 可查，逐行 用户名/权限/到期/状态徽章）；行内「移除」按钮（复用 revokeShareAction 置位 revokedAt，仅发起人/管理员可操作，移除单个不影响其他接收者，ConfirmDialog 确认）；max-h-56 overflow-y-auto 滚动规范；四级管控阻断时名单仍可查看/移除、仅新增共享禁用
+- 【外链登录门控】验证结论：登录态要求原本即有（proxy.ts 守卫 /workspaces/** + redeem action requireAuth + (main) layout 深度校验），但「登录后回来绑定」断裂——middleware 重定向 from 只带 pathname 丢 token → 登录后落 /workspaces/shared 无 token 报「缺少分享令牌」。修复：① shared/page.tsx 改 server component（getAuthContext 校验，未登录 redirect /login?from=原链接含 token），原客户端兑换 UI 抽至同目录 redeem-panel.tsx（新增文件，属 shared 页登录门控改造范围）；② proxy.ts 最小修复（边界外但为需求 2 必需，2 行）：两处 from 改为 pathname+search 携带完整查询串（通用改进，非 shared 专用）；创建链接弹窗「仅已登录用户可兑换」文案确认已存在（detail-tabs 既有「已登录用户打开链接后自动按上述权限绑定共享」+「需登录」提示，属边界禁改文件，确认满足不改动）
+- 【管理员按用户/组清退】新建 src/server/actions/admin-share-evict.ts：adminEvictUserSharesAction（撤销该用户作为接收者的全部未撤销 WorkspaceShare）/ adminEvictGroupSharesAction（组内全部成员为接收者，返回 revoked+memberCount）/ adminShareEvictPreviewAction（确认弹窗预览将撤销 N 条）/ adminSearchShareEvictTargetsAction（弹窗内搜索用户/组，含生效共享计数）；requireRole SUPER_ADMIN/ADMIN + requireWritableMode + 审计 SHARE_ADMIN_EVICT（先取 id 再批量撤销，审计精确到 shareIds）；与 r13c 的 adminRevokeShare/adminBatchRevokeShares/adminRevokeAllWorkspaceShares/adminSetWorkspaceShareDisabled 并存
+- 【管理员 UI 三入口】① shares-table.tsx 工具栏新增「按用户清退」「按组清退」按钮 → ShareEvictDialog（防抖搜索候选带生效共享条数徽章 → 点选 → 红色汇总条 → ConfirmDialog → 执行 toast 撤销数）；② users-table.tsx 行菜单新增「清退其收到的共享」（仅 SUPER_ADMIN/ADMIN 可见，打开时预取 N 条，确认文案含统计中/具体条数）；③ groups-tree.tsx 组行菜单新增「清退组内收到的共享」（预览含成员数+生效条数）；三处列表均遵守 maxHeight+overflowY auto 滚动规范
+- 【真实功能验证（agent-browser 全程实走 + DB 断言）】admin 建工作区 → 共享弹窗多选 demo+qa3 一次提交（toast「已共享给 2 个用户」+ DB 2 条生效）→ 名单展示「生效中 2 / 共 2」→ 移除 qa3（其他接收者不受影响，demo 保持生效、qa3 转已移除徽章）→ 创建 72h 链接 → 清 cookie 开 token 链接 → 307 落 /login?from=%2Fworkspaces%2Fshared%3Ftoken%3D完整保留 → qa3 登录自动回跳兑换成功（「共享授权已开通·只读观看」+ 列表「共享给我」徽章）→ 管理员共享总列表「按用户清退」搜 qa3（候选带「生效共享 1 条」）确认撤销（DB revokedAt 落位）→ 用户管理 demo 行菜单清退（确认显示 1 条）→ 重新多选共享 2 人（upsert 复活路径）→ 组管理「清退组内收到的共享」（预览 3 成员/2 条 → 撤销 2 条，DB 两条同刻 revokedAt）→ 共享总列表「按组清退」搜索路径亦验证；SHARE_ADMIN_EVICT 审计 3 条落库（USER×2+GROUP×1，含 shareIds 明细）
+- 【质量门】eslint 全部改动文件 0 error 0 warning；tsc 对改动文件 0 新增错误（仅剩 2 条预存基线：groups-tree.tsx:361 GroupFormDialog prop 类型/ workspaces.ts:1045 trackBehavior"LOGIN" 枚举——均经 HEAD 版本对照确认为存量）；dev.log 全程无编译错误（全部路由 200）
+- 【QA 清理】scripts/qa-cleanup-r22b.ts：测试工作区/共享/链接/脚本日志/回收站快照全清 + qa3 用户（组关系/登录会话/安全事件/通知）删除 + 本轮审计与登录会话快照清零 → 终态 users=2(种子)、groups=1、workspaces=0、shares=0、shareLinks=0、qa3=0
+
+Stage Summary:
+- 用户原话四需求全部落地并经真实浏览器+DB 双通道验证：多选共享（批量 action+部分失败汇总）、外链仅已登录可兑换且登录后带 token 回跳绑定（server 门控+middleware from 查询串保留）、发起人可查看接收者名单并单独踢出、管理员按用户/用户组强制清退其收到的全部共享（三 UI 入口+预览计数+审计）
+- 边界遵守：仅触碰授权文件 + 3 处边界内新增（admin-share-evict.ts/redeem-panel.tsx/qa-cleanup 脚本）；唯一边界外改动为 proxy.ts 两行 from 查询串保留（需求 2「登录后回来绑定」实际断裂点所在，最小化通用修复，已在日志中明示）
+
+---
+Task ID: 22-c
+Agent: full-stack-developer subagent（C 路：工作区筛选+闲置超时+插件搜索；超时由主代理接管收尾）
+Task: r22c — 管理员工作区默认显示自己+多选用户筛选、闲置超时四级策略链落地、插件批量下发搜索
+
+Work Log:
+- 【闲置超时四级策略链】src/lib/idle-policy.ts（新建）：resolveIdlePolicyForUser（沙箱>用户>用户组>全局 workspace.defaultIdleTimeoutMin；0=无限；锁定 User/Group.idleTimeoutLocked 用户级优先，管理员豁免）；fmtIdleMinutes/fmtIdleBrief/IdlePolicyView
+- 【Actions】users.ts +getUserIdlePolicyAction/setUserIdleTimeoutAction（null=继承组/0=无限/locked）；groups.ts +getGroupIdlePolicyAction/setGroupIdleTimeoutAction；workspaces.ts：idle zod 范围 1-1440→0-1440（0=无限），创建/编辑普通用户被锁定时静默采用解析值+审计记录 idlePolicy.lockedBy/enforced/submittedIgnored
+- 【管理端工作区筛选】admin/workspaces/page.tsx：userScope 三级（默认 mine=仅当前管理员自己；scope=all 全选看全部；scope=custom+users 多选 ID 数组 in 查询；legacy 单选兼容）；workspaces-table.tsx：用户筛选 Popover（搜索建议+Checkbox 多选+胶囊+全选+「当前：仅显示我的工作区」徽章）；改 TTL 弹窗 idle 支持 0=无限
+- 【表单】user-form.tsx（idle 三态 inherit/unlimited/limit+锁定开关+编辑拉取当前策略回显）；group-form.tsx 同理；detail-tabs.tsx 闲置超时展示生效值+四级来源徽章+锁定提示
+- 【插件搜索】crx-panel.tsx 批量下发对话框插件列表：搜索框（名称/CRX-ID 实时过滤）+全选作用于当前结果集
+- 【质量】tsc 改动文件无新增错误；next build 全绿（主代理复核）；QA 走查由主代理统一执行
+
+Stage Summary:
+- 闲置超时从「仅沙箱级+全局默认」升级为四级策略链+锁定开关+0=无限；管理员工作区管理「默认只看自己+多选用户筛选+全选」落地；插件批量下发支持搜索
+
+---
+Task ID: 22-d
+Agent: full-stack-developer subagent（D 路：外部浏览器+PostgreSQL+跨域；超时由主代理接管收尾）
+Task: r22d — EXTERNAL_BROWSER_URL 分离部署、PostgreSQL 双客户端+启动全自动初始化+SQL 文件入库、跨域登录态/用户信息传递
+
+Work Log:
+- 【外部浏览器】src/lib/env.ts +externalBrowserUrl/CDP 端口/VNC host+port（上段 70c720f 已建 browser-endpoint.ts：从 URL 推导 CDP base+RFB host/port，票据 tgt 指向外部主机）；embedded-sandbox.ts modeCache 增 external 形态（BROWSER_RUNTIME=external 或 auto 检测 EXTERNAL_BROWSER_URL）；start.sh 日志提示外部形态+VNC 桥拨号外部主机说明；未配置默认单容器内嵌（行为不变）
+- 【PostgreSQL 双客户端】prisma/schema.postgres.prisma（sync-postgres-schema.ts 从主 schema 派生，模型同源）；@prisma/client-postgres 独立生成产物；src/lib/db.ts 运行时 databaseProvider() 切换（DATABASE_PROVIDER/DB_PROVIDER，sqlite 默认）；next.config.ts serverExternalPackages+outputFileTracingIncludes 双 engine；Dockerfile 生成+复制双 client+db/postgres → /app/prisma/postgres（避开数据卷挂载点）
+- 【启动全自动初始化】docker/start.sh：DB_MODE=postgres 时校验 DATABASE_URL → prisma db push --schema prisma/schema.postgres.prisma（3 次重试×10s）→ apply-triggers.ts（审计不可篡改触发器）→ seed-postgres.ts（种子），全部幂等无需人工导入；sqlite 形态维持现状
+- 【SQL 文件入库】db/postgres/init.sql（1716 行=全量 DDL+触发器，psql -f 人工导入通道）+ audit_triggers.sql + README.md 双路径说明；package.json scripts：db:generate/push/seed/triggers/init:postgres
+- 【跨域登录态传递】CORS_ALLOWED_ORIGINS 白名单（src/proxy.ts 全局 CORS+OPTIONS 预检终结+Allow-Credentials 回显模式，兼容 CORS_ORIGINS 旧名）；GET /api/me/cross-domain（白名单校验→getAuthContext→返回 id/username/displayName/role 无敏感字段；401/403 同带 CORS 头；OPTIONS 204 自处理）；README 增补跨域章节
+- 【质量】bunx prisma validate 双 schema 通过；本机 init.sql 已生成；next build 全绿（主代理复核）；pg-test/（pg-server.mjs 本地测试环境，上段遗留）
+
+Stage Summary:
+- 浏览器「可分可合」：EXTERNAL_BROWSER_URL 外部分离部署（CDP/VNC 全指外部）vs 默认单容器内嵌，start.sh/README/文档齐备
+- PostgreSQL 支持：双 Prisma 客户端运行时切换+Docker 镜像双 engine+启动全自动初始化（结构/触发器/种子幂等）+init.sql 人工导入备选通道；默认 SQLite 完全不受影响
+- 跨域名登录/用户信息传递：CORS 白名单+预检+凭证回显+/api/me/cross-domain 跨域登录态识别端点

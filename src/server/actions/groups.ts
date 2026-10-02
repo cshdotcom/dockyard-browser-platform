@@ -11,6 +11,8 @@ import { PERMISSION_LOCK_KEYS, type PermissionLockKey } from "@/lib/permissions"
 import { writeAudit } from "@/lib/audit"
 import { trackBehavior } from "@/lib/risk"
 import { zodValidate, zId, zPrecision } from "@/lib/validators"
+import { getConfigNumber } from "@/lib/config"
+import { fmtIdleBrief } from "@/lib/idle-policy"
 
 // ---- schema ----
 
@@ -703,7 +705,6 @@ export async function setGroupNetworkPolicyAction(
       data: {
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
-        vncSessionMaxMinutes: p.vncSessionMaxMinutes ?? null,
       },
     })
 
@@ -729,7 +730,6 @@ export async function setGroupNetworkPolicyAction(
       after: {
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
-        vncSessionMaxMinutes: p.vncSessionMaxMinutes ?? null,
       },
       severity: "WARN",
       extra: { affectedMembers },
@@ -770,5 +770,80 @@ export async function setGroupAllowShareAction(
       severity: "WARN",
     })
     return { id: group.id, allowShare: p.allowShare, affectedMembers }
+  })
+}
+
+// ---- r14（22-c）：组级闲置超时策略（四级链：沙箱>用户>组>全局）----
+// minutes：null=继承全局默认，数值=显式覆盖（0=无限即永不闲置回收，上限 43200=30天）
+// locked：true=组内成员创建/编辑工作区时不可自行调整闲置超时（用户级锁定优先；管理员不受限）
+// 鉴权：SUPER_ADMIN / ADMIN
+export interface GroupIdlePolicyView {
+  minutes: number | null
+  locked: boolean
+  globalDefault: number
+  affectedMembers: number
+}
+
+export async function getGroupIdlePolicyAction(
+  input: unknown,
+): Promise<ActionResult<GroupIdlePolicyView>> {
+  return actionHandler(async () => {
+    await requireAdmin()
+    const p = zodValidate(z.object({ id: zId }), input)
+    const group = await db.group.findUnique({
+      where: { id: p.id },
+      select: { id: true, name: true, idleTimeoutMinutes: true, idleTimeoutLocked: true, deletedAt: true },
+    })
+    if (!group || group.deletedAt) throw new Error("用户组不存在或已删除")
+    const globalDefault = await getConfigNumber("workspace.defaultIdleTimeoutMin", 60)
+    const affectedMembers = await db.groupUser.count({ where: { groupId: group.id } })
+    return { minutes: group.idleTimeoutMinutes, locked: group.idleTimeoutLocked, globalDefault, affectedMembers }
+  })
+}
+
+export async function setGroupIdleTimeoutAction(
+  input: unknown,
+): Promise<ActionResult<GroupIdlePolicyView>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAdmin()
+    const p = zodValidate(
+      z.object({
+        id: zId,
+        minutes: z.number().int().min(0).max(43200).nullable(), // null=继承全局默认，0=无限
+        locked: z.boolean(),
+      }),
+      input,
+    )
+    const group = await db.group.findUnique({
+      where: { id: p.id },
+      select: { id: true, name: true, idleTimeoutMinutes: true, idleTimeoutLocked: true, deletedAt: true },
+    })
+    if (!group || group.deletedAt) throw new Error("用户组不存在或已删除")
+
+    const before = { idleTimeoutMinutes: group.idleTimeoutMinutes, idleTimeoutLocked: group.idleTimeoutLocked }
+    await db.group.update({
+      where: { id: group.id },
+      data: { idleTimeoutMinutes: p.minutes, idleTimeoutLocked: p.locked },
+    })
+    const affectedMembers = await db.groupUser.count({ where: { groupId: group.id } })
+
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "GROUP_IDLE_POLICY",
+      resourceType: "GROUP",
+      resourceId: group.id,
+      resourceName: group.name,
+      before,
+      after: {
+        idleTimeoutMinutes: p.minutes,
+        idleTimeoutLocked: p.locked,
+        affectedMembers,
+        note: `管理员 ${ctx.username} 调整用户组 ${group.name} 闲置超时策略（${before.idleTimeoutMinutes == null ? "继承全局默认" : fmtIdleBrief(before.idleTimeoutMinutes)} → ${p.minutes == null ? "继承全局默认" : fmtIdleBrief(p.minutes)}，锁定 ${before.idleTimeoutLocked ? "开" : "关"} → ${p.locked ? "开" : "关"}，影响成员 ${affectedMembers} 人）`,
+      },
+      severity: "WARN",
+    })
+    return { minutes: p.minutes, locked: p.locked, globalDefault: await getConfigNumber("workspace.defaultIdleTimeoutMin", 60), affectedMembers }
   })
 }

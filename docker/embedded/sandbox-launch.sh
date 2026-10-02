@@ -112,10 +112,15 @@ cleanup() {
 trap cleanup TERM INT
 trap '[ -n "$CHROME_PID" ] && kill "$CHROME_PID" 2>/dev/null; log "USR1：浏览器进程级重启（同一 Profile）"' USR1
 
-# root 环境：Profile/下载/家目录归属沙箱 Linux 用户（700 隔离，互不可读）
+# root 环境：Profile/下载/家目录/日志目录归属沙箱 Linux 用户（700 隔离，互不可读）
+# 【修复】logs 目录原先归 root（平台 mkdir），而 x11vnc/chromium 内层脚本以
+# setpriv 降权后的 DY_USER 运行 → x11vnc -o 打开 $LOG_DIR/x11vnc.log 报
+# Permission denied → x11vnc 立即退出 → 平台报「x11vnc 未就绪」启动失败。
+# Ubuntu 多用户方案：目录所有权交给沙箱专用用户；root 侧 supervisor.log/
+# state.json/chromium.log 由 root 写入（root 无视 DAC，不受 700 影响）。
 if [ "$AM_ROOT" = "1" ] && [ -n "${DY_USER:-}" ]; then
-  chown -R "$DY_USER" "${DY_PROFILE_DIR:-/nonexistent}" "${DY_DOWNLOADS_DIR:-/nonexistent}" "$HOME" 2>/dev/null
-  chmod 700 "${DY_PROFILE_DIR:-/nonexistent}" "$HOME" 2>/dev/null
+  chown -R "$DY_USER" "${DY_PROFILE_DIR:-/nonexistent}" "${DY_DOWNLOADS_DIR:-/nonexistent}" "$HOME" "$LOG_DIR" 2>/dev/null
+  chmod 700 "${DY_PROFILE_DIR:-/nonexistent}" "$HOME" "$LOG_DIR" 2>/dev/null
 fi
 
 start_xvfb() {
@@ -147,10 +152,19 @@ fi
 log "Xvfb 就绪 :$DISPLAY_NUM（${DY_RESOLUTION:-1280x800x24}）"
 
 # ---- 2. VNC（仅回环；平台 VNC 桥票据中转，容器外不可触达） ----
-bg_user "$X11VNC_BIN" -display ":$DISPLAY_NUM" -forever -shared \
-  -rfbport "$RFB_PORT" -localhost -nopw -noxdamage -repeat -quiet \
-  -o "$LOG_DIR/x11vnc.log"
-VNC_PID=$!
+start_vnc() {
+  # 日志预创建：即使目录 chown 失败，root 预创建 + 授权后降权进程也可写
+  # （-o 打开失败会导致 x11vnc 直接退出，必须双重保障）
+  if [ ! -e "$LOG_DIR/x11vnc.log" ]; then
+    : >"$LOG_DIR/x11vnc.log" 2>/dev/null || true
+  fi
+  [ "$AM_ROOT" = "1" ] && [ -n "${DY_USER:-}" ] && chown "$DY_USER" "$LOG_DIR/x11vnc.log" 2>/dev/null
+  bg_user "$X11VNC_BIN" -display ":$DISPLAY_NUM" -forever -shared \
+    -rfbport "$RFB_PORT" -localhost -nopw -noxdamage -repeat -quiet \
+    -o "$LOG_DIR/x11vnc.log"
+  VNC_PID=$!
+}
+start_vnc
 log "x11vnc 监听 127.0.0.1:$RFB_PORT"
 
   if [ -n "${DY_POLICY_FILE:-}" ] && [ -f "${DY_POLICY_FILE:-}" ]; then
@@ -180,6 +194,11 @@ while :; do
       write_state stopped
       exit 1
     fi
+  fi
+  # x11vnc 意外退出（OOM/异常）→ 同一端口重建 VNC 服务（整机自愈语义）
+  if ! kill -0 "${VNC_PID:-0}" 2>/dev/null; then
+    log "x11vnc 意外退出，重建 VNC 服务（端口 $RFB_PORT）"
+    start_vnc
   fi
   # setpriv/unshare/sh/prlimit 全链 exec —— $! 即 chromium 主进程 PID
   if [ "$UNSHARE_OK" = "1" ]; then

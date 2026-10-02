@@ -75,6 +75,8 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
   const [editing, setEditing] = React.useState<AnnouncementRow | null>(null)
   const [previewTarget, setPreviewTarget] = React.useState<AnnouncementRow | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<AnnouncementRow | null>(null)
+  // r22：行点击详情预览（点击标题列打开完整内容 + 全量元信息）
+  const [detailTarget, setDetailTarget] = React.useState<AnnouncementRow | null>(null)
 
   // ---- 批量操作（勾选 + 批量停用/启用 + 批量删除）----
   const btch = useBatch(rows, `${keyword || ""}|${JSON.stringify(filters)}`)
@@ -247,7 +249,7 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm text-muted-foreground">删除为物理删除（不进回收站）；停用后用户端 ≤30s 内不再显示（全局公告层轮询）</p>
+        <p className="text-sm text-muted-foreground">点击公告标题可查看详情预览；删除为物理删除（不进回收站）；停用后用户端 ≤30s 内不再显示</p>
         <Button size="sm" onClick={openCreate}>
           <Plus className="mr-1 h-4 w-4" />
           新建公告
@@ -326,14 +328,20 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
         columns={[
           {
             key: "title",
-            title: "标题",
+            title: "标题（点击查看详情）",
             render: (r) => (
-              <div className="min-w-0">
-                <p className="text-sm font-medium truncate max-w-56" title={r.title}>{r.title}</p>
-                <p className="text-xs text-muted-foreground truncate max-w-56" title={contentToPlainText(r.content, 200)}>
+              <button
+                type="button"
+                className="min-w-0 max-w-64 text-left group"
+                onClick={() => setDetailTarget(r)}
+                title={`点击查看详情：${r.title}`}
+                aria-label={`查看公告详情：${r.title}`}
+              >
+                <p className="text-sm font-medium truncate group-hover:text-teal-600 group-hover:underline">{r.title}</p>
+                <p className="text-xs text-muted-foreground truncate" title={contentToPlainText(r.content, 200)}>
                   <AnnouncementSummary content={r.content} maxLen={60} />
                 </p>
-              </div>
+              </button>
             ),
           },
           {
@@ -658,6 +666,96 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
           </DialogContent>
         </Dialog>
       )}
+
+      {/* r22：行点击详情预览 —— 完整 MD/HTML 渲染（限高滚动不溢出）+ 全量元信息，与用户端详情弹窗一致 */}
+      <Dialog open={!!detailTarget} onOpenChange={(v) => { if (!v) setDetailTarget(null) }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 pr-6">
+              <Megaphone className="h-5 w-5 text-teal-600 shrink-0" />
+              <span className="truncate">{detailTarget?.title}</span>
+            </DialogTitle>
+            <DialogDescription className="flex items-center gap-2 flex-wrap">
+              公告详情预览 · 用户端渲染效果一致
+            </DialogDescription>
+          </DialogHeader>
+          {/* 元信息总览 */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1.5 text-xs rounded-md border bg-muted/40 p-3">
+            <p>
+              <span className="text-muted-foreground">类型：</span>
+              <span className="font-medium">{detailTarget ? TYPE_LABEL[detailTarget.type] || detailTarget.type : "-"}</span>
+            </p>
+            <p className="truncate">
+              <span className="text-muted-foreground">范围：</span>
+              <span className="font-medium">
+                {detailTarget
+                  ? detailTarget.type === "GLOBAL"
+                    ? "全站用户"
+                    : detailTarget.type === "GROUP"
+                      ? detailTarget.groupName || detailTarget.groupId || "未知组"
+                      : detailTarget.targetUsername || detailTarget.userId || "未知用户"
+                  : "-"}
+              </span>
+            </p>
+            <p className="truncate">
+              <span className="text-muted-foreground">创建人：</span>
+              <span className="font-medium">{detailTarget?.creatorName || "-"}</span>
+            </p>
+            <p className="col-span-2 sm:col-span-1">
+              <span className="text-muted-foreground">发布通道：</span>
+              <span className="font-medium">
+                {detailTarget
+                  ? [
+                      ...(detailTarget.displayTypes?.length ? detailTarget.displayTypes : [detailTarget.displayType]),
+                      ...(detailTarget.notifyInbox ? ["站内信"] : []),
+                    ]
+                      .map((d) => DISPLAY_LABEL[d] || (d === "站内信" ? "站内信" : d))
+                      .join(" / ") || "未设置"
+                  : "-"}
+              </span>
+            </p>
+            <p>
+              <span className="text-muted-foreground">显示时效：</span>
+              <span className="font-medium">
+                {detailTarget ? `${detailTarget.startAt || "立即"} ~ ${detailTarget.endAt || "永久"}` : "-"}
+              </span>
+            </p>
+            <p>
+              <span className="text-muted-foreground">状态：</span>
+              <span className="font-medium">{detailTarget?.enabled ? "已启用" : "已停用"}</span>
+            </p>
+            <p>
+              <span className="text-muted-foreground">已读后仍显示：</span>
+              <span className="font-medium">{detailTarget?.persistAfterRead ? "是" : "否"}</span>
+            </p>
+            <p>
+              <span className="text-muted-foreground">允许今日不再提醒：</span>
+              <span className="font-medium">{detailTarget ? (detailTarget.allowDismiss ? "是" : "否" ) : "-"}</span>
+            </p>
+            <p>
+              <span className="text-muted-foreground">创建时间：</span>
+              <span className="font-medium tabular-nums">{detailTarget?.createdAt || "-"}</span>
+            </p>
+          </div>
+          {/* 完整内容：限高 + 滚动（长 MD/HTML 公告不溢出不错乱） */}
+          <ScrollArea className="max-h-[50vh] rounded-md border px-3 py-2">
+            <AnnouncementContent content={detailTarget?.content || ""} />
+          </ScrollArea>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDetailTarget(null)}>关闭</Button>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                const t = detailTarget
+                setDetailTarget(null)
+                if (t) openEdit(t)
+              }}
+            >
+              <Pencil className="mr-1 h-4 w-4" /> 编辑公告
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 删除确认 */}
       <ConfirmDialog

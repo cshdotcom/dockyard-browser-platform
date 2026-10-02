@@ -55,6 +55,8 @@ export interface WorkspaceDetailData {
     endpoint: { black: number; white: number }
     file: { allowDownload: boolean; allowUpload: boolean; allowFileScheme: boolean; source: string }
   } | null
+  /** r14（22-c）：闲置超时四级策略链（生效值+来源徽章；locked 已按查看者角色豁免管理员） */
+  idleInfo: { minutes: number; source: string; sourceLabel: string; locked: boolean; lockSourceLabel: string } | null
 }
 
 interface ShareRow { id: string; targetName: string; permission: string; expireAt: string | null; createdAt: string }
@@ -198,7 +200,28 @@ export function WorkspaceDetail({
         <Card><CardContent className="p-4">
           <p className="text-xs text-muted-foreground">生命周期</p>
           <p className="text-sm font-medium mt-1 tabular-nums">TTL {workspace.ttlMinutes > 0 ? `${workspace.ttlMinutes}min` : "不限"}</p>
-          <p className="text-xs text-muted-foreground">闲置超时 {workspace.idleTimeoutMinutes}min · 创建 {workspace.createdAt}</p>
+          <p className="text-xs text-muted-foreground mt-0.5 flex flex-wrap items-center gap-1">
+            <span>闲置超时 {workspace.idleTimeoutMinutes > 0 ? `${Math.round(workspace.idleTimeoutMinutes)}min` : "无限（0）"}</span>
+            {workspace.idleInfo && (
+              <Badge
+                variant="outline"
+                className="text-[9px] px-1 py-0"
+                title={`四级策略链生效来源：${workspace.idleInfo.sourceLabel}（沙箱＞用户＞用户组＞全局；工作区创建/编辑时锁定生效值）`}
+              >
+                {workspace.idleInfo.sourceLabel}
+              </Badge>
+            )}
+            {workspace.idleInfo?.locked && (
+              <Badge
+                variant="outline"
+                className="text-[9px] px-1 py-0 border-amber-300 text-amber-700 dark:text-amber-400"
+                title={workspace.idleInfo.lockSourceLabel}
+              >
+                策略锁定
+              </Badge>
+            )}
+          </p>
+          <p className="text-xs text-muted-foreground">创建 {workspace.createdAt}</p>
         </CardContent></Card>
         <Card><CardContent className="p-4">
           <p className="text-xs text-muted-foreground">运行统计</p>
@@ -1118,10 +1141,16 @@ function EditDialog({ workspace, open, onOpenChange, onDone }: { workspace: Work
   const [idle, setIdle] = React.useState(workspace.idleTimeoutMinutes)
   const [tags, setTags] = React.useState(workspace.tags.join(","))
   const [busy, setBusy] = React.useState(false)
+  // r14（22-c）：闲置超时策略锁定（管理员查看者已在服务端豁免）→ 字段只读且提交不携带（服务端保留现值）
+  const idleLocked = !!workspace.idleInfo?.locked
   const submit = async () => {
     setBusy(true)
     try {
-      const res = await updateWorkspaceAction({ id: workspace.id, name, ttlMinutes: ttl, idleTimeoutMinutes: idle, tags })
+      const res = await updateWorkspaceAction({
+        id: workspace.id, name, ttlMinutes: ttl,
+        ...(idleLocked ? {} : { idleTimeoutMinutes: idle }),
+        tags,
+      })
       if (res.code === 0) { toast.success("配置已更新"); onOpenChange(false); onDone() }
       else toast.error(res.msg)
     } finally { setBusy(false) }
@@ -1133,7 +1162,20 @@ function EditDialog({ workspace, open, onOpenChange, onDone }: { workspace: Work
         <div className="space-y-3">
           <div className="space-y-1.5"><Label>名称</Label><Input value={name} onChange={(e) => setName(e.target.value)} /></div>
           <div className="space-y-1.5"><Label>硬TTL（分钟，0不限）</Label><PrecisionInput value={ttl} onChange={setTtl} min={0} max={525600} suffix="min" /></div>
-          <div className="space-y-1.5"><Label>闲置超时（分钟）</Label><PrecisionInput value={idle} onChange={setIdle} min={1} max={1440} suffix="min" /></div>
+          <div className="space-y-1.5">
+            <Label>闲置超时（分钟）</Label>
+            {idleLocked ? (
+              <div className="rounded-md border bg-muted/50 px-3 py-2">
+                <p className="text-xs text-muted-foreground">由管理员策略锁定：{idle > 0 ? `${Math.round(idle)} 分钟` : "无限"}</p>
+                <p className="text-[10px] text-muted-foreground">生效来源 {workspace.idleInfo?.sourceLabel} · {workspace.idleInfo?.lockSourceLabel} · 不可自行调整</p>
+              </div>
+            ) : (
+              <>
+                <PrecisionInput value={idle} onChange={setIdle} min={0} max={1440} suffix="min" />
+                <p className="text-[10px] text-muted-foreground">0=无限（永不闲置回收）</p>
+              </>
+            )}
+          </div>
           <div className="space-y-1.5"><Label>标签（逗号分隔）</Label><Input value={tags} onChange={(e) => setTags(e.target.value)} /></div>
         </div>
         <DialogFooter>

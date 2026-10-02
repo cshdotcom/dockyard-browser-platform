@@ -57,6 +57,8 @@ interface Props {
   proxyNodes: { id: string; name: string; type: string; status: string }[]
   isAdmin: boolean
   currentUserId: string
+  /** r14（22-c）：闲置超时策略（创建表单默认值 + 锁定态） */
+  idlePolicy: { locked: boolean; minutes: number; sourceLabel: string; lockSourceLabel: string }
 }
 
 export function WorkspacesTable(props: Props) {
@@ -153,7 +155,7 @@ export function WorkspacesTable(props: Props) {
       key: "timeouts", title: "TTL / 闲置",
       render: (r) => (
         <span className="text-xs tabular-nums">
-          {r.ttlMinutes > 0 ? `${r.ttlMinutes}min` : "不限"} / {r.idleTimeoutMinutes}min
+          {r.ttlMinutes > 0 ? `${r.ttlMinutes}min` : "不限"} / {r.idleTimeoutMinutes > 0 ? `${r.idleTimeoutMinutes}min` : "无限"}
         </span>
       ),
     },
@@ -246,7 +248,7 @@ export function WorkspacesTable(props: Props) {
         }
       />
 
-      <CreateDialog open={createOpen} onOpenChange={setCreateOpen} templates={props.templates} snapshots={props.snapshots} proxyNodes={props.proxyNodes} />
+      <CreateDialog open={createOpen} onOpenChange={setCreateOpen} templates={props.templates} snapshots={props.snapshots} proxyNodes={props.proxyNodes} idlePolicy={props.idlePolicy} />
 
       <ConfirmDialog
         open={!!deleteTarget}
@@ -315,13 +317,15 @@ function BatchBar({ ids, onDone }: { ids: string[]; onDone: () => void }) {
 
 // ---- 创建工作区弹窗 ----
 function CreateDialog({
-  open, onOpenChange, templates, snapshots, proxyNodes,
+  open, onOpenChange, templates, snapshots, proxyNodes, idlePolicy,
 }: {
   open: boolean
   onOpenChange: (v: boolean) => void
   templates: { id: string; name: string; scope: string }[]
   snapshots: { id: string; name: string }[]
   proxyNodes: { id: string; name: string; type: string; status: string }[]
+  /** r14（22-c）：闲置超时策略（locked=表单只读；minutes=策略链解析默认值） */
+  idlePolicy: { locked: boolean; minutes: number; sourceLabel: string; lockSourceLabel: string }
 }) {
   const router = useRouter()
   const [form, setForm] = React.useState({
@@ -329,6 +333,13 @@ function CreateDialog({
     ttlMinutes: 0, idleTimeoutMinutes: 60, resolution: "1920x1080", tags: "",
   })
   const [busy, setBusy] = React.useState(false)
+
+  // r14（22-c）：弹窗打开时按策略链解析值重置闲置超时默认值
+  React.useEffect(() => {
+    if (open) {
+      setForm((f) => ({ ...f, idleTimeoutMinutes: Math.max(0, Math.round(idlePolicy.minutes)) }))
+    }
+  }, [open, idlePolicy.minutes])
 
   const submit = async () => {
     if (!form.name.trim()) { toast.error("请输入工作区名称"); return }
@@ -338,7 +349,9 @@ function CreateDialog({
         name: form.name.trim(), mode: form.mode,
         templateId: form.templateId || null, proxyNodeId: form.proxyNodeId || null,
         profileSnapshotId: form.profileSnapshotId || null,
-        ttlMinutes: form.ttlMinutes, idleTimeoutMinutes: form.idleTimeoutMinutes,
+        ttlMinutes: form.ttlMinutes,
+        // 锁定态：传入策略值（服务端同样会强制采用解析值，双保险）
+        idleTimeoutMinutes: idlePolicy.locked ? Math.max(0, Math.round(idlePolicy.minutes)) : form.idleTimeoutMinutes,
         resolution: form.resolution, tags: form.tags,
       })
       if (res.code === 0) {
@@ -437,7 +450,17 @@ function CreateDialog({
             </div>
             <div className="space-y-1.5">
               <Label>闲置超时（分钟）</Label>
-              <PrecisionInput value={form.idleTimeoutMinutes} onChange={(v) => setForm({ ...form, idleTimeoutMinutes: v })} min={1} max={1440} suffix="min" />
+              {idlePolicy.locked ? (
+                <div className="rounded-md border bg-muted/50 px-3 py-2">
+                  <p className="text-xs text-muted-foreground">由管理员策略锁定：{idlePolicy.minutes > 0 ? `${Math.round(idlePolicy.minutes)} 分钟` : "无限（永不闲置回收）"}</p>
+                  <p className="text-[10px] text-muted-foreground">锁定来源：{idlePolicy.lockSourceLabel} · 不可自行调整</p>
+                </div>
+              ) : (
+                <>
+                  <PrecisionInput value={form.idleTimeoutMinutes} onChange={(v) => setForm({ ...form, idleTimeoutMinutes: v })} min={0} max={1440} suffix="min" />
+                  <p className="text-[10px] text-muted-foreground">0=无限（永不闲置回收）；默认 {idlePolicy.minutes > 0 ? `${Math.round(idlePolicy.minutes)} 分钟` : "无限"}（{idlePolicy.sourceLabel}）</p>
+                </>
+              )}
             </div>
           </div>
           <div className="space-y-1.5">

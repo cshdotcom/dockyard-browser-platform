@@ -104,7 +104,7 @@ export default async function AdminAnnouncementsPage({
         total={total}
         page={q.page}
         pageSize={q.pageSize}
-        keyword={q.keyword}
+        keyword={q.keyword ?? ""}
         sortField={q.sortField}
         sortOrder={q.sortOrder}
         filters={f}

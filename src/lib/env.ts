@@ -31,6 +31,11 @@ export const ENV = {
   get externalBrowserVncPort() {
     return Number(process.env.EXTERNAL_BROWSER_VNC_PORT || 5900)
   },
+  // [22-d] VNC 拨号目标主机可选覆盖（默认从 EXTERNAL_BROWSER_URL 推导 host）：
+  // 适用 CDP 与 RFB 分置两台主机的拓扑（如 CDP 走域名、RFB 走内网直连）
+  get externalBrowserVncHost() {
+    return (process.env.EXTERNAL_BROWSER_VNC_HOST || "").trim()
+  },
   get smtpHost() {
     return process.env.SMTP_HOST || ""
   },
@@ -112,3 +117,10 @@ export const externalAvailable = {
   // 外部浏览器分离部署形态（EXTERNAL_BROWSER_URL 填写即启用）
   get external() { return !!ENV.externalBrowserUrl },
 }
+
+// ---- [22-d] 跨域请求源白名单（逗号分隔；与 proxy.ts / /api/me/cross-domain 共用）----
+// CORS_ALLOWED_ORIGINS（新名称）；兼容旧名称 CORS_ORIGINS。"*" 表示全部允许（不带凭证）
+export const corsAllowedOrigins: string[] = (process.env.CORS_ALLOWED_ORIGINS || process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)

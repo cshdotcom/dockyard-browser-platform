@@ -67,11 +67,13 @@ async function fanOutInboxNotices(
     const u = await db.user.findFirst({ where: { id: ann.userId, deletedAt: null }, select: { id: true } })
     targetUserIds = u ? [u.id] : []
   } else if (ann.type === "GROUP" && ann.groupId) {
-    const members = await db.groupUser.findMany({
-      where: { groupId: ann.groupId, user: { deletedAt: null, enabled: true, frozen: false } },
-      select: { userId: true },
+    // GroupUser 无 user 关系定义（纯外键表）：两步查询先取成员再过滤有效用户
+    const members = await db.groupUser.findMany({ where: { groupId: ann.groupId }, select: { userId: true } })
+    const valid = await db.user.findMany({
+      where: { id: { in: members.map((m) => m.userId) }, deletedAt: null, enabled: true, frozen: false },
+      select: { id: true },
     })
-    targetUserIds = members.map((m) => m.userId)
+    targetUserIds = valid.map((v) => v.id)
   } else {
     const users = await db.user.findMany({
       where: { deletedAt: null, enabled: true, frozen: false },

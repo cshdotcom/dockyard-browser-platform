@@ -124,7 +124,7 @@ export async function verifySmtpConnection(to?: string): Promise<{ ok: boolean; 
   try {
     await t.verify()
   } catch (e) {
-    return { ok: false, verified: false, sent: false, message: `连接失败：${e instanceof Error ? e.message : String(e)}`, source: cfg.source }
+    return { ok: false, verified: false, sent: false, message: `连接失败（使用已保存配置 ${cfg.host}:${cfg.port} ${cfg.secure ? "SSL" : "STARTTLS"}）：${e instanceof Error ? e.message : String(e)}`, source: cfg.source }
   }
   if (!to) return { ok: true, verified: true, sent: false, message: `SMTP 连接成功（${cfg.host}:${cfg.port} ${cfg.secure ? "SSL" : "STARTTLS"} · 认证${cfg.user ? "已启用" : "未启用"}）`, source: cfg.source }
   try {
@@ -137,7 +137,7 @@ export async function verifySmtpConnection(to?: string): Promise<{ ok: boolean; 
     })
     return { ok: true, verified: true, sent: true, message: `连接成功且测试邮件已发送至 ${to}`, source: cfg.source }
   } catch (e) {
-    return { ok: false, verified: true, sent: false, message: `连接成功但发送失败：${e instanceof Error ? e.message : String(e)}`, source: cfg.source }
+    return { ok: false, verified: true, sent: false, message: `握手成功但发送失败（${cfg.host}:${cfg.port}）：${e instanceof Error ? e.message : String(e)}`, source: cfg.source }
   }
 }
 

@@ -5,7 +5,9 @@ import { fmtDate } from "@/lib/utils-server"
 import { ConfigPanel, type ConfigItem, type ConfigVersionRow } from "./config-panel"
 import { Settings } from "lucide-react"
 
-// 系统配置（管理员可查看，仅超级管理员可修改）
+// 系统配置（管理员可查看，仅超级管理员可修改）——配置项随时后台可改，禁用路由缓存保证回显最新落库值
+export const dynamic = "force-dynamic"
+
 export const metadata = { title: "系统配置" }
 
 export default async function AdminConfigPage() {

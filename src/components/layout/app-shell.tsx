@@ -9,6 +9,7 @@ import {
   Users, FolderTree, ScrollText, Settings2, Timer, FolderOpen, DatabaseBackup,
   Bell, Server, Network, Recycle, ShieldAlert, MessageSquareCode,
   ChevronLeft, Menu, LogOut, Search, UserCog, MonitorSmartphone,
+  AlertTriangle, CheckCircle2, Loader2, ChevronRight,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { UserAvatar } from "@/components/shared/user-avatar"
@@ -264,6 +265,9 @@ function NotificationBell({ initial }: { initial: number }) {
   const [items, setItems] = React.useState<{ id: string; title: string; content: string; type: string; link: string | null; readAt: string | null; createdAt: string }[]>([])
   const [count, setCount] = React.useState(initial)
   const [open, setOpen] = React.useState(false)
+  // 站内信小弹窗：点击一条通知先打开摘要弹窗（标题+≤200字摘要+已读+查看详情）
+  const [selected, setSelected] = React.useState<{ id: string; title: string; content: string; type: string; link: string | null; readAt: string | null; createdAt: string } | null>(null)
+  const [marking, setMarking] = React.useState(false)
   const router = useRouter()
 
   const load = React.useCallback(async () => {
@@ -282,65 +286,186 @@ function NotificationBell({ initial }: { initial: number }) {
     return () => clearInterval(t)
   }, [load])
 
+  // ---- 单条标记已读：PATCH 后本地即时更新（已读样式 + 未读计数减一） ----
+  const markRead = async (n: NonNullable<typeof selected>): Promise<boolean> => {
+    if (n.readAt) return true
+    setMarking(true)
+    try {
+      const res = await fetch("/api/notifications", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: n.id }),
+      })
+      const json = await res.json()
+      if (json.code !== 0) {
+        toast.error(json.msg || "标记已读失败")
+        return false
+      }
+      const readAt = (json.data?.readAt as string) || new Date().toISOString()
+      setItems((prev) => prev.map((x) => (x.id === n.id ? { ...x, readAt } : x)))
+      setSelected((prev) => (prev && prev.id === n.id ? { ...prev, readAt } : prev))
+      setCount((c) => Math.max(0, c - 1))
+      return true
+    } catch {
+      toast.error("网络异常，标记已读失败")
+      return false
+    } finally {
+      setMarking(false)
+    }
+  }
+
+  // 查看详情目标：公告类 → 公告页（link 携带 focus 定位）；其他 → 有 link 才跳转
+  const detailLink = (n: NonNullable<typeof selected>): string | null => {
+    if (n.type === "ANNOUNCEMENT") return n.link || "/announcements"
+    return n.link || null
+  }
+
+  const gotoDetail = (n: NonNullable<typeof selected>) => {
+    const link = detailLink(n)
+    // 查看详情即视为已读（打开公告详情后回转即已读态）
+    if (!n.readAt) void markRead(n)
+    setSelected(null)
+    if (link) router.push(link)
+  }
+
+  const typeLabel: Record<string, string> = {
+    ANNOUNCEMENT: "公告通知",
+    ALERT: "告警通知",
+    SYSTEM: "系统通知",
+    TOKEN_EXPIRE: "令牌到期",
+    SECURITY: "安全通知",
+  }
+  const TypeIcon = (n: NonNullable<typeof selected>) => {
+    if (n.type === "ANNOUNCEMENT") return <Megaphone className="h-4 w-4 text-violet-500 shrink-0" />
+    if (n.type === "ALERT") return <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
+    if (n.type === "TOKEN_EXPIRE") return <KeyRound className="h-4 w-4 text-orange-500 shrink-0" />
+    if (n.type === "SECURITY") return <ShieldAlert className="h-4 w-4 text-red-500 shrink-0" />
+    return <Bell className="h-4 w-4 text-teal-500 shrink-0" />
+  }
+
+  // 摘要：纯文本截断 200 字（弹窗内仍限高滚动，不溢出）
+  const summaryOf = (n: NonNullable<typeof selected>) =>
+    n.content.length > 200 ? `${n.content.slice(0, 200)}…` : n.content
+
   return (
-    <DropdownMenu open={open} onOpenChange={(v) => { setOpen(v); if (v) void load() }}>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="relative">
-          <Bell className="h-[18px] w-[18px]" />
-          {count > 0 && (
-            <span className="absolute -right-0.5 -top-0.5 h-4 min-w-4 px-1 rounded-full bg-red-500 text-white text-[10px] flex items-center justify-center">
-              {count > 99 ? "99+" : count}
-            </span>
-          )}
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-80">
-        <DropdownMenuLabel className="flex items-center justify-between">
-          <span>站内通知</span>
-          <button
-            className="text-xs text-teal-600 underline"
-            onClick={async (e) => {
-              e.stopPropagation()
-              await fetch("/api/notifications", { method: "PUT" })
-              void load()
-            }}
-          >
-            全部已读
-          </button>
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <div className="max-h-96 overflow-y-auto">
-          {items.length === 0 && <p className="py-6 text-center text-sm text-muted-foreground">暂无通知</p>}
-          {items.map((n) => (
+    <>
+      <DropdownMenu open={open} onOpenChange={(v) => { setOpen(v); if (v) void load() }}>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" className="relative" aria-label={`站内通知（${count} 条未读）`}>
+            <Bell className="h-[18px] w-[18px]" />
+            {count > 0 && (
+              <span className="absolute -right-0.5 -top-0.5 h-4 min-w-4 px-1 rounded-full bg-red-500 text-white text-[10px] flex items-center justify-center">
+                {count > 99 ? "99+" : count}
+              </span>
+            )}
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-80">
+          <DropdownMenuLabel className="flex items-center justify-between">
+            <span>站内通知</span>
             <button
-              key={n.id}
-              type="button"
-              className={cn(
-                "block w-full text-left px-3 py-2.5 border-b last:border-0 transition",
-                !n.readAt && "bg-teal-600/5",
-                n.link ? "cursor-pointer hover:bg-muted/70" : "cursor-default",
-              )}
-              onClick={() => {
-                if (n.link) {
-                  setOpen(false)
-                  router.push(n.link)
-                }
+              className="text-xs text-teal-600 underline"
+              onClick={async (e) => {
+                e.stopPropagation()
+                await fetch("/api/notifications", { method: "PUT" })
+                void load()
               }}
             >
-              <p className="text-sm font-medium leading-tight flex items-center gap-1.5">
-                {n.type === "ANNOUNCEMENT" && <Megaphone className="h-3 w-3 text-violet-500 shrink-0" />}
-                {n.title}
-              </p>
-              <p className="mt-0.5 text-xs text-muted-foreground line-clamp-2">{n.content}</p>
-              <p className="mt-1 text-[10px] text-muted-foreground">
-                {new Date(n.createdAt).toLocaleString("zh-CN")}
-                {n.link && <span className="ml-1 text-teal-600">点击查看 →</span>}
-              </p>
+              全部已读
             </button>
-          ))}
-        </div>
-      </DropdownMenuContent>
-    </DropdownMenu>
+          </DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          <div className="max-h-96 overflow-y-auto">
+            {items.length === 0 && <p className="py-6 text-center text-sm text-muted-foreground">暂无通知</p>}
+            {items.map((n) => (
+              <button
+                key={n.id}
+                type="button"
+                className={cn(
+                  "block w-full text-left px-3 py-2.5 border-b last:border-0 transition cursor-pointer hover:bg-muted/70",
+                  !n.readAt && "bg-teal-600/5",
+                )}
+                onClick={() => {
+                  // 先打开小弹窗（不直接跳转）
+                  setOpen(false)
+                  setSelected(n)
+                }}
+              >
+                <p className="text-sm font-medium leading-tight flex items-center gap-1.5">
+                  {!n.readAt && <span className="h-1.5 w-1.5 rounded-full bg-teal-600 shrink-0" aria-label="未读" />}
+                  {n.type === "ANNOUNCEMENT" && <Megaphone className="h-3 w-3 text-violet-500 shrink-0" />}
+                  <span className="truncate">{n.title}</span>
+                </p>
+                <p className="mt-0.5 text-xs text-muted-foreground line-clamp-2">{n.content}</p>
+                <p className="mt-1 text-[10px] text-muted-foreground flex items-center gap-1">
+                  <span>{new Date(n.createdAt).toLocaleString("zh-CN")}</span>
+                  {!n.readAt && <span className="text-teal-600">未读</span>}
+                  <span className="ml-auto text-teal-600 inline-flex items-center gap-0.5">详情<ChevronRight className="h-3 w-3" /></span>
+                </p>
+              </button>
+            ))}
+          </div>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      {/* 站内信小弹窗：标题 + ≤200字摘要 + 标记已读 + 查看详情（交互风格同全局公告详情弹窗） */}
+      <Dialog open={!!selected} onOpenChange={(v) => { if (!v) setSelected(null) }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 pr-6 text-base">
+              {selected && TypeIcon(selected)}
+              <span className="truncate">{selected?.title}</span>
+            </DialogTitle>
+            <div className="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
+              <Badge variant="outline" className="text-[10px] font-normal">{selected ? typeLabel[selected.type] || selected.type : ""}</Badge>
+              <span>{selected ? new Date(selected.createdAt).toLocaleString("zh-CN") : ""}</span>
+            </div>
+          </DialogHeader>
+          <div className="max-h-56 overflow-y-auto rounded-md border bg-muted/40 px-3 py-2.5">
+            <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{selected ? summaryOf(selected) : ""}</p>
+            {selected && selected.content.length > 200 && (
+              <p className="mt-2 text-[11px] text-muted-foreground">内容已截断，点击「查看详情」查看完整内容</p>
+            )}
+          </div>
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
+            <div className="min-w-0">
+              {selected && (selected.readAt ? (
+                <Badge variant="outline" className="gap-1 text-xs py-1.5 px-3">
+                  <CheckCircle2 className="h-3.5 w-3.5 text-teal-600" />
+                  {selected.readAt ? `已读于 ${new Date(selected.readAt).toLocaleString("zh-CN")}` : "已读"}
+                </Badge>
+              ) : (
+                <span className="text-xs text-muted-foreground inline-flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-teal-600" /> 未读
+                </span>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" onClick={() => setSelected(null)} className="flex-1 sm:flex-none">
+                关闭
+              </Button>
+              {selected && !selected.readAt && (
+                <Button
+                  variant="secondary"
+                  onClick={() => selected && void markRead(selected)}
+                  disabled={marking}
+                  className="flex-1 sm:flex-none"
+                >
+                  {marking ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-1 h-4 w-4 text-teal-600" />}
+                  标记已读
+                </Button>
+              )}
+              {selected && detailLink(selected) && (
+                <Button onClick={() => gotoDetail(selected)} className="bg-teal-600 hover:bg-teal-700 flex-1 sm:flex-none">
+                  查看详情
+                  <ChevronRight className="ml-1 h-4 w-4" />
+                </Button>
+              )}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 

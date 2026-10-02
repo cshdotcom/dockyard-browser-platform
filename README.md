@@ -203,6 +203,86 @@ docker run -e VNC_BRIDGE_PUBLIC=url \
 
 > 平台域名与 CDP 公网端点配置见上文「公开域名配置」；VNC 独立域名时工作区详情页「远程桌面 → VNC 接入信息」会展示实际生效的桥地址，便于联调确认。
 
+#### 跨域登录态与用户信息传递（22-d）
+
+跨域名形态下，业务系统页面可识别用户在 Dockyard 的登录态并获取基础身份信息（跨域 Cookie 传递 + CORS 白名单 + 专用只读端点）：
+
+**第一步：配置 CORS 白名单（平台侧）**
+```bash
+docker run -e CORS_ALLOWED_ORIGINS=https://app.example.com,https://portal.example.cn ...
+```
+- 白名单内来源的跨域请求：回显该 Origin + `Access-Control-Allow-Credentials: true`（携带 HttpOnly 会话 Cookie 的必要条件），OPTIONS 预检由中间件直接 204 终结
+- 白名单外来源：403 拒绝（与历史行为一致）；`*` 通配模式放行全部来源但不带凭证（规范限制：`*` 与 Cookie 凭证互斥）
+
+**第二步：外部域名侧识别登录态（fetch + credentials）**
+```js
+// 业务系统页面（https://app.example.com）内：
+const res = await fetch("https://dockyard.example.com/api/me/cross-domain", {
+  credentials: "include", // 携带 Dockyard 会话 Cookie
+})
+if (res.ok) {
+  const { data } = await res.json()
+  // { id, username, displayName, role } —— 仅基础识别字段，密码哈希/邮箱/配额等一律不外泄
+  console.log(`已登录：${data.displayName || data.username}（${data.role}）`)
+} else if (res.status === 401) {
+  // 未登录 / 会话失效（响应同样带 CORS 头，外部页面可读）
+}
+```
+
+**Cookie 跨域前提（重要）**：会话 Cookie 为 `HttpOnly + SameSite=Lax`。跨域携带需满足任一条件：
+- **同父域部署（推荐）**：平台与业务系统同属一个可注册父域（如 `dockyard.example.com` 与 `app.example.com`），Cookie 天然按域匹配（Lax 不阻断子域间请求；如需严格跨父域携带，将反向代理层配置为同域不同路径或启用 Cookie `Domain=.example.com` 策略）
+- **顶级跳转场景**：从业务系统跳转到平台域名（`window.location` 顶级导航）时 Lax Cookie 正常携带 —— 登录后回跳业务页即可完成「单点进入」
+- 纯跨父域 XHR 携带（如 `a.com` 页面直接 XHR `b.com`）受浏览器 SameSite 策略限制，需部署在同父域或经网关同域化
+- 安全基线不变：票据 HMAC/防重放、深度会话校验（RSC+Action+Handler 三层）、`Cache-Control: no-store`（用户信息不缓存）、白名单外 403
+
+**鉴权与安全语义**：`/api/me/cross-domain` 为只读 GET；未登录返回 401（带 CORS 头）；敏感字段（passwordHash/邮箱/配额/偏好）绝不返回；响应不缓存；与平台统一鉴权链路（JWT + LoginSession 深度校验）完全一致。
+
+### 外部浏览器部署（可分可合 · 22-d）
+
+浏览器运行时支持两种部署形态，按需切换（不填外部地址 = 默认单容器全内置）：
+
+**形态一：单容器全内置（默认，零外部依赖）**
+`EXTERNAL_BROWSER_URL` 未配置 —— Xvfb + Chromium + x11vnc 与平台同容器运行，每工作区一棵独立沙箱进程树（详见「硬隔离浏览器容器」），无需任何外部镜像/服务。
+
+**形态二：外部浏览器分离部署（独立容器/独立主机）**
+使用项目自带的硬隔离浏览器镜像（`docker/browser/`，CDP 9222 + VNC 5900）独立部署，平台只连接不编排：
+```bash
+# 1. 在另一台主机（或同主机）启动浏览器镜像
+docker run -d --name dockyard-browser --network host \
+  ghcr.io/cshdotcom/dockyard-browser-platform-browser:latest
+
+# 2. 平台容器指定外部浏览器地址（CDP 端点）
+docker run -d --name dockyard --network host \
+  -e EXTERNAL_BROWSER_URL=http://192.168.1.10:9222 \
+  ... ghcr.io/cshdotcom/dockyard-browser-platform:latest
+```
+- **CDP**：平台直接对外部地址发起 `/json/version` 探测与连接；创建会话时若不可达将直接报错（「外部浏览器不可达：<URL>」—— 管理员显式配置了外部地址，不做内嵌回退）
+- **VNC 流量**：平台内 VNC 桥（3005）按会话票据拨号外部主机的 RFB 端口（默认 `<URL主机>:5900`）—— 网页端体验与内嵌形态完全一致（仍经平台统一域名取票/鉴权）；`EXTERNAL_BROWSER_VNC_HOST`/`EXTERNAL_BROWSER_VNC_PORT` 可覆盖拨号目标（CDP 与 VNC 分置两台主机时使用）
+- **生命周期**：外部浏览器由其镜像内 supervisor 自管（崩溃 1 秒内同 Profile 自动拉起）；平台侧不创建/不销毁/不重启外部进程（`browser/restart` 操作会明确提示由部署侧负责）
+- **健康探测**：以外部 CDP `/json/version` 真实握手为权威存活信号（会话看门狗/健康面板共用）
+- **隔离快照**：工作区安全面板如实标注「外部浏览器（分离部署 host:port）」；真实隔离规格（非 root/只读根 FS/CapDrop=ALL/supervisor 防退出）由 docker/browser 镜像保证
+- **策略边界**：外部形态下平台网络/域名/CRX 策略无法注入外部容器（托管策略需部署侧自管），安全面板会展示对应提示
+- 启动日志：「使用外部浏览器：<URL>（分离部署，平台只连接不编排…）」便于确认生效形态
+
+### PostgreSQL 部署（默认 SQLite · 22-d）
+
+默认 SQLite（零依赖文件库）。需要 PostgreSQL 时通过环境变量切换，**平台启动时自动完成全部初始化**（建表 → 审计不可篡改触发器 → 种子），无需人工导入 SQL：
+
+```bash
+docker run -d --name dockyard --network host \
+  -e DATABASE_PROVIDER=postgres \
+  -e DATABASE_URL=postgresql://dockyard:secret@10.0.0.5:5432/dockyard \
+  ... ghcr.io/cshdotcom/dockyard-browser-platform:latest
+# 启动日志出现「数据库已自动初始化（postgres）」即完成；流程幂等，升级镜像后重启即自动对齐结构
+```
+
+- **自动初始化**（docker/start.sh）：`prisma db push --schema prisma/schema.postgres.prisma`（幂等建表，失败自动重试 3 次）→ `apply-triggers.ts` 应用审计触发器（幂等）→ `seed-postgres.ts` 播种（幂等）
+- **人工初始化（可选）**：DBA 预建库等场景执行 `psql -f db/postgres/init.sql`（全量 DDL + 审计触发器，与自动初始化产物等价；种子仍由启动流程播种）—— SQL 文件已随源码入库（`db/postgres/`）
+- **双 schema 同源**：`prisma/schema.postgres.prisma` 由 `scripts/db/sync-postgres-schema.ts` 从主 schema 自动派生（模型零漂移；模型变更请改主 schema 后重新同步）
+- **运行时双客户端**：`src/lib/db.ts` 按 `DATABASE_PROVIDER` 实例化对应 PrismaClient（SQLite / PostgreSQL 查询引擎均随镜像分发，standalone 产物已包含）
+- **审计不可篡改双重防线**：应用层只插入（`src/lib/audit.ts`）+ 数据库层触发器（`db/postgres/audit_triggers.sql`，UPDATE/DELETE/TRUNCATE 全拒绝）
+- 详细说明与开发命令见 `db/postgres/README.md`
+
 ### 外部服务对接（生产环境）
 | 环境变量 | 说明 | 缺省行为 |
 |---|---|---|
@@ -210,6 +290,11 @@ docker run -e VNC_BRIDGE_PUBLIC=url \
 | BROWSER_IMAGE | 自托管硬隔离浏览器镜像 | GHCR 官方 dockyard-browser |
 | STEEL_BROWSER_URL | Steel-Browser API（仅内网） | 模拟会话模式 |
 | NOVNC_POOL_URL | NoVNC 池 API（仅内网） | 模拟桌面模式 |
+| **EXTERNAL_BROWSER_URL** | [22-d] 外部浏览器分离部署地址（docker/browser 镜像的 CDP 端点，如 `http://browser-host:9222`）；填写后所有会话挂接该自部署浏览器，未填写默认单容器内嵌 | 单容器内嵌（零外部依赖） |
+| EXTERNAL_BROWSER_CDP_PORT / EXTERNAL_BROWSER_VNC_PORT / EXTERNAL_BROWSER_VNC_HOST | 外部浏览器 CDP 端口（9222）/ RFB 端口（5900）/ RFB 目标主机覆盖（默认从 URL 推导，CDP 与 VNC 分置两台主机时使用） | 9222 / 5900 / URL 主机 |
+| **DATABASE_PROVIDER** | [22-d] 数据库形态：`sqlite`（默认）/ `postgres`；postgres 需配 DATABASE_URL，启动时自动建表+种子+审计触发器（见「PostgreSQL 部署」） | sqlite |
+| **DATABASE_URL** | [22-d] postgres 连接串（如 `postgresql://user:pass@host:5432/dockyard`）；sqlite 形态下为文件路径（镜像内默认 file:/app/db/custom.db） | sqlite 文件库 |
+| **CORS_ALLOWED_ORIGINS** | [22-d] 跨域请求源白名单（逗号分隔，如 `https://app.example.com,https://portal.example.cn`；兼容旧名 CORS_ORIGINS）；配合 `/api/me/cross-domain` 实现登录态/用户信息跨域传递（见「跨域名部署」） | 未配置（不跨域开放） |
 | VNC_BRIDGE_PORT / VNC_BRIDGE_SECRET / VNC_BRIDGE_PUBLIC | HelmPort VNC 网关桥（端口/HMAC密钥/接入形态 gateway\|port\|url；gateway=经统一网关嵌入网页端，回环监听） | 3005 / 启动时随机生成 / gateway |
 | GATEWAY_PORT / APP_INTERNAL_PORT / GATEWAY_TRANSFORM_PORTS | 统一入口网关（对外唯一 UI 端口 / Next 回环端口 / 允许透传的回环端口清单） | 3000 / 13000 / 3003,3004,3005 |
 | SMTP_HOST/PORT/USER/PASS | 邮件服务 | 模拟邮件（服务端日志输出） |
@@ -225,13 +310,14 @@ docker run -e VNC_BRIDGE_PUBLIC=url \
 ## 五、仓库结构
 
 ```
-prisma/            schema.prisma（50表）+ seed.ts
+prisma/            schema.prisma（50表）+ seed.ts + schema.postgres.prisma（PG 派生）+ seed-postgres.ts
 src/app/           login/register/forgot-password + (main)/ 前台与管理后台全部页面
-src/app/api/       auth(登录/验证码/注册/重置) cron mcp openapi files cdp vnc-proxy metrics
+src/app/api/       auth(登录/验证码/注册/重置) me(跨域用户信息) cron mcp openapi files cdp vnc-proxy metrics
 src/lib/           认证/权限/审计/配置/加密/TOTP/限流/幂等/风控/回收站/外部适配器/告警/WS推送
 src/server/        actions(全部Server Actions) tasks(定时任务引擎) mcp(批量任务引擎)
 mini-services/     gateway（统一入口网关：对外唯一 UI 端口，WS双向泵） ws-hub（回环） vnc-bridge（回环）
-docker/            start/stop/healthcheck/entrypoint-guard（守护入口：崩溃自愈）脚本
+docker/            start/stop/healthcheck/entrypoint-guard（守护入口：崩溃自愈）+ browser（独立浏览器镜像）+ embedded 脚本
+db/postgres/       init.sql（一键人工初始化）/ schema.sql（全量 DDL）/ audit_triggers.sql（审计触发器）/ apply-triggers.ts
 ```
 
 ## 六、安全设计要点

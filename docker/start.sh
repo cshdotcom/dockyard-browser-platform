@@ -126,11 +126,13 @@ fi
 if [ -n "${PUBLIC_BASE_URL:-}" ]; then
   log "平台公网域名：$PUBLIC_BASE_URL（工作区详情将展示公网 CDP 网关端点）"
 fi
-# r14：外部浏览器分离部署（EXTERNAL_BROWSER_URL 填写则优先外部；未填默认单容器内嵌）
+# r14/22-d：外部浏览器分离部署（EXTERNAL_BROWSER_URL 填写则优先外部；未填默认单容器内嵌）
 # 地址 = 自部署 docker/browser 硬隔离浏览器镜像的 CDP 端点（如 http://192.168.1.10:9222）
-# 可选：EXTERNAL_BROWSER_VNC_PORT（RFB 端口，默认 5900）/ EXTERNAL_BROWSER_CDP_PORT（默认 9222）
+# 可选：EXTERNAL_BROWSER_CDP_PORT（默认 9222）/ EXTERNAL_BROWSER_VNC_PORT（RFB 端口，默认 5900）/
+#       EXTERNAL_BROWSER_VNC_HOST（RFB 目标主机覆盖，默认从 URL 推导 —— CDP 与 VNC 分置两台主机时使用）
+# 外部形态下 VNC 桥（3005）按票据拨号外部主机 5900；生命周期由外部镜像 supervisor 自管
 if [ -n "${EXTERNAL_BROWSER_URL:-}" ]; then
-  log "外部浏览器分离部署模式：$EXTERNAL_BROWSER_URL（所有会话挂接该自部署浏览器）"
+  log "使用外部浏览器：$EXTERNAL_BROWSER_URL（分离部署，平台只连接不编排；VNC 桥将拨号 ${EXTERNAL_BROWSER_VNC_HOST:-URL主机}:${EXTERNAL_BROWSER_VNC_PORT:-5900}）"
 else
   log "浏览器运行形态：单容器内嵌（EXTERNAL_BROWSER_URL 未配置，默认零外部依赖）"
 fi
@@ -141,18 +143,68 @@ if [ -z "${CRON_SECRET:-}" ]; then
   export CRON_SECRET
 fi
 
-# ---- 2. 数据库结构初始化（幂等）----
+# ---- 2. 数据库结构初始化（幂等；22-d：sqlite 默认 / postgres 全自动初始化）----
 log "初始化数据库结构..."
 cd "$APP_DIR"
-bunx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -2 || log "警告：数据库结构推送失败（将沿用现有数据库）"
+DB_MODE="${DATABASE_PROVIDER:-${DB_PROVIDER:-sqlite}}"
+if [ "$DB_MODE" = "postgres" ]; then
+  # ---- PostgreSQL 形态：启动即自动建表 + 审计触发器 + 种子（无需人工导入 SQL）----
+  case "${DATABASE_URL:-}" in
+    postgresql://*|postgres://*) ;;
+    *)
+      log "严重错误：DATABASE_PROVIDER=postgres 但 DATABASE_URL 不是 postgresql:// 连接串（当前：${DATABASE_URL:-未设置}）"
+      exit 1
+      ;;
+  esac
+  log "数据库形态：PostgreSQL → 启动自动初始化（结构推送 → 审计触发器 → 种子，全部幂等）"
+  PG_PUSH_OK=0
+  PG_ATTEMPT=0
+  PG_MAX=3
+  while [ $PG_ATTEMPT -lt $PG_MAX ]; do
+    PG_ATTEMPT=$((PG_ATTEMPT + 1))
+    log "PostgreSQL 结构推送（第 ${PG_ATTEMPT}/${PG_MAX} 次）：prisma db push --schema prisma/schema.postgres.prisma"
+    # 输出落临时文件再回显（dash 管道退出码取尾命令，不能用于成败判定）
+    if bunx prisma db push --schema prisma/schema.postgres.prisma --skip-generate --accept-data-loss >/tmp/pg-push.log 2>&1; then
+      PG_PUSH_OK=1
+      tail -3 /tmp/pg-push.log
+      break
+    fi
+    tail -5 /tmp/pg-push.log
+    log "警告：结构推送失败（数据库暂不可达或账号权限不足？10 秒后重试）"
+    sleep 10
+  done
+  if [ "$PG_PUSH_OK" != "1" ]; then
+    log "严重错误：PostgreSQL 自动初始化失败（${PG_MAX} 次尝试均失败）—— 请检查 DATABASE_URL 连通性与账号权限；容器将由守护进程稍后整轮重试"
+    exit 1
+  fi
+  # 审计不可篡改触发器（幂等；失败不阻断启动 —— 可稍后手工执行 db/postgres/audit_triggers.sql）
+  if bun prisma/postgres/apply-triggers.ts >/tmp/pg-triggers.log 2>&1; then
+    tail -2 /tmp/pg-triggers.log
+    log "审计不可篡改触发器已应用（AuditLog 仅允许 INSERT）"
+  else
+    tail -3 /tmp/pg-triggers.log
+    log "警告：审计触发器应用失败（平台仍将启动；可手工执行 db/postgres/audit_triggers.sql 补齐）"
+  fi
+  log "播种初始数据（幂等，postgres）..."
+  ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin@2026}" bun prisma/seed-postgres.ts >/tmp/pg-seed.log 2>&1 \
+    && tail -3 /tmp/pg-seed.log \
+    || { tail -3 /tmp/pg-seed.log; log "警告：postgres 种子执行失败（可能已初始化过或账号只读）"; }
+  log "数据库已自动初始化（postgres）"
+else
+  # ---- SQLite 形态（默认，零外部依赖；行为与历史版本完全一致）----
+  log "数据库形态：SQLite（默认）→ $DB_PATH"
+  bunx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -2 || log "警告：数据库结构推送失败（将沿用现有数据库）"
+fi
 
 # ---- 3. 种子数据（幂等：默认配置/超管账号/内置任务/内置策略模板）----
 # 管理员引导三通道（互为补充，均幂等，后期可经「账号与安全」页修改）：
 #   · ADMIN_USERNAME / ADMIN_EMAIL / ADMIN_PASSWORD 环境变量 → 首启自动创建超管
 #   · ADMIN_PASSWORD_FORCE=1 → 启动时用环境变量密码覆盖已有管理员密码
 #   · 未配置且库中无管理员 → 登录页引导跳转 /setup 首启注册页
-log "播种初始数据（幂等）..."
-ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin@2026}" bun prisma/seed.ts 2>&1 | tail -3 || log "警告：种子执行失败（可能已初始化过）"
+if [ "$DB_MODE" != "postgres" ]; then
+  log "播种初始数据（幂等）..."
+  ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin@2026}" bun prisma/seed.ts 2>&1 | tail -3 || log "警告：种子执行失败（可能已初始化过）"
+fi
 
 # ---- 4. WS 枢纽（回环端口 ${WS_HUB_PORT:-3003}，事件注入 3004；对外统一经网关 XTransformPort 透传）----
 log "启动 WebSocket 枢纽（回环）..."

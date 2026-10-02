@@ -39,7 +39,6 @@ export async function moveToRecycle(params: RecyclableResource & {
   let snapshot: Record<string, unknown> = {}
   if (modelName) {
     try {
-      // @ts-expect-error 动态表访问
       snapshot = await (db as unknown as Record<string, { findUnique: (args: { where: { id: string } }) => Promise<Record<string, unknown>> }>)[modelName].findUnique({
         where: { id: params.resourceId },
       })
@@ -124,7 +123,6 @@ export async function restoreFromRecycle(recycleId: string, operator: { userId: 
   delete restoreData.deletedAt // 清除软删除标记
   // 解密加密字段再重新加密（保持密文可用性）—— 快照里存的是密文，直接回写即可
   try {
-    // @ts-expect-error 动态表访问
     const model = (db as unknown as Record<string, { findUnique: (a: { where: { id: string } }) => Promise<Record<string, unknown> | null>; update: (a: { where: { id: string }; data: Record<string, unknown> }) => Promise<unknown>; create: (a: { data: Record<string, unknown> }) => Promise<unknown> }>)[modelName]
     const existing = await model.findUnique({ where: { id: entry.resourceId } })
     if (existing) {
@@ -178,7 +176,6 @@ export async function purgeFromRecycle(recycleId: string, operator: { userId: st
   const modelName = tableMap[entry.resourceType]
   if (modelName) {
     try {
-      // @ts-expect-error 动态表访问
       await (db as unknown as Record<string, { delete: (a: { where: { id: string } }) => Promise<unknown>; deleteMany: (a: { where: { id: string } }) => Promise<unknown> }>)[modelName].deleteMany({
         where: { id: entry.resourceId },
       })

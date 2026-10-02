@@ -89,7 +89,9 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
   if (mode === "external") {
     const probe = await probeExternalBrowser(6000)
     if (!probe.ok) {
-      throw new Error(`外部浏览器不可达（${probe.error}），请检查 EXTERNAL_BROWSER_URL 配置与网络连通性`)
+      // [22-d] 管理员显式配置了外部地址 → 不回退内嵌，直接清晰报错（含目标地址与原因）
+      const target = probe.endpoint ? `${probe.endpoint.cdpBase}` : ENV.externalBrowserUrl
+      throw new Error(`外部浏览器不可达：${target}（${probe.error}）—— 请检查 EXTERNAL_BROWSER_URL 配置与网络连通性`)
     }
     const ep = probe.endpoint!
     const id = "ext-" + randomUUID().replace(/-/g, "").slice(0, 12)
@@ -265,10 +267,11 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
 
 // 解析 VNC 桥拨号目标：外部浏览器(分离部署 RFB 端点) / 内嵌沙箱(127.0.0.1:rfbPort) / 池集群(RFB端点) / 自托管容器IP / 模拟(演示RFB引擎)
 export async function novncDialTarget(sessionId: string, containerRef?: string | null): Promise<VncDialTarget | null> {
-  // 外部浏览器分离部署：桥直接拨号外部部署的 x11vnc（host:vncPort，镜像 EXPOSE 5900）
+  // 外部浏览器分离部署：桥直接拨号外部部署的 x11vnc（rfb 目标 = EXTERNAL_BROWSER_VNC_HOST
+  // 覆盖值或 URL 推导 host + EXTERNAL_BROWSER_VNC_PORT，默认 host:5900，镜像 EXPOSE 一致）
   if ((containerRef || sessionId).startsWith("ext-")) {
     const ep = externalBrowserEndpoint()
-    if (ep) return { k: "tcp", h: ep.host, p: ep.vncPort }
+    if (ep) return { k: "tcp", h: ep.rfb.host, p: ep.rfb.port }
     return null
   }
   // 单容器内嵌：回环拨号每沙箱 x11vnc（仅本容器网络命名空间内可达，无任何 UDP）

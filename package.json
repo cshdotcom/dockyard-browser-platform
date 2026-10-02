@@ -10,7 +10,13 @@
     "db:push": "prisma db push --accept-data-loss && bun prisma/seed.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:reset": "prisma migrate reset"
+    "db:reset": "prisma migrate reset",
+    "db:sync-pg-schema": "bun scripts/db/sync-postgres-schema.ts",
+    "db:generate:postgres": "prisma generate --schema prisma/schema.postgres.prisma",
+    "db:push:postgres": "prisma db push --schema prisma/schema.postgres.prisma --accept-data-loss",
+    "db:seed:postgres": "bun prisma/seed-postgres.ts",
+    "db:triggers:postgres": "bun db/postgres/apply-triggers.ts",
+    "db:init:postgres": "bun run db:push:postgres && bun run db:triggers:postgres && bun run db:seed:postgres"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

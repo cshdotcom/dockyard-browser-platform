@@ -18,7 +18,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { upsertWebhookRuleAction, deleteWebhookRuleAction, toggleWebhookRuleAction } from "@/server/actions/alerts"
+import { upsertWebhookRuleAction, deleteWebhookRuleAction, toggleWebhookRuleAction, batchToggleWebhookRulesAction, batchDeleteWebhookRulesAction } from "@/server/actions/alerts"
 
 export interface WebhookRuleRow {
   id: string

@@ -9,8 +9,8 @@
 -- 第二道防线 —— 即使超级管理员直连数据库也无法篡改审计记录。
 --
 -- 应用方式（两种任选其一，效果相同）：
---   1. 自动：平台启动时 DB_PROVIDER=postgres 自动执行（docker/start.sh 调
---      scripts/db/apply-pg-triggers.ts，幂等 CREATE OR REPLACE）
+--   1. 自动：平台启动时 DATABASE_PROVIDER=postgres 自动执行（docker/start.sh 调
+--      db/postgres/apply-triggers.ts，容器内路径 /app/prisma/postgres/apply-triggers.ts，幂等）
 --   2. 手工：psql -h <host> -U <user> -d <db> -f db/postgres/audit_triggers.sql
 -- ============================================================
 

@@ -12,6 +12,7 @@ import { Globe, PlayCircle, MonitorCog, Terminal, TriangleAlert, Recycle, Calend
 // 增强列表：归属双用户 / 时间三列（创建·启动·最近活跃）/ 累计运行时长 / 容器健康 / 代理出口 /
 // 策略快照摘要 / 删除记录（回收站来源）/ 批量筛选（用户·状态·模式·创建时间范围·活跃/回收站视图）/ 列显隐配置
 // r13c：新增「共享关系」总列表视图 —— 全平台共享关系全景 + 精确撤销（单人/批量/整工作区）+ 沙箱级禁共享否决
+// r14（22-c）：用户筛选作用域 —— 默认仅显示管理员自己的工作区；可搜索多选指定用户 / 全选看全部
 export const metadata = { title: "工作区管控" }
 
 export default async function AdminWorkspacesPage({
@@ -19,7 +20,7 @@ export default async function AdminWorkspacesPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>
 }) {
-  await requireAdmin()
+  const ctx = await requireAdmin()
   const sp = await searchParams
   const q = parseListQuery(sp)
   const f = q.filters
@@ -159,7 +160,21 @@ export default async function AdminWorkspacesPage({
   }
   if (f.mode) where.mode = f.mode
   if (f.status) where.status = f.status
-  if (f.user) where.userId = f.user
+  // r14（22-c）：用户筛选作用域（三级）：
+  //   scope=all（全选）→ 全部用户；scope=custom + users=多选 ID → 所选用户；
+  //   默认（无参数）→ 仅当前管理员自己的工作区；旧版单选 user 参数兼容
+  const userScope: "all" | "custom" | "legacy" | "mine" =
+    f.scope === "all" ? "all" : f.scope === "custom" && f.users ? "custom" : f.user ? "legacy" : "mine"
+  const usersParam = (f.users || "").split(",").map((s) => s.trim()).filter(Boolean)
+  if (userScope === "all") {
+    // 全选：不过滤用户（显示全部）
+  } else if (userScope === "custom" && usersParam.length) {
+    where.userId = { in: usersParam }
+  } else if (userScope === "legacy" && f.user) {
+    where.userId = f.user
+  } else {
+    where.userId = ctx.userId // 默认：仅显示管理员自己的工作区
+  }
   if (f.proxy) where.proxyNodeId = f.proxy
   // 创建时间范围（YYYY-MM-DD → 当日边界）
   if (f.createdFrom || f.createdTo) {
@@ -347,6 +362,7 @@ export default async function AdminWorkspacesPage({
         userOptions={userOptions.map((u) => ({ id: u.id, username: u.username, displayName: u.displayName, role: u.role }))}
         proxyOptions={proxyOptions}
         transferTargets={transferTargets}
+        currentAdmin={{ id: ctx.userId, username: ctx.username }}
       />
     </div>
   )

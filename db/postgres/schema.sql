@@ -1,3 +1,15 @@
+-- ============================================================
+-- Dockyard PostgreSQL 全量建表 DDL（自动生成，勿手工编辑）
+--
+-- 生成方式：bunx prisma migrate diff --from-empty --to-schema-datamodel
+--           prisma/schema.postgres.prisma --script
+-- 源 schema：prisma/schema.postgres.prisma（由 scripts/db/sync-postgres-schema.ts
+--   从 prisma/schema.prisma 派生 —— 模型变更请改主 schema 后重新执行同步与生成）
+--
+-- 用途：人工初始化场景（推荐使用平台启动自动初始化，见 docker/start.sh /
+--   README「PostgreSQL 部署」章节）；与启动自动初始化产物完全等价
+-- ============================================================
+
 -- CreateSchema
 CREATE SCHEMA IF NOT EXISTS "public";
 
@@ -29,6 +41,8 @@ CREATE TABLE "User" (
     "allowInternalNetwork" BOOLEAN,
     "allowSecureLocationAccess" BOOLEAN,
     "vncSessionMaxMinutes" INTEGER,
+    "idleTimeoutMinutes" INTEGER,
+    "idleTimeoutLocked" BOOLEAN NOT NULL DEFAULT false,
     "loginSessionCount" INTEGER NOT NULL DEFAULT 0,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -171,6 +185,8 @@ CREATE TABLE "Group" (
     "allowInternalNetwork" BOOLEAN NOT NULL DEFAULT false,
     "allowSecureLocationAccess" BOOLEAN NOT NULL DEFAULT false,
     "vncSessionMaxMinutes" INTEGER,
+    "idleTimeoutMinutes" INTEGER,
+    "idleTimeoutLocked" BOOLEAN NOT NULL DEFAULT false,
     "policy" JSONB,
     "createdByUserId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,

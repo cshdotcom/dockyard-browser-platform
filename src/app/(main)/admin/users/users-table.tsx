@@ -5,7 +5,7 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2, Share2, Ban, Undo2 } from "lucide-react"
+import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2, Share2, Ban, Undo2, UserX } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { UserAvatar } from "@/components/shared/user-avatar"
@@ -31,6 +31,7 @@ import {
   type CsvImportReport,
 } from "@/server/actions/users"
 import { batchDeleteUsersAction } from "@/server/actions/batch"
+import { adminEvictUserSharesAction, adminShareEvictPreviewAction } from "@/server/actions/admin-share-evict"
 import { BatchFailuresDialog } from "@/components/shared/batch-ui"
 import { UserFormDialog, type GroupOption } from "./user-form"
 import { UserApiTokensDialog } from "./user-api-tokens"
@@ -151,6 +152,11 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
 
   const [deleteUser, setDeleteUser] = React.useState<AdminUserRow | null>(null)
   const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false)
+
+  // r22b：清退该用户收到的共享（接收者维度批量撤销；超管/ADMIN）
+  const [evictShareUser, setEvictShareUser] = React.useState<AdminUserRow | null>(null)
+  const [evictShareCount, setEvictShareCount] = React.useState<number | null>(null)
+  const [evictShareBusy, setEvictShareBusy] = React.useState(false)
   const [batchDeleteBusy, setBatchDeleteBusy] = React.useState(false)
   const [batchFailures, setBatchFailures] = React.useState<{ id: string; reason: string }[] | null>(null)
   const [tempPassword, setTempPassword] = React.useState<{ username: string; password: string } | null>(null)
@@ -179,6 +185,36 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
   const exportCsv = (ids?: string[]) => {
     const url = ids && ids.length > 0 ? `/api/export/users?ids=${encodeURIComponent(ids.join(","))}` : "/api/export/users"
     window.open(url, "_blank")
+  }
+
+  // ---- r22b：打开清退确认（预加载将撤销条数） ----
+  const openEvictShare = (row: AdminUserRow) => {
+    setEvictShareUser(row)
+    setEvictShareCount(null)
+    void adminShareEvictPreviewAction({ kind: "USER", id: row.id })
+      .then((res) => {
+        setEvictShareCount(res.code === 0 ? res.data?.activeCount ?? 0 : null)
+      })
+      .catch(() => setEvictShareCount(null))
+  }
+
+  const runEvictShare = async () => {
+    if (!evictShareUser) return
+    setEvictShareBusy(true)
+    try {
+      const res = await adminEvictUserSharesAction({ targetUserId: evictShareUser.id })
+      if (res.code === 0) {
+        toast.success(`已清退用户「${evictShareUser.username}」收到的 ${res.data?.revoked ?? 0} 条生效共享`)
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "清退失败")
+    } finally {
+      setEvictShareBusy(false)
+      setEvictShareUser(null)
+    }
   }
 
   // ---- 批量删除（软删入回收站语义：禁用 + 会话下线 + 令牌作废；逐条失败隔离）----
@@ -441,6 +477,11 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
             <p className="px-2 py-1 text-[11px] text-muted-foreground">四级优先级：沙箱否决 {'>'} 用户 {'>'} 用户组 {'>'} 全局</p>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
+        {(viewerRole === "SUPER_ADMIN" || viewerRole === "ADMIN") && (
+          <DropdownMenuItem onClick={() => openEvictShare(row)}>
+            <UserX className="mr-1.5 h-4 w-4 text-rose-600" /> 清退其收到的共享
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSub>
           <DropdownMenuSubTrigger className="gap-1.5">
             <Timer className="mr-1.5 h-4 w-4" /> VNC 会话时长
@@ -636,6 +677,18 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
         loading={batchDeleteBusy}
         confirmText="确认批量删除"
         onConfirm={runBatchDelete}
+      />
+
+      {/* r22b：清退该用户收到的共享（确认时展示将撤销条数） */}
+      <ConfirmDialog
+        open={!!evictShareUser}
+        onOpenChange={(v) => { if (!v && !evictShareBusy) setEvictShareUser(null) }}
+        title="清退其收到的共享"
+        description={`确认清退用户 ${evictShareUser?.username || ""} 收到的全部工作区共享？\n· 将撤销其作为接收者的生效共享 ${evictShareCount === null ? "…（统计中）" : `${evictShareCount} 条`}\n· 该用户立即失去相关访问权，不影响其自己的工作区与他人\n· 审计记录保留，可由所有者重新共享恢复`}
+        destructive
+        confirmText="确认清退"
+        loading={evictShareBusy}
+        onConfirm={runEvictShare}
       />
 
       {/* 批量删除失败清单 */}

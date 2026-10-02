@@ -190,7 +190,7 @@ export async function requireResourceAccess(
   }
   // 查看动作允许被共享资源
   if (action === "VIEW") return // 共享校验由调用方单独做（workspaceShare）
-  throw bizError(ErrorCode.FORBIDDEN, `无权${action === "VIEW" ? "查看" : "操作"}该${resourceLabel}`)
+  throw bizError(ErrorCode.FORBIDDEN, `无权操作该${resourceLabel}`)
 }
 
 // 配额校验：全局 / 组 / 个人 三级 + 预留水位保护

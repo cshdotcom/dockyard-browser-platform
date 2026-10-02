@@ -2,6 +2,7 @@ import { db } from "@/lib/db"
 import { requireAuth, userGroupIds } from "@/lib/permissions"
 import { parseListQuery, pageSkipTake, safeOrderBy, fmtDate } from "@/lib/utils-server"
 import { resolveShareControl } from "@/lib/share-policy"
+import { resolveIdlePolicyForUser } from "@/lib/idle-policy"
 import { WorkspacesTable } from "./workspaces-table"
 
 export const metadata = { title: "浏览器工作区" }
@@ -76,6 +77,9 @@ export default async function WorkspacesPage({
   // 仅对自己的行计算（被共享行的共享入口在所有者侧）
   const baseShareControl = await resolveShareControl({ userId: ctx.userId, role: ctx.role })
 
+  // r14（22-c）：闲置超时四级策略链（创建表单默认值 + 锁定态；管理员不受锁定）
+  const idlePolicy = await resolveIdlePolicyForUser(ctx.userId, ctx.role)
+
   const data = rows.map((r) => {
     const isOwner = r.userId === ctx.userId
     let shareControl: { allowed: boolean; reason: string } | undefined
@@ -135,6 +139,12 @@ export default async function WorkspacesPage({
         proxyNodes={proxyNodes}
         isAdmin={isAdmin}
         currentUserId={ctx.userId}
+        idlePolicy={{
+          locked: idlePolicy.locked,
+          minutes: idlePolicy.defaultMinutes,
+          sourceLabel: idlePolicy.defaultSourceLabel,
+          lockSourceLabel: idlePolicy.lockSourceLabel,
+        }}
       />
     </div>
   )

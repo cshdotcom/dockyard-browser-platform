@@ -36,9 +36,22 @@ if (!/provider\s*=\s*"postgresql"/.test(out)) {
   process.exit(1)
 }
 
+// [22-d] generator 块注入独立 output：postgres 客户端生成到 node_modules/@prisma/client-postgres
+//（与默认 @prisma/client（sqlite）并存 → 运行时按 DATABASE_PROVIDER 选择实例，见 src/lib/db.ts）
+let withOutput = out
+if (/generator\s+client\s*\{[^}]*\}/s.test(withOutput) && !/output\s*=/.test(withOutput)) {
+  withOutput = withOutput.replace(
+    /(generator\s+client\s*\{[^}]*?)\}/s,
+    `$1\n  // [22-d] 独立产物目录：node_modules/@prisma/client-postgres（与 sqlite 默认 client 并存）\n  output   = "../node_modules/@prisma/client-postgres"\n}`,
+  )
+} else if (!/output\s*=/.test(withOutput)) {
+  console.error("[sync-postgres-schema] 未找到 generator 块 —— 请人工检查")
+  process.exit(1)
+}
+
 // 头部注释追加 PG 部署说明
 const banner = `// [r14] 本文件由 scripts/db/sync-postgres-schema.ts 从 schema.prisma 自动派生 —— 请勿手工编辑模型
 // （模型变更请改 schema.prisma 后重新执行同步脚本；本文件仅 datasource provider 不同）
 `
-fs.writeFileSync(DST, banner + out, "utf8")
+fs.writeFileSync(DST, banner + withOutput, "utf8")
 console.log(`[sync-postgres-schema] 已生成 ${path.relative(ROOT, DST)}（provider=postgresql，模型与 SQLite 主 schema 一致）`)

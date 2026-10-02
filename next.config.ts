@@ -99,6 +99,20 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
+  // ---- [22-d] PostgreSQL 双客户端支持 ----
+  // @prisma/client-postgres 为独立生成产物（generator output → node_modules/@prisma/client-postgres），
+  // 必须保持外部化：打包器改写其内部相对 require（查询引擎 .so.node 路径）会导致运行时
+  // 「Unable to load query engine」。prisma/@prisma/client 本就在 Next 默认外部化清单中。
+  serverExternalPackages: ["@prisma/client-postgres"],
+  // 查询引擎为运行时动态路径 join 加载（NFT 无法静态追踪）→ 显式包含进 standalone 产物：
+  // · node_modules/.prisma/client/**：SQLite 引擎（默认形态）
+  // · node_modules/@prisma/client-postgres/**：PostgreSQL 引擎（DATABASE_PROVIDER=postgres）
+  outputFileTracingIncludes: {
+    "/**": [
+      "./node_modules/.prisma/client/**",
+      "./node_modules/@prisma/client-postgres/**",
+    ],
+  },
 };
 
 export default nextConfig;

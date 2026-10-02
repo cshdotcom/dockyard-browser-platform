@@ -1086,6 +1086,8 @@ function BatchDeployDialog({ open, onClose, plugins, groupOptions, userOptions, 
   onDeployed: () => void
 }) {
   const [selectedPlugins, setSelectedPlugins] = React.useState<string[]>([])
+  // r14（22-c）：插件多选搜索（按名称/CRX-ID 实时过滤）
+  const [pluginSearch, setPluginSearch] = React.useState("")
   const [scopeType, setScopeType] = React.useState<"GROUP" | "USER" | "SANDBOX">("GROUP")
   const [selectedTargets, setSelectedTargets] = React.useState<string[]>([])
   const [targetSearch, setTargetSearch] = React.useState("")
@@ -1098,6 +1100,7 @@ function BatchDeployDialog({ open, onClose, plugins, groupOptions, userOptions, 
   React.useEffect(() => {
     if (open) {
       setSelectedPlugins(preset.length ? preset : [])
+      setPluginSearch("")
       setSelectedTargets([])
       setTargetSearch("")
       setUpdateUrl(""); setLockedVersion(""); setNote("")
@@ -1108,6 +1111,13 @@ function BatchDeployDialog({ open, onClose, plugins, groupOptions, userOptions, 
   const toggle = (arr: string[], v: string, set: (a: string[]) => void) => set(arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v])
 
   const availablePlugins = plugins.filter((p) => !p.deletedAt && p.enabled)
+  // r14（22-c）：插件搜索过滤（名称/CRX-ID 实时匹配）；「全选」作用于当前搜索结果集
+  const pluginKw = pluginSearch.trim().toLowerCase()
+  const filteredPlugins = pluginKw
+    ? availablePlugins.filter(
+        (p) => p.name.toLowerCase().includes(pluginKw) || p.crxId.toLowerCase().includes(pluginKw),
+      )
+    : availablePlugins
   const targets: { id: string; label: string; sub: string }[] =
     scopeType === "GROUP"
       ? groupOptions.map((g) => ({ id: g.id, label: g.name, sub: `${g.memberCount} 成员` }))
@@ -1159,8 +1169,35 @@ function BatchDeployDialog({ open, onClose, plugins, groupOptions, userOptions, 
         <div className="space-y-4">
           {/* 插件多选 */}
           <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <Label className="text-xs">① 选择插件（{selectedPlugins.length}/{availablePlugins.length}，仅启用态）</Label>
+              <Input
+                value={pluginSearch}
+                onChange={(e) => setPluginSearch(e.target.value)}
+                placeholder="搜索插件名 / CRX-ID…"
+                className="h-6 w-44 text-xs"
+              />
+            </div>
+            {pluginSearch.trim() && (
+              <p className="text-[10px] text-muted-foreground">
+                搜索命中 {filteredPlugins.length}/{availablePlugins.length} 个插件
+                {pluginKw && filteredPlugins.length > 0 && (
+                  <button
+                    type="button"
+                    className="ml-2 text-teal-600 hover:underline"
+                    onClick={() =>
+                      setSelectedPlugins((prev) => {
+                        const ids = filteredPlugins.map((p) => p.crxId)
+                        const allSelected = ids.every((id) => prev.includes(id))
+                        return allSelected ? prev.filter((id) => !ids.includes(id)) : [...new Set([...prev, ...ids])]
+                      })}
+                  >
+                    {filteredPlugins.every((p) => selectedPlugins.includes(p.crxId)) ? "取消选中搜索结果" : "选中搜索结果"}
+                  </button>
+                )}
+              </p>
+            )}
+            <div className="flex items-center justify-end">
               {availablePlugins.length > 0 && (
                 <button type="button" className="text-[11px] text-teal-600 hover:underline"
                   onClick={() => setSelectedPlugins(selectedPlugins.length === availablePlugins.length ? [] : availablePlugins.map((p) => p.crxId))}>
@@ -1169,8 +1206,8 @@ function BatchDeployDialog({ open, onClose, plugins, groupOptions, userOptions, 
               )}
             </div>
             <div className="rounded-md border max-h-44 overflow-y-auto divide-y">
-              {availablePlugins.length === 0 && <p className="px-3 py-4 text-xs text-muted-foreground text-center">插件库为空或全部禁用</p>}
-              {availablePlugins.map((p) => (
+              {filteredPlugins.length === 0 && <p className="px-3 py-4 text-xs text-muted-foreground text-center">无匹配插件{availablePlugins.length === 0 ? "（插件库为空或全部禁用）" : "，换个关键词试试"}</p>}
+              {filteredPlugins.map((p) => (
                 <label key={p.crxId} className="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-muted/60">
                   <input type="checkbox" checked={selectedPlugins.includes(p.crxId)} onChange={() => toggle(selectedPlugins, p.crxId, setSelectedPlugins)} className="accent-teal-600" />
                   <span className="font-medium">{p.name}</span>

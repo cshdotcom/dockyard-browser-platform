@@ -12,6 +12,7 @@ import { zodValidate, zId, zEmail, zUsername, validatePasswordPolicy, checkPassw
 import { hashPassword, maskSensitive, randomHex } from "@/lib/crypto"
 import { regenerateBackupCodes } from "@/lib/totp"
 import { getConfigBool } from "@/lib/config"
+import { resolveIdlePolicyForUser, toIdlePolicyView, fmtIdleBrief, type IdlePolicyView } from "@/lib/idle-policy"
 import { countRunningWorkspaces, kickAllSessions, invalidateApiTokensIfConfigured } from "./users-helpers"
 
 // ---- 公共 schema ----
@@ -937,6 +938,84 @@ export async function setUserNetworkPolicyAction(
         allowSecureLocationAccess: effective.allowSecureLocationAccess,
         source: effective.source,
       },
+    }
+  })
+}
+
+// ---- r14（22-c）：用户级闲置超时策略（四级链：沙箱>用户>组>全局）----
+// minutes：null=继承用户组，数值=显式覆盖（0=无限即永不闲置回收，上限 43200=30天）
+// locked：true=该用户创建/编辑工作区时不可自行调整闲置超时（管理员不受限）
+// 鉴权：SUPER_ADMIN / ADMIN
+export async function getUserIdlePolicyAction(
+  input: unknown,
+): Promise<ActionResult<{ id: string; minutes: number | null; locked: boolean; effective: IdlePolicyView }>> {
+  return actionHandler(async () => {
+    await requireAdmin()
+    const p = zodValidate(z.object({ id: zId }), input)
+    const user = await db.user.findUnique({
+      where: { id: p.id },
+      select: { id: true, username: true, idleTimeoutMinutes: true, idleTimeoutLocked: true, deletedAt: true },
+    })
+    if (!user || user.deletedAt) throw new Error("用户不存在或已删除")
+    const policy = await resolveIdlePolicyForUser(user.id)
+    return {
+      id: user.id,
+      minutes: user.idleTimeoutMinutes,
+      locked: user.idleTimeoutLocked,
+      effective: toIdlePolicyView(policy),
+    }
+  })
+}
+
+export async function setUserIdleTimeoutAction(
+  input: unknown,
+): Promise<ActionResult<{ id: string; minutes: number | null; locked: boolean; effective: IdlePolicyView }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAdmin()
+    const p = zodValidate(
+      z.object({
+        id: zId,
+        minutes: z.number().int().min(0).max(43200).nullable(), // null=继承用户组，0=无限
+        locked: z.boolean(),
+      }),
+      input,
+    )
+
+    const user = await db.user.findUnique({ where: { id: p.id }, select: { id: true, username: true, idleTimeoutMinutes: true, idleTimeoutLocked: true, deletedAt: true } })
+    if (!user || user.deletedAt) throw new Error("用户不存在或已删除")
+
+    const before = { idleTimeoutMinutes: user.idleTimeoutMinutes, idleTimeoutLocked: user.idleTimeoutLocked }
+    await db.user.update({
+      where: { id: user.id },
+      data: { idleTimeoutMinutes: p.minutes, idleTimeoutLocked: p.locked },
+    })
+
+    // 解析生效结果（含继承来源），供前端即时回显
+    const policy = await resolveIdlePolicyForUser(user.id)
+
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "USER_IDLE_POLICY",
+      resourceType: "USER",
+      resourceId: user.id,
+      resourceName: user.username,
+      ownerUserId: user.id,
+      before,
+      after: {
+        idleTimeoutMinutes: p.minutes,
+        idleTimeoutLocked: p.locked,
+        effective: { minutes: policy.defaultMinutes, source: policy.defaultSource },
+        note: `管理员 ${ctx.username} 调整用户 ${user.username} 闲置超时策略（${before.idleTimeoutMinutes == null ? "继承组" : fmtIdleBrief(before.idleTimeoutMinutes)} → ${p.minutes == null ? "继承组" : fmtIdleBrief(p.minutes)}，锁定 ${before.idleTimeoutLocked ? "开" : "关"} → ${p.locked ? "开" : "关"}）`,
+      },
+      severity: "WARN",
+    })
+    return {
+      id: user.id,
+      minutes: p.minutes,
+      locked: p.locked,
+      effective: toIdlePolicyView(policy),
     }
   })
 }

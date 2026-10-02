@@ -60,7 +60,7 @@ export async function batchDeleteUsersAction(input: unknown): Promise<ActionResu
     for (const u of targets) {
       try {
         if (u.id === ctx.userId) throw new Error("不能删除自己")
-        const running = await runningWorkspacesFor(u.id)
+        const running = await countRunningWorkspaces(u.id)
         if (running > 0) throw new Error(`存在 ${running} 个运行中浏览器会话，请先销毁其工作区`)
         await db.user.update({ where: { id: u.id }, data: { deletedAt: now, enabled: false, frozen: true } })
         kicked += await kickSessionsForUser(u.id)
@@ -331,7 +331,7 @@ export async function batchDeleteBackupsAction(input: unknown): Promise<ActionRe
       operationType: "BACKUP_BATCH_DELETE",
       resourceType: "BACKUP",
       severity: "WARN",
-      before: { ids: targets.map((t) => t.id), fileNames: targets.map((t) => t.fileName) },
+      before: { ids: targets.map((t) => t.id), fileMetaIds: targets.map((t) => t.fileMetaId) },
       after: { deletedIds, failed },
     })
     return { affected: deletedIds.length, failed }
@@ -374,9 +374,9 @@ export async function batchDeleteTasksAction(input: unknown): Promise<ActionResu
         if (BUILTIN_TASK_CODES.has(t.code)) throw new Error("内置任务不允许删除（只能停用）")
         await db.scheduleTask.delete({ where: { code: t.code } })
         await db.scheduleTaskLog.deleteMany({ where: { taskCode: t.code } })
-        deletedIds.push(t.id)
+        deletedIds.push(t.code)
       } catch (e) {
-        failed.push({ id: t.id, reason: e instanceof Error ? e.message : String(e) })
+        failed.push({ id: t.code, reason: e instanceof Error ? e.message : String(e) })
       }
     }
     await writeAudit({

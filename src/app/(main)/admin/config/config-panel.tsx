@@ -532,7 +532,7 @@ function SmtpCard({ canEdit, initial }: { canEdit: boolean; initial: SmtpInitial
     try {
       const res = await setSmtpConfigAction({ enabled, host, port, secure, user, pass, from, senderName })
       if (res.code === 0) {
-        toast.success("SMTP 配置已保存（30 秒内生效，密码 AES 加密存储）")
+        toast.success(`SMTP 配置已保存并落库（${enabled ? `已启用 · ${host || "未填服务器"}:${port}` : "模拟模式"}${pass ? " · 密码已更新（AES 加密）" : ""}）`)
         setPass("") // 清空明文输入
         router.refresh()
       } else toast.error(res.msg)
@@ -574,6 +574,14 @@ function SmtpCard({ canEdit, initial }: { canEdit: boolean; initial: SmtpInitial
         验证码 / 激活 / 告警邮件的发送服务器。修改后立即生效（30 秒内），连接测试执行真实 SMTP 握手；密码 AES 加密落库、界面永不回显。
         {initial.hasPass && <span className="ml-1 text-emerald-600">（密码已配置，留空保存则不修改）</span>}
       </p>
+      {/* 当前生效配置回显（服务器端实时值，保存/回滚后 router.refresh 同步）*/}
+      <div className="flex flex-wrap items-center gap-1.5 text-xs">
+        <span className="text-muted-foreground">当前生效（数据库）：</span>
+        <Badge variant={initial.enabled && initial.host ? "default" : "secondary"} className={initial.enabled && initial.host ? "bg-emerald-500 hover:bg-emerald-500" : ""}>
+          {initial.enabled && initial.host ? `${initial.host}:${initial.port}${initial.secure ? " SSL" : " STARTTLS"}` : "模拟模式（验证码控制台输出）"}
+        </Badge>
+        {initial.user && <span className="text-muted-foreground">认证：{initial.user.slice(0, 2)}***{initial.user.slice(-2)}</span>}
+      </div>
       <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <div className="space-y-1">
           <Label className="text-xs text-muted-foreground">SMTP 服务器</Label>

@@ -9,7 +9,7 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Share2, Ban, Undo2, Trash2, ExternalLink } from "lucide-react"
+import { Loader2, Share2, Ban, Undo2, Trash2, ExternalLink, UserX, Users2, Check } from "lucide-react"
 import { DataTable, type Column } from "@/components/shared/data-table"
 import { ConfirmDialog } from "@/components/shared/confirm"
 import { Button } from "@/components/ui/button"
@@ -17,10 +17,16 @@ import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { cn } from "@/lib/utils"
 import {
   adminRevokeShareAction, adminBatchRevokeSharesAction, adminRevokeAllWorkspaceSharesAction,
   adminSetWorkspaceShareDisabledAction,
 } from "@/server/actions/admin-workspaces"
+import {
+  adminSearchShareEvictTargetsAction, adminEvictUserSharesAction, adminEvictGroupSharesAction,
+} from "@/server/actions/admin-share-evict"
 
 export interface AdminShareRow {
   id: string
@@ -65,6 +71,8 @@ export function SharesTable(props: Props) {
     | { kind: "allOfWs"; row: AdminShareRow }
     | null
   >(null)
+  // r22b：按用户/按组强制清退弹窗（接收者维度批量撤销）
+  const [evictOpen, setEvictOpen] = React.useState<"USER" | "GROUP" | null>(null)
 
   const pushQuery = (patch: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString())
@@ -257,6 +265,14 @@ export function SharesTable(props: Props) {
             if (e.key === "Enter") pushQuery({ page: "1", keyword: (e.target as HTMLInputElement).value || undefined })
           }}
         />
+        <div className="flex items-center gap-1.5 ml-auto">
+          <Button variant="outline" size="sm" onClick={() => setEvictOpen("USER")} title="撤销某个用户作为接收者收到的全部生效共享">
+            <UserX className="h-3.5 w-3.5 mr-1" /> 按用户清退
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setEvictOpen("GROUP")} title="撤销某用户组全部成员作为接收者收到的全部生效共享">
+            <Users2 className="h-3.5 w-3.5 mr-1" /> 按组清退
+          </Button>
+        </div>
       </div>
 
       <DataTable
@@ -309,6 +325,175 @@ export function SharesTable(props: Props) {
         }
         destructive
       />
+
+      {/* ---- r22b：按用户/按组强制清退弹窗 ---- */}
+      {evictOpen && (
+        <ShareEvictDialog
+          kind={evictOpen}
+          open={!!evictOpen}
+          onOpenChange={(v) => { if (!v) setEvictOpen(null) }}
+          onDone={() => { setSelectedIds([]); router.refresh() }}
+        />
+      )}
     </div>
+  )
+}
+
+// ---- r22b：按用户/组清退弹窗（搜索选择目标 + 确认 + 执行） ----
+interface EvictTarget {
+  id: string
+  label: string
+  sub: string
+  memberCount: number
+  activeCount: number
+}
+
+function ShareEvictDialog({ kind, open, onOpenChange, onDone }: {
+  kind: "USER" | "GROUP"
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  onDone: () => void
+}) {
+  const [q, setQ] = React.useState("")
+  const [items, setItems] = React.useState<EvictTarget[]>([])
+  const [searchBusy, setSearchBusy] = React.useState(false)
+  const [selected, setSelected] = React.useState<EvictTarget | null>(null)
+  const [confirmOpen, setConfirmOpen] = React.useState(false)
+  const [busy, setBusy] = React.useState(false)
+
+  // 搜索候选（防抖 300ms；携带生效共享条数供确认展示）
+  React.useEffect(() => {
+    if (!open) return
+    const kw = q.trim()
+    if (!kw) { setItems([]); return }
+    let alive = true
+    setSearchBusy(true)
+    const t = setTimeout(async () => {
+      try {
+        const res = await adminSearchShareEvictTargetsAction({ kind, q: kw })
+        if (alive && res.code === 0) setItems(res.data?.items || [])
+        else if (alive) setItems([])
+      } catch { if (alive) setItems([]) } finally { if (alive) setSearchBusy(false) }
+    }, 300)
+    return () => { alive = false; clearTimeout(t); setSearchBusy(false) }
+  }, [q, kind, open])
+
+  React.useEffect(() => {
+    if (open) { setQ(""); setItems([]); setSelected(null); setConfirmOpen(false) }
+  }, [open, kind])
+
+  const exec = async () => {
+    if (!selected) return
+    setBusy(true)
+    try {
+      const res = kind === "USER"
+        ? await adminEvictUserSharesAction({ targetUserId: selected.id })
+        : await adminEvictGroupSharesAction({ groupId: selected.id })
+      if (res.code === 0) {
+        const revoked = res.data?.revoked ?? 0
+        if (kind === "USER") {
+          toast.success(`已清退用户「${selected.label}」：撤销其收到的 ${revoked} 条生效共享`)
+        } else {
+          const groupRes = res as { data?: { memberCount?: number } }
+          toast.success(`已清退组「${selected.label}」（${groupRes.data?.memberCount ?? 0} 名成员）：撤销 ${revoked} 条生效共享`)
+        }
+        setConfirmOpen(false)
+        onOpenChange(false)
+        onDone()
+      } else toast.error(res.msg)
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <>
+      <Dialog open={open} onOpenChange={(v) => { if (!busy) onOpenChange(v) }}>
+        <DialogContent className="max-w-md max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-1.5">
+              {kind === "USER" ? <UserX className="h-4 w-4" /> : <Users2 className="h-4 w-4" />}
+              {kind === "USER" ? "按用户清退共享" : "按用户组清退共享"}
+            </DialogTitle>
+            <DialogDescription>
+              {kind === "USER"
+                ? "撤销所选用户作为接收者收到的全部生效共享（其自己的工作区与他人不受影响）"
+                : "撤销所选组全部成员作为接收者收到的全部生效共享（不影响其工作区所有权）"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <div className="space-y-1.5">
+              <Label>{kind === "USER" ? "搜索用户（用户名/昵称）" : "搜索用户组名称"}</Label>
+              <div className="relative">
+                <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={kind === "USER" ? "如：demo" : "如：默认组"} autoComplete="off" />
+                {searchBusy && <Loader2 className="absolute right-2.5 top-2.5 h-4 w-4 animate-spin text-muted-foreground" />}
+              </div>
+            </div>
+            {items.length > 0 && (
+              <div className="rounded-md border divide-y max-h-56 overflow-y-auto">
+                {items.map((it) => {
+                  const isSel = selected?.id === it.id
+                  return (
+                    <button
+                      key={it.id}
+                      type="button"
+                      className={cn(
+                        "flex w-full items-center justify-between gap-2 px-3 py-2 text-sm text-left hover:bg-muted/70 transition",
+                        isSel && "bg-red-50/70 dark:bg-red-950/30",
+                      )}
+                      onClick={() => setSelected(isSel ? null : it)}
+                    >
+                      <span className="min-w-0">
+                        <span className="font-medium font-mono text-[13px]">{it.label}</span>
+                        {it.sub && <span className="ml-1.5 text-xs text-muted-foreground truncate">{it.sub}</span>}
+                        {kind === "GROUP" && <span className="ml-1.5 text-xs text-muted-foreground">成员 {it.memberCount}</span>}
+                      </span>
+                      <span className="flex items-center gap-1.5 shrink-0">
+                        {it.activeCount > 0 ? (
+                          <Badge variant="secondary" className="text-[10px] text-red-600">生效共享 {it.activeCount} 条</Badge>
+                        ) : (
+                          <Badge variant="secondary" className="text-[10px]">无生效共享</Badge>
+                        )}
+                        {isSel && <Check className="h-3.5 w-3.5 text-red-600" />}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+            {q.trim() && !searchBusy && items.length === 0 && (
+              <p className="text-xs text-red-600">未找到匹配{kind === "USER" ? "用户" : "用户组"}</p>
+            )}
+            {selected && (
+              <div className="rounded-md border border-red-200 bg-red-50/70 dark:bg-red-950/30 dark:border-red-900 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+                已选目标：{kind === "USER" ? "用户" : "用户组"}「{selected.label}」· 将撤销其收到的生效共享
+                {selected.activeCount > 0 ? ` ${selected.activeCount} 条` : " 0 条（无生效共享，操作为空转）"}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>取消</Button>
+            <Button variant="destructive" disabled={!selected || busy} onClick={() => setConfirmOpen(true)}>
+              <UserX className="h-3.5 w-3.5 mr-1" /> 清退其收到的共享
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={(v) => { if (!busy) setConfirmOpen(v) }}
+        title={kind === "USER" ? "按用户清退共享" : "按用户组清退共享"}
+        description={
+          selected
+            ? kind === "USER"
+              ? `确认清退用户「${selected.label}」收到的全部工作区共享？\n· 将撤销其作为接收者的生效共享 ${selected.activeCount} 条\n· 该用户立即失去相关访问权，审计记录保留`
+              : `确认清退用户组「${selected.label}」（${selected.memberCount} 名成员）收到的全部工作区共享？\n· 将撤销组内成员作为接收者的生效共享 ${selected.activeCount} 条\n· 相关成员立即失去访问权，不影响工作区所有权`
+            : ""
+        }
+        destructive
+        confirmText="确认清退"
+        loading={busy}
+        onConfirm={exec}
+      />
+    </>
   )
 }

@@ -4,6 +4,7 @@ import { db } from "@/lib/db"
 import { requireAuth, userGroupIds } from "@/lib/permissions"
 import { fmtDate, fmtBytes } from "@/lib/utils-server"
 import { ENV } from "@/lib/env"
+import { resolveIdlePolicyForWorkspace } from "@/lib/idle-policy"
 import { WorkspaceDetail } from "./detail-tabs"
 
 export const metadata = { title: "工作区详情" }
@@ -58,6 +59,10 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
   const publicCdpEndpoint = ENV.publicBaseUrl
     ? `${ENV.publicBaseUrl}/api/cdp/command`
     : ""
+
+  // r14（22-c）：闲置超时四级策略链解析（生效值+来源徽章；锁定态按查看者角色豁免管理员）
+  const idlePolicyWs = await resolveIdlePolicyForWorkspace(ws.id).catch(() => null)
+  const idleLockedForViewer = !!idlePolicyWs && idlePolicyWs.ownerPolicy.locked && !isAdmin
 
   // 四层生效策略（单沙箱 > 用户 > 用户组 > 全局）：详情页展示与沙箱级覆盖面板数据源
   const { resolveAccessPolicies } = await import("@/lib/domain-policy")
@@ -114,6 +119,15 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
         policyAllowInternalNetwork: ws.policyAllowInternalNetwork,
         policyAllowSecureLocationAccess: ws.policyAllowSecureLocationAccess,
         effectivePolicy: effBundle,
+        idleInfo: idlePolicyWs
+          ? {
+              minutes: idlePolicyWs.resolution.minutes,
+              source: idlePolicyWs.resolution.source,
+              sourceLabel: idlePolicyWs.resolution.sourceLabel,
+              locked: idleLockedForViewer,
+              lockSourceLabel: idlePolicyWs.ownerPolicy.lockSourceLabel,
+            }
+          : null,
       }}
       shares={shares.map((s) => ({
         id: s.id, targetName: shareMap.get(s.targetUserId)?.displayName || shareMap.get(s.targetUserId)?.username || "-",

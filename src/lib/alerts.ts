@@ -5,7 +5,8 @@ import { hubEmit } from "./ws-emitter"
 
 // 告警系统：写告警表 + 审计 + 站内通知 + webhook（内存队列/重试/静默窗口/抑制合并/级别过滤）
 
-export type AlertLevel = "INFO" | "WARN" | "CRITICAL"
+// 告警级别：INFO / WARNING（WARN 同义，CRX 灰度等场景）/ WARN / ERROR（介于 WARN 与 CRITICAL：自愈失败等不可人工忽略的异常）/ CRITICAL
+export type AlertLevel = "INFO" | "WARNING" | "WARN" | "ERROR" | "CRITICAL"
 
 const g = globalThis as unknown as {
   __dyWebhookQueue?: { url: string; event: string; payload: Record<string, unknown>; attempts: number }[]

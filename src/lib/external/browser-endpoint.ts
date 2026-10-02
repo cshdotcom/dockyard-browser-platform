@@ -25,7 +25,7 @@ export interface ExternalBrowserEndpoint {
   cdpPort: number
   vncPort: number
   cdpBase: string // CDP HTTP 基地址（/json/version、/json 列表）
-  rfb: { host: string; port: number } // VNC 桥 TCP 拨号目标
+  rfb: { host: string; port: number } // VNC 桥 TCP 拨号目标（[22-d] host 可被 EXTERNAL_BROWSER_VNC_HOST 覆盖，默认从 URL 推导）
   raw: string
 }
 
@@ -40,9 +40,12 @@ export function externalBrowserEndpoint(): ExternalBrowserEndpoint | null {
   // URL 内嵌端口优先（操作者显式写在地址里）；其次环境变量；最后镜像默认 9222
   const cdpPort = m[2] ? Number(m[2]) : ENV.externalBrowserCdpPort
   const vncPort = ENV.externalBrowserVncPort
+  // [22-d] RFB 目标主机：默认与 CDP 同 host；EXTERNAL_BROWSER_VNC_HOST 可覆盖
+  //（适用 CDP 与 VNC 分置两台主机的拓扑：CDP 走域名，RFB 走内网直连）
+  const rfbHost = ENV.externalBrowserVncHost || host
   const scheme = /^wss?:\/\//i.test(raw) || /^https:\/\//i.test(raw) ? "https" : "http"
   const cdpBase = `${scheme}://${host}:${cdpPort}`
-  return { host, cdpPort, vncPort, cdpBase, rfb: { host, port: vncPort }, raw }
+  return { host, cdpPort, vncPort, cdpBase, rfb: { host: rfbHost, port: vncPort }, raw }
 }
 
 export interface ExternalBrowserProbe {
@@ -130,7 +133,7 @@ export function externalBrowserHardening(
     runtime: "external",
     externalBrowser: {
       endpoint: ep ? `${ep.host}:${ep.cdpPort}` : "",
-      vncEndpoint: ep ? `${ep.host}:${ep.vncPort}` : "",
+      vncEndpoint: ep ? `${ep.rfb.host}:${ep.rfb.port}` : "",
       browser: probe.browser || null,
       latencyMs: probe.latencyMs ?? null,
       // 策略提示：外部形态下平台网络/域名/端点策略不强制下发（无法注入），由部署侧 Chromium 托管策略执行
