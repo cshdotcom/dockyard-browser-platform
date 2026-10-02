@@ -5,7 +5,7 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { AlertTriangle, DatabaseBackup, Download, Loader2, ListChecks, RotateCcw, ShieldAlert } from "lucide-react"
+import { AlertTriangle, DatabaseBackup, Download, Loader2, ListChecks, RotateCcw, ShieldAlert, Trash2 } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog } from "@/components/shared/confirm"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { createBackupAction, restoreBackupAction, type RestoreBackupResult, type CreateBackupResult } from "@/server/actions/backups"
+import { batchDeleteBackupsAction, type BatchOutcome } from "@/server/actions/batch"
 
 export interface BackupRow {
   id: string
@@ -54,6 +55,31 @@ export function BackupsTable({ rows, total, page, pageSize, keyword, sortField, 
   const [restoreTarget, setRestoreTarget] = React.useState<BackupRow | null>(null)
   const [restoreResult, setRestoreResult] = React.useState<RestoreBackupResult | null>(null)
   const [backupResult, setBackupResult] = React.useState<CreateBackupResult | null>(null)
+  // 批量删除（多选 + 强确认）
+  const [sel, setSel] = React.useState<string[]>([])
+  const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false)
+  const [batchBusy, setBatchBusy] = React.useState("")
+
+  const runBatchDelete = async () => {
+    if (sel.length === 0) return
+    setBatchBusy("delete")
+    try {
+      const res = await batchDeleteBackupsAction({ ids: sel })
+      if (res.code === 0 && res.data) {
+        const out = res.data as BatchOutcome
+        toast.success(`已批量删除 ${out.deleted} 份备份${out.failed ? `，失败 ${out.failed} 份` : ""}`)
+        setSel([])
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "批量删除失败")
+    } finally {
+      setBatchBusy("")
+      setBatchDeleteOpen(false)
+    }
+  }
 
   const pushQuery = (patch: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString())
@@ -152,6 +178,16 @@ export function BackupsTable({ rows, total, page, pageSize, keyword, sortField, 
         keyword={keyword}
         sortField={sortField}
         sortOrder={sortOrder}
+        selectedIds={sel}
+        onSelectedChange={setSel}
+        batchToolbar={
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button size="sm" variant="outline" className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/40 border-red-200 dark:border-red-900" disabled={!!batchBusy} onClick={() => setBatchDeleteOpen(true)}>
+              {batchBusy === "delete" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Trash2 className="mr-1 h-3.5 w-3.5" />}
+              批量删除（含备份文件）
+            </Button>
+          </div>
+        }
         onQueryChange={pushQuery}
         filters={[
           { key: "type", placeholder: "备份类型", options: [{ label: "全量 FULL", value: "FULL" }, { label: "部分 PARTIAL", value: "PARTIAL" }] },
@@ -224,6 +260,19 @@ export function BackupsTable({ rows, total, page, pageSize, keyword, sortField, 
             </Button>
           </div>
         )}
+      />
+
+      {/* 批量删除强确认（requirePhrase=DELETE） */}
+      <ConfirmDialog
+        open={batchDeleteOpen}
+        onOpenChange={(v) => !v && !batchBusy && setBatchDeleteOpen(false)}
+        title={`批量删除 ${sel.length} 份备份`}
+        destructive
+        requirePhrase="DELETE"
+        confirmText="确认删除"
+        loading={batchBusy === "delete"}
+        description={`将永久删除选中的 ${sel.length} 份备份记录及对应的备份文件（storage/backups/）。\n\n· 删除后不可恢复（不进入回收站）\n· 全程 WARN 审计留痕\n· 输入 DELETE 确认执行`}
+        onConfirm={runBatchDelete}
       />
 
       {/* 立即备份确认 */}

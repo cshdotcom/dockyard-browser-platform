@@ -76,3 +76,4 @@ verify/admin-state.json
 
 # 本地嵌入式沙箱测试解压产物（Docker 构建自装，不入库）
 /bin/ext/
+qa/

@@ -108,10 +108,11 @@ RUN chmod +x /app/docker/*.sh /app/docker/embedded/*.sh \
 # 数据卷：数据库 / 文件存储（含 Profile/沙箱状态/策略文件）
 VOLUME ["/app/db", "/app/storage"]
 
-# 主服务端口（host 模式下由 PORT 环境变量控制）
-EXPOSE 3000 3003 3004
-# VNC 网关桥端口（VNC_BRIDGE_PUBLIC=port 直连形态；网关形态走统一域名反代）
-EXPOSE 3005
+# 对外仅 2 端口：网页端（GATEWAY_PORT，默认 3000）+ CDP 网关（CDP_SERVICE_PORT，默认 9222）
+# Next/WS枢纽/VNC桥 全部回环（127.0.0.1）监听，统一经入口网关嵌入；host 网络模式不额外暴露
+EXPOSE 3000 9222
+# VNC 直连可选形态（VNC_BRIDGE_PUBLIC=port 时启动参数会绑定 0.0.0.0，需要时手动 -p 映射）
+# EXPOSE 3005
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD /app/docker/healthcheck.sh

@@ -490,3 +490,35 @@ Work Log:
 Stage Summary:
 - r13 真实闭环：上轮日志与仓库不一致的缺口（两下载路由）被发现并补齐实现，前端 404 调用全部接通；13 项需求全部实测验证（公告全局层/审计分级回滚/共享授权/批量操作/下载修复）；测试数据全清、CI 全绿、交付物重建
 - 【丢失根因修正（重要）】上轮"路由未提交"的真凶不是未写文件，而是 .gitignore:64 的 `download/` 规则无路径锚定 → 任意层级 download 目录全被静默忽略 → src/app/api/{files,har}/download/ 两路由目录被吞（本地 QA 一直 200、git 仓库恒缺文件、CI 镜像 404 的"本地好远程坏"之谜）；修复：`download/` → `/download/`（仅忽略仓库根交付目录）+ upload/ 同步锚定 + git check-ignore 复验两路由不再被忽略
+
+---
+Task ID: 20
+Agent: main
+Task: r13b — 全需求深化验证（用户指令"全部都要继续"）：2FA 门控三级链路 + 统一网关端口收敛 + 生产等效复验
+
+Work Log:
+- 【Bash 输出层幻觉破案】grep/sed/python 输出中 app-shell.tsx:69 恒显示"obileOpen"（疑似源码损坏），但 Read 工具/编译产物/CI 全部正常 —— 实验复现（echo/printf/python 打 "[m" 全被吞）：Bash 工具输出层把 `[m` 当 ANSI reset 序列吞掉。源码从未损坏；教训：跨工具交叉验证，勿凭单一通道下结论
+- 【2FA 强制门控三级链路补齐】
+  · 缺口 1（登录链路）：force2faRequired 只查全局/组开关、漏查 user.force2faSetup → 登录发 LOGIN ticket → authorize 无条件覆盖写 false（管理员设置被静默重置，DB 实证复现）→ 修复：用户级最高优先级 + authorize 覆盖保持闭环
+  · 缺口 2（会话中）：layout 检查 needs2faSetup 但 allowed 未使用（弱门控）→ AppShell 客户端门控组件（TWOFA_ALLOWED_PATHS 白名单 /account/security|sessions|profile + router.replace + 琥珀色全屏拦截卡"前往开启 2FA"）
+  · 缺口 3（实时性）：session 回调 force2faSetup 只在登录时写入 token → 管理员中途开启不生效 → 修复：session 回调每次查 user 表实时刷新（force2faSetup && !twoFactorEnabled，已开通自动解除）
+  · QA 实测（dev+生产双环境）：admin 2FA 管控开关 → demo 登录直跳 /account/security?force2fa=1 → 开启流程（密钥+QR+备份码）→ twoFactorEnabled=true 自动解除 → dashboard 恢复访问；生产模式会话中 DB 关 2FA+开强制 → 刷新 dashboard 即被弹到 security 页（实时链路实证）；邮箱验证码+TOTP 双因素登录全链路通
+- 【统一入口网关（单容器仅 2 端口核心）】mini-services/gateway/index.ts（Bun.serve）：
+  · 对外唯一 UI 端口 GATEWAY_PORT(3000)：Next(APP_INTERNAL_PORT=13000 回环) HTTP 反代 + WS 枢纽(3003)/事件注入(3004)/VNC 桥(3005) 透传
+  · 双通道路由：?XTransformPort=<port> 查询参数模式（与 helmport-viewer/use-ws-hub 客户端既有约定零改动兼容）+ /vnc-ws/* 路径模式（客户端探测协议原生支持）
+  · WebSocket 双向泵：本地终结客户端 WS + 上游 Bun WebSocket 客户端互转（二进制 RFB 帧透传 + 子协议保持 + pending 队列防膨胀 + 1011 上游不可达关闭）
+  · 安全语义保持：票据 HMAC 校验仍在 bridge 侧强制执行（网关纯透传，无效票据实测收 close 1011 "upstream unavailable"）
+  · 【网关两 bug 修复】① 流式 body 透传与 Bun 分帧冲突（curl 收完但流不结束，浏览器永久 loading）→ 缓冲转发（arrayBuffer）；② Bun fetch 透明解压 vs 透传 Content-Encoding: gzip 头 → 浏览器对明文二次解压失败（curl --compressed 返回 0 字节实锤）→ 剔除 content-encoding/content-length/transfer-encoding 三头；另排查旧网关进程占 3000（pkill -f 匹配不到 cd && bun index.ts 启动的 cmdline）→ 按 PID 清理
+- 【回环绑定收敛】ws-hub：PORT/BIND_ADDR env 化 + 默认 127.0.0.1（原硬编码 3003 + 0.0.0.0）；vnc-bridge：BIND_HOST（gateway 默认回环 / VNC_BRIDGE_PUBLIC=port 时 0.0.0.0）；start.sh：端口拓扑重排（GATEWAY_PORT 对外 + Next 13000 回环 + 桥/HUB 回环 + 网关最后启动 + 60s 健康探测 + term_handler 全杀 + 日志双通道加 gateway.log）；healthcheck.sh 改打网关端口；Dockerfile EXPOSE 3000 9222（VNC 直连注释可选）；README 端口文档 + 环境变量表更新（VNC_BRIDGE_PUBLIC 默认 gateway）
+- 【本地等效验证】网关 3100 四链路：自检/Next 透传(200)/XTransformPort→bridge health/vnc-ws 路径→bridge health 全通；WS 泵：OPEN（upgrade 经网关）+ 无效票据 CLOSE 1011 上游拒绝（校验透传）
+- 【生产等效复验】standalone 构建（60 页 0 错误）+ 生产拓扑（Next 13000 回环 + 网关 3000）：admin 经网关登录 dashboard complete；下载路由 40400 JSON 响应（HAR/文件）；域名 Host CDP 网关 40100 鉴权正常；2FA 门控会话中实时拦截重定向；AUTH_URL/AUTH_SECRET/ENCRYPTION_KEY 生产环境变量注入验证（standalone 不评估 next.config 密钥自愈，Docker 由 start.sh 注入同语义）
+- 【邮件配置】SMTP 8 键落库（enabled/host/port/secure/user/pass[AES 加密]/from/senderName）+ 模拟验证码日志：[email-code][simulated] purpose=LOGIN code=076560 expires=300s 控制台可见（docker logs 同通道）+ 邮箱码登录链路实测
+- 【内网穿透】PUBLIC_BASE_URL=https://dockyard.example.com 启动 → 详情页公网 CDP 网关端点域名化展示（https://dockyard.example.com/api/cdp/command）+ 域名 Host 头下 CDP 网关与 NextAuth trustHost 均正常响应
+- 【批量操作终验】用户管理（启/禁/删除三按钮）/用户组（删除）/工作区管控（停止/重启/回收/改TTL/转移/物理删除六按钮）/告警规则（启/停/删除）/备份恢复——备份表原本无多选 → 本轮补齐（DataTable selectedIds + batchToolbar + DELETE 强确认 + batchDeleteBackupsAction 接线）并实测闭环（DELETE 确认词 → 表清空 → DB 0 残留）
+- 【CRX 插件策略下发】插件入库（32 位 a-p ID 校验+高危自动标记）→ 灰度任务创建（多选插件+多选沙箱+分批批次+PENDING+回滚入口）；五级策略优先级（沙箱单插件>用户>用户组>全局>插件库默认）+ SANDBOX 级 OverrideDialog（源/版本单沙箱改写）
+- 【全局搜索/长列表】搜索"demo"→用户（1）命中；审计表 20 行实测 maxHeight 460px + overflowY auto + 粘性表头（scrollThreshold=5 阈值）
+- 【QA 数据清理】demo 恢复种子状态（2FA/强制标记清零）+ CRX（灰度/策略/插件）+ 告警规则 + 工作区 + 审计/安全事件/登录会话快照全清（scripts/qa-cleanup-r13b.ts）→ 终验全 0（用户 2=种子，组 1=默认）
+- 【交付】download/qa-r13-screenshots.zip 增至 36 张 JPEG 1515KB（本轮新增 19 张：2FA 五步/SMTP 三步/穿透/批量五页/CRX 灰度/搜索/滚动/生产复验两张）；lint 零错误；next build 全绿 + gateway 已进 standalone 产物
+
+Stage Summary:
+- "全部都要继续"指令完整落地：13 项需求清单全部经真实浏览器走查验证（含生产等效环境）；三大实质缺陷修复（2FA 用户级登录链路缺失/会话中门控缺失/网关 gzip 双重解压）；单容器"仅 2 端口"架构从设计变为现实（统一网关 + 回环收敛 + 客户端零改动兼容）

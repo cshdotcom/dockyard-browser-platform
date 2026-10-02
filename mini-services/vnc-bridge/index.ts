@@ -31,6 +31,8 @@ function loadDotEnv() {
 loadDotEnv()
 
 const PORT = Number(process.env.VNC_BRIDGE_PORT || 3005)
+// 绑定地址：默认回环（对外经统一网关嵌入）；VNC_BRIDGE_PUBLIC=port 时由 start.sh 注入 0.0.0.0 直连
+const BIND_HOST = process.env.BIND_HOST || "127.0.0.1"
 const SECRET = process.env.VNC_BRIDGE_SECRET || "dockyard-dev-vnc-secret"
 const DEMO_W = 640
 const DEMO_H = 400
@@ -730,6 +732,7 @@ interface WsData { v: string; ro: boolean; dur: number; tgt: DialTarget; sess: D
 declare const Bun: { serve<T = unknown>(cfg: Record<string, unknown>): { stop(force?: boolean): void } }
 
 const server = Bun.serve<WsData>({
+  hostname: BIND_HOST,
   port: PORT,
   fetch(req, srv) {
     const u = new URL(req.url)
@@ -799,7 +802,7 @@ const server = Bun.serve<WsData>({
   },
 })
 
-console.log(`[vnc-bridge] HelmPort 桥已启动: 端口 ${PORT}（票据HMAC校验/单次防重放/只读服务端强制）`)
+console.log(`[vnc-bridge] HelmPort 桥已启动: ${BIND_HOST}:${PORT}（票据HMAC校验/单次防重放/只读服务端强制）`)
 
 // 优雅退出
 process.on("SIGTERM", () => { server.stop(true); process.exit(0) })

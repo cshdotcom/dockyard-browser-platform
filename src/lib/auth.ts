@@ -53,10 +53,12 @@ export function verifyLoginTicket(ticket: string): TicketClaims | null {
   return verify(ticket)
 }
 
-// 检查是否命中强制2FA策略（全局或用户组）
+// 检查是否命中强制2FA策略（用户级 / 全局 / 用户组三级）
 export async function force2faRequired(userId: string): Promise<boolean> {
   const user = await db.user.findUnique({ where: { id: userId } })
   if (!user || user.twoFactorEnabled) return false
+  // 用户级强制（用户管理/2FA 管控直接设置）—— 最高优先级
+  if (user.force2faSetup) return true
   if (user.role === "SUPER_ADMIN" || user.role === "ADMIN") {
     // 管理员也遵守全局强制策略
   }
@@ -350,7 +352,6 @@ export const authOptions: NextAuthOptions = {
       // 每次会话读取：校验 LoginSession 有效性（撤销/过期/闲置）—— 会话管理强约束点
       const sid = token.sid as string | undefined
       let valid = false
-      let needs2faSetup = (token.force2faSetup as boolean) || false
       if (sid) {
         try {
           const ls = await db.loginSession.findUnique({ where: { id: sid } })
@@ -371,16 +372,19 @@ export const authOptions: NextAuthOptions = {
           valid = true
         }
       }
-      const uid = token.uid as string | undefined
+        const uid = token.uid as string | undefined
       let role = (token.role as string) || "USER"
       let displayName = token.displayName as string | undefined
+      let needs2faSetup = (token.force2faSetup as boolean) || false
       if (uid && valid) {
         // 实时角色（管理员调整权限立即生效）
-        const u = await db.user.findUnique({ where: { id: uid }, select: { role: true, displayName: true, frozen: true, enabled: true } })
+        const u = await db.user.findUnique({ where: { id: uid }, select: { role: true, displayName: true, frozen: true, enabled: true, force2faSetup: true, twoFactorEnabled: true } })
         if (u) {
           role = u.role
           displayName = u.displayName ?? displayName
           if (!u.enabled || u.frozen) valid = false
+          // 强制 2FA 实时刷新：管理员中途开启/关闭立即生效（不等待重新登录）；已开通 2FA 自动解除强制状态
+          needs2faSetup = u.force2faSetup && !u.twoFactorEnabled
         }
       }
       ;(session.user as Record<string, unknown>).id = uid

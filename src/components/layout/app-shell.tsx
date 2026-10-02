@@ -54,15 +54,28 @@ interface AppShellProps {
   unreadCount: number
   maintenance: boolean
   maintenanceMessage: string
+  /** 强制 2FA 门控：true 时非白名单页面被拦截并引导到账号安全页 */
+  needs2faSetup?: boolean
   children: React.ReactNode
 }
 
-export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenanceMessage, children }: AppShellProps) {
+// 2FA 强制门控白名单：仅允许账号安全相关页面（引导开通 2FA 的唯一通道）
+const TWOFA_ALLOWED_PATHS = ["/account/security", "/account/sessions", "/account/profile"]
+
+export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenanceMessage, needs2faSetup = false, children }: AppShellProps) {
   const pathname = usePathname()
   const router = useRouter()
   const [collapsed, setCollapsed] = React.useState(false)
   const [mobileOpen, setMobileOpen] = React.useState(false)
   const [searchOpen, setSearchOpen] = React.useState(false)
+
+  // ---- 强制 2FA 门控：非白名单页面立即重定向到账号安全页（管理员开启后即时生效）----
+  const twofaBlocked = needs2faSetup && !TWOFA_ALLOWED_PATHS.some((p) => pathname?.startsWith(p))
+  React.useEffect(() => {
+    if (twofaBlocked) {
+      router.replace("/account/security?force2fa=1")
+    }
+  }, [twofaBlocked, router])
 
   const roleLabel: Record<string, string> = {
     SUPER_ADMIN: "超级管理员",
@@ -76,6 +89,23 @@ export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenan
       {maintenance && (
         <div className="bg-amber-500/90 text-white text-center text-sm py-1.5 px-4 sticky top-0 z-50">
           {maintenanceMessage}
+        </div>
+      )}
+      {/* 强制 2FA 门控拦截卡：重定向完成前的即时视觉反馈 */}
+      {twofaBlocked && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-background/95 backdrop-blur-sm px-4">
+          <div className="max-w-md w-full rounded-xl border border-amber-300 dark:border-amber-700 bg-card p-6 text-center shadow-lg">
+            <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/40">
+              <ShieldAlert className="h-6 w-6 text-amber-600 dark:text-amber-400" />
+            </div>
+            <h2 className="text-lg font-semibold mb-2">需要先开启双因素认证（2FA）</h2>
+            <p className="text-sm text-muted-foreground mb-4">
+              管理员已要求所有账号开启 2FA 后才能使用平台功能。完成设置后即可自动恢复访问。
+            </p>
+            <Button asChild className="bg-amber-600 hover:bg-amber-700 text-white">
+              <Link href="/account/security?force2fa=1">前往开启 2FA</Link>
+            </Button>
+          </div>
         </div>
       )}
       <div className="flex min-h-screen">

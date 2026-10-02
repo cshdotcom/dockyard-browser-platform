@@ -16,11 +16,8 @@ export default async function MainLayout({ children }: { children: React.ReactNo
   // 避免浏览器持有旧 cookie 反复弹跳（登录成功 → 布局判失效 → 踢回 → 再登录……）
   if (!ctx) redirect("/api/auth/logout?redirect=%2Flogin&reason=session-invalid")
 
-  // 强制2FA策略：未完成设置前只能停留在账号安全页
-  if (await needs2faSetup()) {
-    const allowed = ["/account/security", "/account/sessions", "/account/profile"]
-    // 在 layout 无法直接取 pathname，由 /account/security 页面自身引导；此处放行由各 admin/业务页再校验
-  }
+  // 强制2FA策略：AppShell 客户端门控（非白名单页面拦截并引导到 /account/security）
+  const needs2fa = await needs2faSetup()
 
   const unread = await db.notice.count({ where: { userId: ctx.userId, readAt: null } })
   const me = await db.user.findUnique({ where: { id: ctx.userId }, select: { avatarPath: true } })
@@ -102,6 +99,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
       unreadCount={unread}
       maintenance={maintenance}
       maintenanceMessage={maintenanceMessage}
+      needs2faSetup={needs2fa}
     >
       {children}
     </AppShell>

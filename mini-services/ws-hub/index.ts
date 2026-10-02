@@ -109,10 +109,12 @@ const emitServer = createServer((req, res) => {
   })
 })
 
-const WS_PORT = 3003
-const EMIT_PORT = 3004
-httpServer.listen(WS_PORT, () => {
-  console.log(`[ws-hub] WebSocket 枢纽端口 ${WS_PORT}（socket.io path=/）`)
+const WS_PORT = Number(process.env.PORT || process.env.WS_HUB_PORT || 3003)
+const EMIT_PORT = Number(process.env.EMIT_PORT || 3004)
+// 默认回环绑定：对外统一经网关（XTransformPort）透传；Docker host 网络模式下不额外暴露端口
+const WS_BIND = process.env.BIND_ADDR || "127.0.0.1"
+httpServer.listen(WS_PORT, WS_BIND, () => {
+  console.log(`[ws-hub] WebSocket 枢纽 ${WS_BIND}:${WS_PORT}（socket.io path=/）`)
 })
 emitServer.listen(EMIT_PORT, "127.0.0.1", () => {
   console.log(`[ws-hub] 事件注入端口 ${EMIT_PORT}（POST /emit + x-hub-secret）`)

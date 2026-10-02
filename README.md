@@ -146,11 +146,11 @@ bun run dev            # http://localhost:3000
 
 ### Docker 部署（host 网络模式 · CDP 端口可变）
 ```bash
-# host 模式：容器直接使用宿主机网络，CDP服务端口/VNC网关桥端口通过环境变量改变
+# host 模式：容器直接使用宿主机网络；对外仅 网页（GATEWAY_PORT，默认3000）+ CDP（CDP_SERVICE_PORT，默认9222）两个端口
+# VNC/WS枢纽/事件注入全部回环监听，统一经入口网关嵌入网页端 —— 无需额外 -p 映射
 docker run -d --name dockyard --network host \
   -e PORT=3000 \
   -e CDP_SERVICE_PORT=9222 \
-  -e VNC_BRIDGE_PORT=3005 \
   -e AUTH_SECRET=请修改为随机值 \
   -e ENCRYPTION_KEY=请修改为32字节密钥 \
   -e CRON_SECRET=请修改 \
@@ -188,7 +188,8 @@ docker run -d --name dockyard --network host \
 | BROWSER_IMAGE | 自托管硬隔离浏览器镜像 | GHCR 官方 dockyard-browser |
 | STEEL_BROWSER_URL | Steel-Browser API（仅内网） | 模拟会话模式 |
 | NOVNC_POOL_URL | NoVNC 池 API（仅内网） | 模拟桌面模式 |
-| VNC_BRIDGE_PORT / VNC_BRIDGE_SECRET / VNC_BRIDGE_PUBLIC | HelmPort VNC 网关桥（端口/HMAC密钥/接入形态 gateway\|port\|url） | 3005 / 启动时随机生成 / port |
+| VNC_BRIDGE_PORT / VNC_BRIDGE_SECRET / VNC_BRIDGE_PUBLIC | HelmPort VNC 网关桥（端口/HMAC密钥/接入形态 gateway\|port\|url；gateway=经统一网关嵌入网页端，回环监听） | 3005 / 启动时随机生成 / gateway |
+| GATEWAY_PORT / APP_INTERNAL_PORT / GATEWAY_TRANSFORM_PORTS | 统一入口网关（对外唯一 UI 端口 / Next 回环端口 / 允许透传的回环端口清单） | 3000 / 13000 / 3003,3004,3005 |
 | SMTP_HOST/PORT/USER/PASS | 邮件服务 | 模拟邮件（服务端日志输出） |
 
 未配置外部服务时平台全链路可跑（模拟适配器，含内置演示 RFB 帧缓冲引擎），生产配置后即真实调度。
@@ -207,7 +208,7 @@ src/app/           login/register/forgot-password + (main)/ 前台与管理后�
 src/app/api/       auth(登录/验证码/注册/重置) cron mcp openapi files cdp vnc-proxy metrics
 src/lib/           认证/权限/审计/配置/加密/TOTP/限流/幂等/风控/回收站/外部适配器/告警/WS推送
 src/server/        actions(全部Server Actions) tasks(定时任务引擎) mcp(批量任务引擎)
-mini-services/     ws-hub（WebSocket枢纽，端口3003/事件注入3004）
+mini-services/     gateway（统一入口网关：对外唯一 UI 端口，WS双向泵） ws-hub（回环） vnc-bridge（回环）
 docker/            start/stop/healthcheck/entrypoint-guard（守护入口：崩溃自愈）脚本
 ```
 
