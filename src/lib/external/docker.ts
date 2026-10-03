@@ -4,6 +4,7 @@
 
 import { ENV, externalAvailable } from "../env"
 import { randomUUID } from "crypto"
+import { mkdir } from "fs/promises"
 
 // ============================================================
 // 硬隔离浏览器容器（HelmPort 自托管模式）
@@ -35,6 +36,11 @@ export interface BrowserHardeningSpec {
   endpointPolicy?: { blackPatterns: string[]; whitePatterns: string[] } // 端点级精确限制（host:port）
   policyFile?: string | null // 网络策略托管策略 JSON（只读 bind-mount 进 /etc/chromium/policies/managed/）
   gatewayIp?: string | null // 会话网络网关（平台内部端点封禁目标）
+  // —— r27：会话录像 + 防退出档位 ——
+  recording?: { enabled: boolean; fps: number; segmentSec: number; maxSec: number } // 录像策略（进程树内 ffmpeg 分段）
+  exitGuard?: "normal" | "fullscreen" | "kiosk" // 防退出档位（supervisor chromium 参数）
+  recordingDir?: string | null // 容器外录像目录（宿主侧用户空间；有 spec.recording.enabled 时必填）
+  recordingUserId?: string | null // 录像归属用户（用户空间目录推导；name 由本函数生成）
 }
 
 export interface BrowserHardeningInfo {
@@ -75,6 +81,9 @@ export interface BrowserHardeningInfo {
     latencyMs: number | null
     policyNote: string // 策略执行位置说明（外部部署侧自管）
   }
+  // —— r27：会话录像与防退出档位快照 ——
+  recordingEnabled?: boolean // 该沙箱已开启会话录像（进程树内 ffmpeg 分段）
+  exitGuard?: "normal" | "fullscreen" | "kiosk" // 防退出档位（fullscreen=全屏守卫 / kiosk=信息亭）
 }
 
 export const SESSION_NETWORK = "dockyard-sessions"
@@ -123,6 +132,8 @@ export function buildBrowserHostConfig(spec: BrowserHardeningSpec) {
   const binds = spec.profileDir ? [`${spec.profileDir}:/home/browser/profile:rw,nosuid,nodev,noexec`] : []
   // 网络策略托管策略：只读 bind-mount（只读根 FS + 非 root + CapDrop=ALL → 沙箱内无法篡改）
   if (spec.policyFile) binds.push(`${spec.policyFile}:${CHROMIUM_POLICY_MOUNT}:ro`)
+  // r27：会话录像目录（用户空间；可写不可执行，与 Profile 同级隔离语义）
+  if (spec.recording?.enabled && spec.recordingDir) binds.push(`${spec.recordingDir}:/home/browser/recordings:rw,nosuid,nodev,noexec`)
   return {
     NanoCpus: Math.round(spec.cpuLimit * 1e9),
     Memory: Math.round(spec.memLimitMb * 1024 * 1024),
@@ -188,11 +199,27 @@ export async function createIsolatedBrowserContainer(
   const hardening = browserHardeningSummary(spec)
   const name = `dy-browser-${randomUUID().replace(/-/g, "").slice(0, 12)}`
   if (externalAvailable.docker) {
+    // r27：录像用户空间目录（name 本函数生成 → 目录此处统一推导；调用方无需预知容器名）
+    let recordDir: string | null = null
+    if (spec.recording?.enabled && spec.recordingUserId && safeId(spec.recordingUserId)) {
+      recordDir = `${ENV.storageLocalPath.replace(/\/$/, "")}/recordings/${spec.recordingUserId}/${name}`
+      await mkdir(recordDir, { recursive: true }).catch(() => null)
+    }
     const envVars: Record<string, string> = {
       START_URL: spec.startUrl || "about:blank",
       RESOLUTION: spec.resolution || "1280x800",
       TZ: "Asia/Shanghai",
       ...(spec.proxyUrl ? { PROXY_URL: spec.proxyUrl } : {}),
+      ...(spec.exitGuard && spec.exitGuard !== "normal" ? { EXIT_GUARD: spec.exitGuard } : {}),
+      ...(spec.recording?.enabled && recordDir
+        ? {
+            REC_DIR: "/home/browser/recordings",
+            REC_FPS: String(spec.recording.fps),
+            REC_SEGSEC: String(spec.recording.segmentSec),
+            REC_MAXSEC: String(spec.recording.maxSec || 0),
+            REC_SIZE: spec.resolution || "1280x800",
+          }
+        : {}),
       ...(spec.env || {}),
     }
     const body = {
@@ -203,7 +230,7 @@ export async function createIsolatedBrowserContainer(
       Labels: { "dockyard.managed": "true", ...(spec.labels || {}) },
       WorkingDir: "/home/browser",
       ExposedPorts: { "5900/tcp": {}, "9222/tcp": {} },
-      HostConfig: buildBrowserHostConfig(spec),
+      HostConfig: buildBrowserHostConfig({ ...spec, recordingDir: recordDir }),
     }
     const res = await dockerFetch("/containers/create?name=" + encodeURIComponent(name), {
       method: "POST",

@@ -930,3 +930,30 @@ Work Log:
 Stage Summary:
 - 用户三项指令全部达成：①CRX 插件库深度功能（生命周期审计+五级合并细节+元数据缓存）与九大类审计完善全部落地并实测；②r24~r26 三轮提交全部推送且 CI 监督至全绿（Lint + 主镜像构建全 success，GHCR 镜像发布确认）；③待办清单剩余项（模板快照差异对比/沙箱克隆/基线扫描/防篡改校验）+ 16 条附加约束最后一项（元数据缓存）全部闭环
 - 162 项回归断言 + 浏览器 E2E 8 链路全部通过；QA 数据清理归零
+
+---
+Task ID: 27
+Agent: main
+Task: r27 — VNC 会话录像回放（企业级）+ 浏览器防退出档位 + Chromium 策略目录 + 功能开关 + 打 tag v1.7.0
+
+Work Log:
+- 【数据模型】VncRecording 表（sessionId 会话组=沙箱进程树 / segmentIndex 分段 / 状态/触发/时长/大小/storageKey 白名单/查看下载计数/软删+purgeAt/唯一约束[sessionId,segmentIndex] 幂等兜底）；User.vncRecording / Group.vncRecording（四级策略链字段）；BrowserWorkspace.recordingOverride（沙箱级三态 on/off/inherit）+ prisma db push + 双种子
+- 【录像引擎 src/lib/recording.ts（470 行）】四级策略链解析（沙箱>用户>组[继承链向上]>全局，与网络策略同构）；registerWorkspaceRecording（幂等建档+session.json 溯源+审计）；scanRecordingSegments（分段文件→行对齐：新段补行/活跃段收尾/ffprobe 真实时长）；scanAllLiveRecordings（死沙箱自动终结=全路径自愈兜底）；finalizeRecordingSession（文件 mtime+probe 收口）；enforceRecordingRetention（保留期到期+用户配额 GB 超额最旧优先软删）；softDelete→RecycleBin；purgeRecordingRow（文件+行+目录级联）；signPlaybackToken/verifyPlaybackToken（HMAC+60s 时效）；recordingUserUsage 配额统计
+- 【录制链路】sandbox-launch.sh：ffmpeg x11grab 分段落盘（-f segment -segment_time -segment_start_number 续录不覆盖 + fMP4 +frag_keyframe+empty_moov + GOP fps*3 分段滚动即完整化 + REC 保活/优雅收尾/防误杀扫杀）；supervisor.sh（docker 镜像同语义 REC_*）；embedded-sandbox（spec.recording/exitGuard → DY_RECORD_* + DY_EXIT_GUARD env + recordDir 预建 + handle 回传）；docker.ts（recordingDir bind rw,noexec + REC env + 容器名推导目录）；novnc.ts（参数穿透 + destroyNovncSession 终结录像=全业务路径统一收口）；双 Dockerfile 安装 ffmpeg
+- 【回放 API】/api/recordings/stream/[id]：双通道鉴权（Cookie 会话实时 RBAC + 签名票据 60s）；HTTP Range 206 分片流（拖动进度条）+ 416 + 完整 200 下载（RFC5987 双文件名）；storageKey 白名单拒绝穿越；RECORDING_VIEW/RECORDING_DOWNLOAD 审计+计数；活跃分段 <1KB 拒绝（fMP4 缓冲语义）
+- 【Server Actions recordings.ts】listRecordings（USER 本人/GROUP_ADMIN 所辖组/ADMIN+ 全站 + 用户端可见性开关）、myRecordings（用户空间+配额卡）、playbackRecording（RBAC→签发票据）、delete→回收站（30 天）/restore/purge/note（取证备注）/triggerRecordingScan（手动扫描收口）
+- 【定时任务】recording_scan（*/2：新段入库/收尾/死沙箱终结）+ recording_retention（每日 04:00：保留期+配额）；engine 注册 + 双种子
+- 【回收站】RECORDING 类型全链路：softDelete 登记 → restore（清 purgeAt）→ purgeFromRecycle 文件+行+目录级联；回收站页资源类型选项 + 审计筛选 RECORDING 选项
+- 【Chromium 策略目录 chromium-policies.ts】37 项 Linux 实支持企业策略（隐私遥测/账户同步/启动主页/浏览体验/下载打印/开发者/扩展防护五分类）+ validateExtraPolicies（未知键/类型/枚举/安全键四重校验）+ SECURITY_OWNED_KEYS（URLBlocklist/Proxy/Extension 等平台安全层独占——双保险合并顺序：模板先注入→安全层后注入永不覆盖）；模板表单 policyJson JSON 编辑器（提交前后双重校验拒绝）
+- 【防退出 exitGuard】三档：normal（现状零变更）/ fullscreen（--start-fullscreen + --noerrdialogs + ExitWarningBubble 启用=Ctrl+Q 长按确认 + 附加策略 BrowserSignin=0/SyncDisabled/BrowserGuestModeEnabled=false/BrowserAddProfileEnabled=false/IncognitoModeAvailability=1 封堵逃逸路径）/ kiosk（--kiosk 无地址栏无菜单→「更多菜单→退出」入口物理不存在）；模板表单四选一卡片+说明（无 WM 窗口标题栏关闭/最小化按钮本就不存在+监督循环 1s 同 Profile 兜底）；全局默认 workspace.exitGuardDefault（默认 fullscreen）；hardening 快照 recordingEnabled/exitGuard 落库展示；策略刷新链路（network-policy-apply）同步注入不丢失
+- 【功能开关 /admin/feature-flags】24 项功能型开关注册表（会话VNC/安全合规/运维告警/备份存储四分类，标注生效时机）+ 分组卡片页（Switch 乐观更新+失败回滚+恢复默认+最近变更溯源；仅超管可写）
+- 【后台/用户 UI】/admin/recordings（四统计卡+状态筛选+关键词+回放播放器弹窗+下载+删除原因弹窗+取证备注+立即扫描+回放回收站页签）；/recordings 用户空间我的录像（配额卡+80% 预警+播放器）；导航（工作台-我的录像/管理后台-录像管理+功能开关）；全局搜索 5 新直达项（含录像开关/防退出档位深链）
+- 【工作区行级控制】admin workspaces 行菜单「录像策略」三态弹窗（on/off/inherit+当前解析显示）；updateWorkspaceAction 支持 recordingOverride（管理员专属）；克隆复制覆盖
+- 【OpenAPI】GET /api/openapi/recordings?op=list|get（API-Key READ；元数据级，文件本体走后台 RBAC+票据）
+- 【E2E 实证】smoke 35/35（四级链 5 断言/注册幂等/扫描补行+收尾+ffprobe 时长/终结/保留期/回收站登记恢复清除/票据 4 向量/目录校验 4 向量/合并顺序安全键拒覆盖/穿越 3 向量）；真实沙箱 E2E 23/23（真实 ffmpeg 落盘 24KB+8.5s 时长/停沙箱 SIGTERM 优雅收尾/Range 206 精确 1024B/mp4 ftyp 魔数/无票据伪造票据 JSON 拒绝/审计落库/计数累加）；浏览器实测：管理后台跨用户可见 demo 录像→点回放→video readyState=4 duration=8.5s videoWidth=1024 真实流加载 + 功能开关页 Switch 渲染 + 模板表单防退出四卡片 + 用户空间空态；QA 数据清理归零
+- 【根因修复】fMP4+segment muxer 数据在 ffmpeg 内存缓冲（live 仅 48B ftyp 头）→ GOP fps*3 + 分段滚动即完整化 + 流路由 <1KB 拒绝活跃段 + SIGTERM 优雅收尾实测 8s→25KB
+- 【质量门】tsc 78=78 基线零新增；eslint 全部改动文件 0 error 0 warning；bun run build 全绿 74 路由（含 5 新路由）
+
+Stage Summary:
+- 用户五项指令全部落地：①VNC 会话录像回放企业级全链路（四级策略链/进程树内 ffmpeg 分段/Range 流回放/RBAC 四角色/回收站/保留期配额治理/用户空间/后台全站可见可操作/审计闭环）②更多 Chromium 策略项（37 项目录+校验+模板注入+安全层不可覆盖）③防退出档位（fullscreen 默认/kiosk 最强——菜单退出入口物理不存在+关闭最小化按钮隐藏+Ctrl+Q 长按+1s 自动重启兜底）④后台审计+策略+功能开关（/admin/feature-flags 24 项治理）⑤打 tag v1.7.0（CI 全绿后）
+- 35+23 断言 + 浏览器真实回放实测全部通过；QA 数据清理归零

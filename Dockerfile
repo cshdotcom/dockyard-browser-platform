@@ -52,6 +52,8 @@ RUN apt-get update -o Acquire::Retries=5 \
       chromium \
       xvfb \
       x11vnc \
+      # r27：VNC 会话录像引擎（嵌入式沙箱进程树内 ffmpeg x11grab 分段 + ffprobe 时长探测）
+      ffmpeg \
       xauth \
       procps \
       psmisc \

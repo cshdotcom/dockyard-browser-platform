@@ -306,6 +306,9 @@ export default async function AdminWorkspacesPage({
       browserNodeName: r.browserNodeId ? browserNodeNameById.get(r.browserNodeId) || "-" : "-",
       ttlMinutes: r.ttlMinutes,
       vncSessionMaxMinutes: r.vncSessionMaxMinutes ?? null,
+      // r27：录像沙箱级覆盖 + 当前会话解析快照（hardening.recordingEnabled）
+      recordingOverride: (r.recordingOverride as string | null) ?? null,
+      recordingEnabledNow: ((r.hardeningJson as Record<string, unknown> | null)?.recordingEnabled as boolean | undefined) ?? null,
       idleTimeoutMinutes: r.idleTimeoutMinutes,
       cdpCallCount: r.cdpCallCount,
       novncConnCount: r.novncConnCount,

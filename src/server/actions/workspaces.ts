@@ -24,6 +24,8 @@ import { moveToRecycle } from "@/lib/recycle"
 import { getConfigBool, getConfig, getConfigNumber } from "@/lib/config"
 import { assertShareAllowed } from "@/lib/share-policy"
 import { resolveIdlePolicyForUser, isAdminRole, fmtIdleBrief } from "@/lib/idle-policy"
+import { resolveRecordingPolicy, recordingTuning, registerWorkspaceRecording, type RecordingPolicy, type RecordingTuning } from "@/lib/recording"
+import { validateExtraPolicies } from "@/lib/chromium-policies"
 
 // ============================================================
 // 浏览器工作区业务 Server Actions
@@ -55,6 +57,68 @@ function netPolicyJson(
     snapshot.fileSource = file.source
   }
   return snapshot as Prisma.InputJsonValue
+}
+
+// ============================================================
+// r27：会话录像 + 防退出 + 模板策略项 —— 启动链路统一装配
+// ============================================================
+// 录像策略四级链（沙箱>用户>组>全局）+ 参数解析
+async function resolveRecordingBundle(userId: string, workspaceId?: string | null): Promise<{ policy: RecordingPolicy; tuning: RecordingTuning }> {
+  const [policy, tuning] = await Promise.all([resolveRecordingPolicy(userId, workspaceId), recordingTuning()])
+  return { policy, tuning }
+}
+
+// 防退出档位：模板 > 全局默认（workspace.exitGuardDefault）
+async function resolveExitGuard(templateConfig: Record<string, unknown>): Promise<"normal" | "fullscreen" | "kiosk"> {
+  const t = templateConfig.exitGuard
+  if (t === "normal" || t === "fullscreen" || t === "kiosk") return t
+  const g = await getConfig<string>("workspace.exitGuardDefault", "fullscreen")
+  return g === "normal" || g === "kiosk" ? g : "fullscreen"
+}
+
+// 模板级 Chromium 企业策略项（目录校验不过 → 静默忽略并审计告警）
+async function resolveTemplatePolicies(templateId?: string | null): Promise<{ policyJson: Record<string, unknown> | null; exitGuardConfig: Record<string, unknown> }> {
+  if (!templateId) return { policyJson: null, exitGuardConfig: {} }
+  const tpl = await db.browserTemplate.findFirst({ where: { id: templateId, deletedAt: null }, select: { configJson: true } })
+  if (!tpl) return { policyJson: null, exitGuardConfig: {} }
+  try {
+    const cfg = JSON.parse(tpl.configJson || "{}") as Record<string, unknown>
+    const pj = (cfg.policyJson || null) as Record<string, unknown> | null
+    if (pj) {
+      const v = validateExtraPolicies(pj)
+      if (!v.ok) {
+        await writeAudit({
+          operationType: "WORKSPACE_POLICY_INVALID", resourceType: "TEMPLATE", resourceId: templateId,
+          severity: "WARN", extra: { errors: v.errors, action: "模板策略项校验未过 → 已忽略注入" },
+        }).catch(() => null)
+        return { policyJson: null, exitGuardConfig: cfg }
+      }
+    }
+    return { policyJson: pj, exitGuardConfig: cfg }
+  } catch {
+    return { policyJson: null, exitGuardConfig: {} }
+  }
+}
+
+// 沙箱启动后注册录像会话（引擎已下发 ffmpeg；此处建档+审计）
+async function provisionRecording(opts: {
+  workspace: { id: string; uuid: string; name: string; userId: string }
+  username: string
+  novnc: NovncSession
+  policy: RecordingPolicy
+  tuning: RecordingTuning
+  resolution: string
+}): Promise<void> {
+  if (!opts.novnc.recording) return
+  await registerWorkspaceRecording({
+    workspace: opts.workspace,
+    username: opts.username,
+    sessionId: opts.novnc.novncSessionId,
+    resolution: opts.resolution,
+    policy: opts.policy,
+    tuning: opts.tuning,
+    metadata: { recordDir: opts.novnc.recording.recordDir, fps: opts.novnc.recording.fps, segmentSec: opts.novnc.recording.segmentSec },
+  }).catch(() => null)
 }
 
 // 组装代理URL：internal_singbox 类型读取实例内网socks地址
@@ -224,6 +288,10 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
       const profileKey = p.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
       // r24-e：预生成工作区 UUID（沙箱专属 Linux 用户命名 + 库内主键同值，创建前即可定身份）
       const wsUuid = crypto.randomUUID()
+      // r27：录像策略四级链 + 防退出档位 + 模板策略项（创建链路一次解析）
+      const rec = await resolveRecordingBundle(ctx.userId)
+      const tplPol = await resolveTemplatePolicies(p.templateId)
+      const exitGuard = await resolveExitGuard(tplPol.exitGuardConfig)
       const novnc = await createNovncSession({
         proxyUrl: proxyInfo.proxyUrl,
         resolution: p.resolution,
@@ -246,12 +314,16 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         domainPolicy: domPolicy,
         endpointPolicy: endPolicy,
         filePolicy,
+        // r27：录像 + 防退出 + 模板策略项
+        recording: rec.policy.enabled ? { enabled: true, ...rec.tuning, maxSec: rec.tuning.maxMinutes > 0 ? rec.tuning.maxMinutes * 60 : 0 } : undefined,
+        exitGuard,
+        extraManagedPolicy: tplPol.policyJson,
       })
       const hardening = novnc.hardening || browserHardeningSummary({
         image: ENV.browserImage, cpuLimit: (templateConfig.cpuLimit as number) || 1, memLimitMb: (templateConfig.memLimitMb as number) || 1024,
         pidsLimit: 256, network: "dockyard-sessions", profileDir: null, networkPolicy: { allowInternalNetwork: netPolicy.allowInternalNetwork, allowSecureLocationAccess: netPolicy.allowSecureLocationAccess },
       })
-      const hardeningSnapshot = { ...hardening, profileKey, provisioned: novnc.simulated ? "simulated" : "live" } as BrowserHardeningInfo & { profileKey: string; provisioned: string }
+      const hardeningSnapshot = { ...hardening, profileKey, provisioned: novnc.simulated ? "simulated" : "live", recordingEnabled: rec.policy.enabled, recordingPolicySource: rec.policy.source, exitGuard } as BrowserHardeningInfo & { profileKey: string; provisioned: string; recordingEnabled?: boolean; recordingPolicySource?: string; exitGuard?: string }
       const hardeningJsonInput = JSON.parse(JSON.stringify(hardeningSnapshot)) as Prisma.InputJsonValue
       const ws = await db.browserWorkspace.create({
         data: {
@@ -282,12 +354,21 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
       })
       if (p.proxyNodeId) await db.proxyNode.update({ where: { id: p.proxyNodeId }, data: { currentSessions: { increment: 1 } } })
       if (proxyInfo.singboxInstanceId) await db.singboxInstance.update({ where: { id: proxyInfo.singboxInstanceId }, data: { currentSessions: { increment: 1 } } })
+      // r27：录像会话建档（引擎已开录；此处注册 + 审计 + session.json 溯源标记）
+      await provisionRecording({
+        workspace: { id: ws.id, uuid: ws.uuid, name: ws.name, userId: ws.userId },
+        username: ctx.username,
+        novnc,
+        policy: rec.policy,
+        tuning: rec.tuning,
+        resolution: p.resolution || "1280x800",
+      })
       await trackBehavior(ctx.userId, "CREATE")
       await writeAudit({
         operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_CREATE",
         resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
         ownerUserId: ctx.userId, createdByUserId: ctx.userId,
-        after: { mode: "novnc_full", novncSessionId: novnc.novncSessionId, resolution: p.resolution, idleTimeoutMinutes: idleMinutes, ...(idleIgnoredByPolicy ? { idlePolicy: { lockedBy: idlePolicy.lockSource, enforced: fmtIdleBrief(idleMinutes), submittedIgnored: p.idleTimeoutMinutes } } : {}) },
+        after: { mode: "novnc_full", novncSessionId: novnc.novncSessionId, resolution: p.resolution, idleTimeoutMinutes: idleMinutes, recording: rec.policy.enabled ? { enabled: true, source: rec.policy.source, fps: rec.tuning.fps } : { enabled: false, source: rec.policy.source }, exitGuard, ...(idleIgnoredByPolicy ? { idlePolicy: { lockedBy: idlePolicy.lockSource, enforced: fmtIdleBrief(idleMinutes), submittedIgnored: p.idleTimeoutMinutes } } : {}) },
       })
       return { id: ws.id, uuid: ws.uuid, mode: "novnc_full" }
     }
@@ -347,6 +428,10 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
       const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
       // 重建时重新解析生效策略（管理员收紧/放宽即时作用于新容器；四层解析含单沙箱级）
       const { network: netPolicy, domain: domPolicy, endpoint: endPolicy, file: filePolicy } = await resolveAccessPolicies(ws.userId, ws.id)
+      // r27：录像策略（含沙箱级覆盖）+ 防退出/模板策略项（重建链路同步刷新）
+      const rec = await resolveRecordingBundle(ws.userId, ws.id)
+      const tplPol = await resolveTemplatePolicies(ws.templateId)
+      const exitGuard = await resolveExitGuard(tplPol.exitGuardConfig)
       let novnc
       try {
         novnc = await createNovncSession({
@@ -367,6 +452,10 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
           clipboardEnabled: await getConfigBool("workspace.clipboardVncSync", true),
           workspaceUuid: ws.uuid,
           ownerUsername: (await db.user.findUnique({ where: { id: ws.userId }, select: { username: true } }))?.username || "u",
+          // r27：录像 + 防退出 + 模板策略项
+          recording: rec.policy.enabled ? { enabled: true, ...rec.tuning, maxSec: rec.tuning.maxMinutes > 0 ? rec.tuning.maxMinutes * 60 : 0 } : undefined,
+          exitGuard,
+          extraManagedPolicy: tplPol.policyJson,
         })
       } catch (e) {
         // r25-d：启动失败不再静默回 STOPPED —— 落 ERROR 状态 + 失败原因持久化到 hardeningJson
@@ -392,9 +481,18 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
           cdpUrl: novnc.cdpUrl || null,
           startedAt: new Date(),
           containerRef: novnc.containerName || null,
-          hardeningJson: JSON.parse(JSON.stringify(novnc.hardening ? { ...novnc.hardening, profileKey, provisioned: "live" } : (prevHardening || {}))) as Prisma.InputJsonValue,
+          hardeningJson: JSON.parse(JSON.stringify(novnc.hardening ? { ...novnc.hardening, profileKey, provisioned: "live", recordingEnabled: rec.policy.enabled, recordingPolicySource: rec.policy.source, exitGuard } : (prevHardening || {}))) as Prisma.InputJsonValue,
           networkPolicyJson: netPolicyJson(netPolicy, domPolicy, endPolicy, filePolicy),
         },
+      })
+      // r27：录像会话建档（停止/重建后的新进程树 → 新录像组）
+      await provisionRecording({
+        workspace: { id: ws.id, uuid: ws.uuid, name: ws.name, userId: ws.userId },
+        username: ctx.username,
+        novnc,
+        policy: rec.policy,
+        tuning: rec.tuning,
+        resolution: (novnc as NovncSession).resolution || "1280x800",
       })
     }
     if (ws.proxyNodeId) await db.proxyNode.update({ where: { id: ws.proxyNodeId }, data: { currentSessions: { increment: 1 } } }).catch(() => {})
@@ -973,13 +1071,15 @@ export async function updateWorkspaceAction(input: unknown): Promise<ActionResul
   return actionHandler(async () => {
     const ctx = await requireAuth()
     await requirePermission(ctx.userId, "blockModifyWorkspace", "管理员已禁止修改工作区配置")
-    const { id, name, ttlMinutes, idleTimeoutMinutes, tags } = zodValidate(
+    const { id, name, ttlMinutes, idleTimeoutMinutes, tags, recordingOverride } = zodValidate(
       z.object({
         id: z.string(),
         name: z.string().min(1).max(64).optional(),
         ttlMinutes: zPrecision("TTL", 0, 525600).optional(),
         idleTimeoutMinutes: zPrecision("闲置超时", 0, 1440).optional(), // 0=无限（永不闲置回收）
         tags: z.string().optional(),
+        // r27：录像沙箱级覆盖三态（仅管理员可设；普通用户传入被忽略）
+        recordingOverride: z.enum(["on", "off", "inherit"]).optional(),
       }),
       input
     )
@@ -1000,13 +1100,17 @@ export async function updateWorkspaceAction(input: unknown): Promise<ActionResul
         ...(ttlMinutes !== undefined ? { ttlMinutes } : {}),
         ...(effectiveIdle !== undefined ? { idleTimeoutMinutes: effectiveIdle } : {}),
         ...(tags !== undefined ? { tags: tags.split(",").map((t) => t.trim()).filter(Boolean) } : {}),
+        // r27：录像沙箱级覆盖（管理员专属；下次启动生效）
+        ...(recordingOverride && (ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN")
+          ? { recordingOverride: recordingOverride === "inherit" ? null : recordingOverride }
+          : {}),
       },
     })
     await writeAudit({
       operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_UPDATE",
       resourceType: "WORKSPACE", resourceId: id, resourceName: ws.name,
-      before: { name: ws.name, ttl: ws.ttlMinutes, idle: ws.idleTimeoutMinutes },
-      after: { name, ttlMinutes, idleTimeoutMinutes: effectiveIdle, tags, ...(idleIgnoredByPolicy ? { idlePolicy: { lockedBy: idlePolicy.lockSource, enforced: fmtIdleBrief(idlePolicy.defaultMinutes), submittedIgnored: idleTimeoutMinutes } } : {}) },
+      before: { name: ws.name, ttl: ws.ttlMinutes, idle: ws.idleTimeoutMinutes, recordingOverride: ws.recordingOverride },
+      after: { name, ttlMinutes, idleTimeoutMinutes: effectiveIdle, tags, ...(recordingOverride ? { recordingOverride: recordingOverride === "inherit" ? null : recordingOverride, recordingOperator: ctx.username } : {}), ...(idleIgnoredByPolicy ? { idlePolicy: { lockedBy: idlePolicy.lockSource, enforced: fmtIdleBrief(idlePolicy.defaultMinutes), submittedIgnored: idleTimeoutMinutes } } : {}) },
     })
     return null
   })
@@ -1324,6 +1428,7 @@ export async function cloneWorkspaceAction(input: unknown): Promise<ActionResult
         crxBlocklistExempt: ctx.role === "SUPER_ADMIN" ? src.crxBlocklistExempt : false, // 黑名单豁免仅超管可复制
         imeEngine: src.imeEngine,
         kbLayout: src.kbLayout,
+        recordingOverride: src.recordingOverride, // r27：录像沙箱级覆盖随克隆复制
         lifecycleRules: src.lifecycleRules ?? undefined,
         createdByUserId: ctx.userId,
         hardeningJson: src.hardeningJson

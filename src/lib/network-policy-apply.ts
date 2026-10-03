@@ -14,6 +14,8 @@ import { writeNetworkPolicyFile, sessionNetworkGateway, embeddedSandboxBaseline 
 import { rememberPolicyFileHash } from "./crx-lifecycle"
 import { resolveAccessPolicies } from "./domain-policy"
 import { buildCrxManagedPolicy, resolveWorkspaceCrxPolicy } from "./crx-policy"
+import { exitGuardManagedPolicy, validateExtraPolicies } from "./chromium-policies"
+import { getConfig } from "./config"
 import { ENV, externalAvailable } from "./env"
 import { decrypt } from "./crypto"
 
@@ -34,7 +36,7 @@ async function resolveProxyLockUrl(proxyNodeId: string | null | undefined): Prom
 export async function refreshWorkspacePolicyFile(workspaceId: string): Promise<boolean> {
   const ws = await db.browserWorkspace.findFirst({
     where: { id: workspaceId, deletedAt: null },
-    select: { id: true, userId: true, mode: true, hardeningJson: true, profileSnapshotId: true, status: true, proxyNodeId: true },
+    select: { id: true, userId: true, mode: true, hardeningJson: true, profileSnapshotId: true, status: true, proxyNodeId: true, templateId: true },
   })
   if (!ws || ws.mode !== "novnc_full") return false
   const hardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
@@ -55,6 +57,22 @@ export async function refreshWorkspacePolicyFile(workspaceId: string): Promise<b
   const isEmbedded = (hardening.runtime as string) === "embedded"
   const baseline = isEmbedded ? embeddedSandboxBaseline(!bundle.network.allowSecureLocationAccess) : null
 
+  // r27：模板级策略项 + 防退出档位（与创建链路同语义：模板覆盖 > 全局默认；刷新不丢失）
+  let extraManaged: Record<string, unknown> | null = null
+  if (ws.templateId) {
+    const tpl = await db.browserTemplate.findFirst({ where: { id: ws.templateId, deletedAt: null }, select: { configJson: true } })
+    if (tpl) {
+      try {
+        const cfg = JSON.parse(tpl.configJson || "{}") as Record<string, unknown>
+        const pj = (cfg.policyJson || null) as Record<string, unknown> | null
+        if (pj && validateExtraPolicies(pj).ok) extraManaged = { ...pj }
+      } catch {
+        /* 模板配置损坏 → 仅跳过模板项 */
+      }
+    }
+  }
+  const exitGuard = ((hardening.exitGuard as string) || await getConfig<string>("workspace.exitGuardDefault", "fullscreen"))
+
   const path = await writeNetworkPolicyFile(`ws-${profileKey}`, {
     policy: bundle.network,
     gatewayIp,
@@ -64,6 +82,7 @@ export async function refreshWorkspacePolicyFile(workspaceId: string): Promise<b
     filePolicy: bundle.file,
     crxManagedPolicy: crxManaged,
     extraBaselineBlock: baseline,
+    extraManagedPolicy: { ...(extraManaged || null), ...exitGuardManagedPolicy(exitGuard) },
   }).catch(() => null)
   // r26：防篡改哈希登记（后续 policy_tamper_check 周期对账）
   if (path) await rememberPolicyFileHash(workspaceId, path).catch(() => null)

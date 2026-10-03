@@ -81,6 +81,7 @@ RESTARTS=0
 XVFB_PID=""
 VNC_PID=""
 CHROME_PID=""
+REC_PID=""
 CLEANED=0
 
 cleanup() {
@@ -90,6 +91,13 @@ cleanup() {
   [ -n "$IME_PID" ] && kill "$IME_PID" 2>/dev/null
   # fcitx5 守护双保险：按沙箱专用用户扫杀（root+独立用户形态；共享用户形态不扫，避免误伤其他沙箱）
   [ "$AM_ROOT" = "1" ] && [ -n "${DY_USER:-}" ] && pkill -TERM -u "$DY_USER" -x fcitx5 2>/dev/null
+  # r27：VNC 录像优雅收尾（SIGTERM → ffmpeg 写完 trailer 落盘；杀不死的再补 KILL）
+  if [ -n "${DY_RECORD_DIR:-}" ] && [ -n "${REC_PID:-}" ]; then
+    kill -TERM "$REC_PID" 2>/dev/null
+    i=0; while [ "$i" -lt 20 ] && kill -0 "$REC_PID" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+    kill -KILL "$REC_PID" 2>/dev/null
+  fi
+  pkill -TERM -f "${DY_RECORD_DIR:-/nonexistent-dy-rec}" 2>/dev/null
   [ -n "$CHROME_PID" ] && kill "$CHROME_PID" 2>/dev/null
   [ -n "$VNC_PID" ] && kill "$VNC_PID" 2>/dev/null
   [ -n "$XVFB_PID" ] && kill "$XVFB_PID" 2>/dev/null
@@ -161,8 +169,8 @@ apply_ime_prefs() {
 # Ubuntu 多用户方案：目录所有权交给沙箱专用用户；root 侧 supervisor.log/
 # state.json/chromium.log 由 root 写入（root 无视 DAC，不受 700 影响）。
 if [ "$AM_ROOT" = "1" ] && [ -n "${DY_USER:-}" ]; then
-  chown -R "$DY_USER" "${DY_PROFILE_DIR:-/nonexistent}" "${DY_DOWNLOADS_DIR:-/nonexistent}" "$HOME" "$LOG_DIR" 2>/dev/null
-  chmod 700 "${DY_PROFILE_DIR:-/nonexistent}" "$HOME" "$LOG_DIR" 2>/dev/null
+  chown -R "$DY_USER" "${DY_PROFILE_DIR:-/nonexistent}" "${DY_DOWNLOADS_DIR:-/nonexistent}" "${DY_RECORD_DIR:-/nonexistent}" "$HOME" "$LOG_DIR" 2>/dev/null
+  chmod 700 "${DY_PROFILE_DIR:-/nonexistent}" "${DY_RECORD_DIR:-/nonexistent}" "$HOME" "$LOG_DIR" 2>/dev/null
 fi
 
 start_xvfb() {
@@ -213,6 +221,39 @@ start_vnc() {
 start_vnc
 log "x11vnc 监听 127.0.0.1:$RFB_PORT"
 
+# ---- 2.5 r27：VNC 会话录像（ffmpeg x11grab 分段落盘） ----
+# 策略四级链命中后由平台下发 DY_RECORD_DIR；未下发 = 该沙箱不开录。
+# 分段：-f segment -segment_time N（每段独立可回放，降低单文件损坏风险）。
+# 寿命：DY_RECORD_MAXSEC > 0 时 -t 限时；主循环监控保活。
+REC_PID=""
+REC_ENABLED=0
+start_recording() {
+  [ -z "${DY_RECORD_DIR:-}" ] && return 0
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    log "WARN: ffmpeg 缺失 → 本沙箱录像不可用（镜像需含 ffmpeg）"
+    return 0
+  fi
+  [ -d "$DY_RECORD_DIR" ] || mkdir -p "$DY_RECORD_DIR" 2>/dev/null || { log "WARN: 录像目录不可创建 → 跳过录像"; return 0; }
+  local REC_FPS="${DY_RECORD_FPS:-12}"
+  local REC_SEGSEC="${DY_RECORD_SEGSEC:-900}"
+  local REC_SIZE="${DY_RECORD_SIZE:-1280x800}"
+  # 续录：从既有分段数起步（ffmpeg 崩溃重建不覆盖已落盘分段）
+  local REC_START=$(ls "$DY_RECORD_DIR"/seg-*.mp4 2>/dev/null | wc -l)
+  local REC_ARGS="-nostats -loglevel error -f x11grab -draw_mouse 1 -framerate $REC_FPS -video_size $REC_SIZE -i :$DISPLAY_NUM"
+  REC_ARGS="$REC_ARGS -c:v libx264 -preset veryfast -crf 30 -pix_fmt yuv420p -g $(( REC_FPS * 3 )) -movflags +frag_keyframe+empty_moov"
+  if [ "${DY_RECORD_MAXSEC:-0}" -gt 0 ] 2>/dev/null; then
+    REC_ARGS="$REC_ARGS -t ${DY_RECORD_MAXSEC}"
+  fi
+  REC_ARGS="$REC_ARGS -f segment -segment_time $REC_SEGSEC -segment_start_number $REC_START -reset_timestamps 1"
+  if [ ! -e "$LOG_DIR/ffmpeg.log" ]; then : >"$LOG_DIR/ffmpeg.log" 2>/dev/null || true; fi
+  [ "$AM_ROOT" = "1" ] && [ -n "${DY_USER:-}" ] && chown "$DY_USER" "$LOG_DIR/ffmpeg.log" 2>/dev/null
+  bg_user ffmpeg $REC_ARGS "$DY_RECORD_DIR/seg-%03d.mp4" >/dev/null 2>>"$LOG_DIR/ffmpeg.log"
+  REC_PID=$!
+  REC_ENABLED=1
+  log "VNC 录像已启动（fps=$REC_FPS 分段=${REC_SEGSEC}s 分辨率=$REC_SIZE → $DY_RECORD_DIR）"
+}
+start_recording
+
   if [ -n "${DY_POLICY_FILE:-}" ] && [ -f "${DY_POLICY_FILE:-}" ]; then
     log "每沙箱 Chromium 托管策略已注入（unshare 私有挂载命名空间）"
   fi
@@ -253,6 +294,11 @@ while :; do
   if [ "$IME_ENABLED" = "1" ] && ! kill -0 "${IME_PID:-0}" 2>/dev/null; then
     log "fcitx5 意外退出，重建输入法守护"
     start_ime
+  fi
+  # r27：录像进程意外退出（OOM/磁盘异常）→ 重建录像（分段续录，不丢已落盘部分）
+  if [ "$REC_ENABLED" = "1" ] && ! kill -0 "${REC_PID:-0}" 2>/dev/null; then
+    log "ffmpeg 录像意外退出，重建录像进程（分段续录）"
+    start_recording
   fi
   # setpriv/unshare/sh/prlimit 全链 exec —— $! 即 chromium 主进程 PID
   if [ "$UNSHARE_OK" = "1" ]; then

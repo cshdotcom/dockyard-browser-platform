@@ -694,6 +694,20 @@ export const TASKS: Record<string, (log: (m: string) => void, params?: unknown) 
     return { itemsProcessed: r.scanned, summary: `扫描 ${r.scanned} 个活跃沙箱，平均基线分 ${r.averageScore ?? "-"}，低分 ${r.lowScore} 个${r.lowScore > 0 ? "（已告警）" : ""}` }
   },
 
+  // 25. r27：VNC 录像分段扫描（新段入库 / 活跃段收尾 / 死沙箱会话自动终结）
+  async recording_scan(log) {
+    const { scanAllLiveRecordings } = await import("@/lib/recording")
+    const r = await scanAllLiveRecordings(log)
+    return { itemsProcessed: r.sessions, summary: `同步 ${r.sessions} 个录像会话：新段 ${r.created}、收尾 ${r.finalized}、自动终结 ${r.terminated}` }
+  },
+
+  // 26. r27：VNC 录像治理（保留期到期入回收站 + 用户配额超额最旧优先归档）
+  async recording_retention(log) {
+    const { enforceRecordingRetention } = await import("@/lib/recording")
+    const r = await enforceRecordingRetention(log)
+    return { itemsProcessed: r.expired + r.quotaEvicted, summary: `保留期到期 ${r.expired} 段、配额治理 ${r.quotaEvicted} 段（覆盖 ${r.usersChecked} 个用户）` }
+  },
+
   // ---- r24-a：参数化自定义执行体（执行内容完全放开；paramsJson 携带参数）----
   // 注：custom_shell 顶层调用由 runTask 直连（携带任务自身 timeoutSec）；
   // 此注册表项用于类型清单展示 + 任务链步骤内调用（步骤超时兜底 300s）

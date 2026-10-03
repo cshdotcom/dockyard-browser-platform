@@ -284,7 +284,7 @@ export function RecycleTable(props: Props) {
         filters={[
           {
             key: "resourceType", placeholder: "资源类型",
-            options: ["WORKSPACE", "SINGBOX", "PROXY_NODE", "BROWSER_NODE", "HOST_NODE", "TEMPLATE", "SNAPSHOT", "FILE", "SCRIPT", "API_TOKEN", "GROUP"].map((v) => ({ label: v, value: v })),
+            options: ["WORKSPACE", "SINGBOX", "PROXY_NODE", "BROWSER_NODE", "HOST_NODE", "TEMPLATE", "SNAPSHOT", "FILE", "SCRIPT", "API_TOKEN", "GROUP", "RECORDING"].map((v) => ({ label: v, value: v })),
           },
           {
             key: "deletedByType", placeholder: "删除来源",

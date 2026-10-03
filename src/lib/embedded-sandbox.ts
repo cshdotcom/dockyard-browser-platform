@@ -476,6 +476,9 @@ export interface EmbeddedSandboxSpec {
   clipboardEnabled?: boolean // r24-d：剪贴板策略（false=x11vnc -nosel -noclipboard，X 剪贴板不透传 VNC 端）
   workspaceUuid?: string | null // r24-e：工作区 UUID（沙箱专属 Linux 用户命名）
   ownerUsername?: string | null // r24-e：所有者用户名（沙箱专属 Linux 用户命名）
+  // —— r27 ——
+  exitGuard?: "normal" | "fullscreen" | "kiosk" // 防退出档位（模板/全局默认解析）
+  recording?: { enabled: boolean; fps: number; segmentSec: number; maxSec: number } // 会话录像（策略四级链命中后由业务层解析传入）
 }
 
 export interface EmbeddedSandboxHandle {
@@ -487,6 +490,7 @@ export interface EmbeddedSandboxHandle {
   linuxUser: string | null
   simulated: false
   hardening: BrowserHardeningInfo
+  recording?: { recordDir: string; fps: number; segmentSec: number; maxSec: number } | null // r27：录像下发参数（业务层据此注册会话）
 }
 
 export function embeddedHardeningSummary(spec: EmbeddedSandboxSpec, linuxUser: string | null): BrowserHardeningInfo {
@@ -519,6 +523,9 @@ export function embeddedHardeningSummary(spec: EmbeddedSandboxSpec, linuxUser: s
     mountNamespacePolicy: !!spec.policyFile, // unshare -Urm 私有挂载命名空间策略注入
     vncLoopbackOnly: true,
     perSandboxDisplay: true,
+    // —— r27 快照 ——
+    recordingEnabled: !!spec.recording?.enabled,
+    exitGuard: spec.exitGuard || "normal",
   } as BrowserHardeningInfo
 }
 
@@ -526,6 +533,22 @@ function resolutionArgs(res: string): string[] {
   const m = /^(\d{3,5})x(\d{3,5})$/.exec(res || "")
   if (!m) return ["--window-size=1280,800"]
   return ["--window-position=0,0", `--window-size=${m[1]},${m[2]}`]
+}
+
+// r27-e：防退出档位 → chromium 启动参数（无 WM 环境，标题栏关闭/最小化按钮本就不存在）
+//   normal    —— 现状（ExitWarningBubble 保持禁用，行为与历史一致）
+//   fullscreen —— 全屏守卫：--start-fullscreen + 错误弹窗抑制 + Ctrl+Q 长按确认
+//   kiosk     —— 信息亭最强档：--kiosk（无地址栏/无菜单 → 「更多菜单→退出」入口物理不存在）
+// 任何档位下浏览器进程退出都由 supervisor 死循环 1s 同 Profile 拉起（终极兑底）
+function exitGuardArgs(guard?: string): { args: string; features: string } {
+  const g = guard || "normal"
+  if (g === "kiosk") {
+    return { args: "--kiosk --noerrdialogs --disable-infobars", features: "--enable-features=ExitWarningBubble" }
+  }
+  if (g === "fullscreen") {
+    return { args: "--start-fullscreen --noerrdialogs", features: "--enable-features=ExitWarningBubble" }
+  }
+  return { args: "", features: "--disable-features=ExitWarningBubble" }
 }
 
 function launchScriptPath(): string {
@@ -607,6 +630,7 @@ function handleFromEntry(entry: EmbeddedSandboxEntry, spec: EmbeddedSandboxSpec)
     linuxUser: entry.linuxUser,
     simulated: false as const,
     hardening: embeddedHardeningSummary(spec, entry.linuxUser),
+    recording: null, // 复用句柄（幂等）：录像由首次创建会话注册，不重复建档
   }
 }
 
@@ -720,6 +744,22 @@ async function attemptCreateEmbeddedSandbox(spec: EmbeddedSandboxSpec, attempt: 
     ? `exec prlimit --nproc=${pidsLimit} --`
     : `# 同用户模式：跳过 prlimit --nproc（按 UID 计数会把平台共享进程计入上限）\n# 资源面由内存上限（js-flags max-old-space-size）兜底\nexec`
   const proxyArgs = spec.proxyUrl ? `--proxy-server=${spec.proxyUrl}` : ""
+  // r27-e：防退出档位参数（fullscreen/kiosk 档 ExitWarningBubble 保持启用 → Ctrl+Q 需长按确认）
+  const guard = exitGuardArgs(spec.exitGuard)
+  // r27：录像参数（策略命中 → 进程树内 ffmpeg 分段录像；目录随 spec 预建并下发）
+  const recordDir = spec.recording?.enabled
+    ? join(storage, "recordings", spec.userId, id)
+    : null
+  if (recordDir) await mkdir(recordDir, { recursive: true }).catch(() => null)
+  const recordEnv = spec.recording?.enabled
+    ? {
+        DY_RECORD_DIR: recordDir!,
+        DY_RECORD_FPS: String(spec.recording.fps),
+        DY_RECORD_SEGSEC: String(spec.recording.segmentSec),
+        DY_RECORD_MAXSEC: String(spec.recording.maxSec || 0),
+        DY_RECORD_SIZE: resolution,
+      }
+    : {}
   // r24-c：输入法环境（XIM/fcitx 通道；fcitx5 由监督脚本拉起，作用域=本沙箱显示）
   const imeEnv = `export XMODIFIERS="@im=fcitx"
 export GTK_IM_MODULE="fcitx"
@@ -741,10 +781,10 @@ ${nprocExec} "${bins.chrome}" \\
   --user-data-dir="\${DY_PROFILE_DIR}" \\
   --no-sandbox --disable-gpu --no-first-run \\
   --disable-session-crashed-bubble --hide-crash-restore-bubble \\
-  --restore-last-session ${resolutionArgs(resolution).join(" ")} \\
+  --restore-last-session ${resolutionArgs(resolution).join(" ")} ${guard.args} \\
   --remote-debugging-address=127.0.0.1 --remote-debugging-port=${cdpPort} \\
   --download.default_directory="\${DY_DOWNLOADS_DIR}" \\
-  --disable-features=ExitWarningBubble --disable-dev-shm-usage \\
+  ${guard.features} --disable-dev-shm-usage \\
   --js-flags=--max-old-space-size=${jsHeapMb} \\
   --lang="\${DY_LANG:-zh-CN}" \\
   ${proxyArgs} \\
@@ -791,6 +831,9 @@ ${nprocExec} "${bins.chrome}" \\
       DY_KB_LAYOUT: spec.kbLayout || "",
       // r24-d：剪贴板策略（false → x11vnc 关闭 X 剪贴板向 VNC 端透传）
       DY_CLIPBOARD: spec.clipboardEnabled === false ? "0" : "1",
+      // r27：录像下发（进程树内 ffmpeg 分段落盘）+ 防退出档位
+      ...(recordEnv as Record<string, string>),
+      DY_EXIT_GUARD: spec.exitGuard || "normal",
     },
     detached: true, // 脱离平台进程组：平台重启不牵连沙箱（state.json 重新收养）
     stdio: ["ignore", fs.openSync(join(logDir, "supervisor.log"), "a"), fs.openSync(join(logDir, "supervisor.log"), "a")],
@@ -846,6 +889,9 @@ ${nprocExec} "${bins.chrome}" \\
     linuxUser,
     simulated: false as const,
     hardening: embeddedHardeningSummary(spec, linuxUser),
+    recording: recordDir && spec.recording?.enabled
+      ? { recordDir, fps: spec.recording.fps, segmentSec: spec.recording.segmentSec, maxSec: spec.recording.maxSec }
+      : null,
   }
 }
 

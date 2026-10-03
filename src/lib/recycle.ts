@@ -115,6 +115,7 @@ export async function restoreFromRecycle(recycleId: string, operator: { userId: 
     BROWSER_NODE: "browserNode",
     HOST_NODE: "hostNode",
     GROUP: "group",
+    RECORDING: "vncRecording",
   }
   const modelName = tableMap[entry.resourceType]
   if (!modelName) return { ok: false, message: "未知资源类型" }
@@ -126,8 +127,8 @@ export async function restoreFromRecycle(recycleId: string, operator: { userId: 
     const model = (db as unknown as Record<string, { findUnique: (a: { where: { id: string } }) => Promise<Record<string, unknown> | null>; update: (a: { where: { id: string }; data: Record<string, unknown> }) => Promise<unknown>; create: (a: { data: Record<string, unknown> }) => Promise<unknown> }>)[modelName]
     const existing = await model.findUnique({ where: { id: entry.resourceId } })
     if (existing) {
-      // 记录仍存在（软删除状态）→ 更新恢复
-      await model.update({ where: { id: entry.resourceId }, data: { deletedAt: null } })
+      // 记录仍存在（软删除状态）→ 更新恢复（r27 RECORDING：同时清物理清除计划）
+      await model.update({ where: { id: entry.resourceId }, data: entry.resourceType === "RECORDING" ? { deletedAt: null, purgeAt: null, restoredAt: new Date() } : { deletedAt: null } })
     } else {
       // 记录已被物理清理 → 用快照原UUID重建
       await model.create({ data: restoreData })
@@ -172,6 +173,14 @@ export async function purgeFromRecycle(recycleId: string, operator: { userId: st
     BROWSER_NODE: "browserNode",
     HOST_NODE: "hostNode",
     GROUP: "group",
+    RECORDING: "vncRecording",
+  }
+  // r27：录像类型 → 文件 + 行 + 目录三级联清除（审计/回收记录随行清理）
+  if (entry.resourceType === "RECORDING") {
+    try {
+      const { purgeRecordingRow } = await import("./recording")
+      await purgeRecordingRow(entry.resourceId, { operatorUserId: operator.userId, operatorName: operator.username, fromRecycle: true })
+    } catch { /* 行已不存在 → 仅清回收记录 */ }
   }
   const modelName = tableMap[entry.resourceType]
   if (modelName) {

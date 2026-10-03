@@ -7,6 +7,7 @@ import {
   LayoutDashboard, Globe, FileCode2, KeyRound, ShieldCheck, Megaphone,
   Users, FolderTree, ScrollText, Settings2, Timer, FolderOpen, DatabaseBackup,
   Server, Network, Recycle, ShieldAlert, MessageSquareCode, SlidersHorizontal, Puzzle, ShieldBan,
+  Video, ToggleLeft,
 } from "lucide-react"
 
 // 主应用布局（RSC）：深度会话校验 + 强制2FA策略拦截 + 权限菜单过滤
@@ -37,6 +38,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         { key: "workspaces", label: "浏览器工作区", href: "/workspaces", icon: <Globe className="h-4 w-4" /> },
         { key: "templates", label: "会话模板", href: "/templates", icon: <FileCode2 className="h-4 w-4" /> },
         { key: "announcements", label: "平台公告", href: "/announcements", icon: <Megaphone className="h-4 w-4" /> },
+        { key: "my-recordings", label: "我的录像", href: "/recordings", icon: <Video className="h-4 w-4" /> },
       ],
     },
     {
@@ -61,7 +63,9 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         { key: "a-policies", label: "策略下发中心", href: "/admin/policies", icon: <SlidersHorizontal className="h-4 w-4" /> },
         { key: "a-crx", label: "CRX 插件管控", href: "/admin/crx", icon: <Puzzle className="h-4 w-4" /> },
         { key: "a-sessions", label: "在线会话管控", href: "/admin/sessions", icon: <KeyRound className="h-4 w-4" /> },
+        { key: "a-recordings", label: "录像管理", href: "/admin/recordings", icon: <Video className="h-4 w-4" /> },
         { key: "a-workspaces", label: "工作区管控", href: "/admin/workspaces", icon: <Globe className="h-4 w-4" /> },
+        { key: "a-feature-flags", label: "功能开关", href: "/admin/feature-flags", icon: <ToggleLeft className="h-4 w-4" /> },
       ],
     },
     {

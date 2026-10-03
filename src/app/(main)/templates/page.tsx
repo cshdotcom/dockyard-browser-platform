@@ -99,6 +99,8 @@ export default async function TemplatesPage({
         timezone: config.timezone || "",
         locale: config.locale || "",
         variables: config.variables || {},
+        exitGuard: (config as { exitGuard?: "normal" | "fullscreen" | "kiosk" }).exitGuard,
+        policyJson: (config as { policyJson?: Record<string, unknown> }).policyJson,
       },
     }
   })

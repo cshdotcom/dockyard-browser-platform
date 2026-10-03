@@ -30,6 +30,14 @@ import type { EndpointPolicy } from "./endpoint-policy"
 import { expandEndpointPattern } from "./endpoint-policy"
 import { filePolicyManagedPrefs, fileSchemeBlockPatterns, type FilePolicy } from "./file-policy"
 
+// 安全关键键（网络/代理/CRX/WebRTC）：模板级 extraManagedPolicy 不得覆盖
+//（目录层 validateExtraPolicies 已拒收；此处双保险跳过）
+const SECURITY_OWNED_POLICY_KEYS = new Set([
+  "URLBlocklist", "URLAllowlist", "ProxyMode", "ProxyServer", "ProxyBypassList",
+  "ExtensionInstallForcelist", "ExtensionInstallBlocklist", "ExtensionSettings",
+  "WebRtcIPHandling", "AllowWebRtcUdpPorts",
+])
+
 export interface NetworkPolicy {
   allowInternalNetwork: boolean
   allowSecureLocationAccess: boolean
@@ -217,6 +225,9 @@ export interface ChromiumPolicyOptions {
   crxManagedPolicy?: Record<string, unknown> | null // CRX 扩展管控策略（五级合并后的 Managed Preferences）
   filePolicy?: import("./file-policy").FilePolicy | null // 文件访问限制策略（四层合并后；缺省按系统默认：下载/上传允许、file:// 禁）
   extraBaselineBlock?: string[] | null // 单容器内嵌基线（deny-wins：跨沙箱 CDP/RFB 段 + 平台回环端口；不可被任何作用域豁免）
+  // r27：模板级 Chromium 企业策略目录注入（已过 validateExtraPolicies 校验）
+  // 合并顺序：此处先注入 → 文件/CRX/代理/WebRTC 安全层后注入 → 安全层永不被模板覆盖
+  extraManagedPolicy?: Record<string, unknown> | null
 }
 
 export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<string, unknown> {
@@ -288,6 +299,13 @@ export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<
     URLBlocklist: blocklist,
     // 浏览器保持原汁原味：不注入任何 UDP/QUIC/WebRTC 全局限制（浏览器行为与原生一致）
     // 零 UDP 约束仅适用于平台后台链路（HTTP/WS/RFB/SMTP/Docker API 全 TCP）
+  }
+  // —— r27：模板级企业策略目录注入（安全层前 → 可被安全层覆写，不可反向覆盖）——
+  if (opts.extraManagedPolicy) {
+    for (const [k, v] of Object.entries(opts.extraManagedPolicy)) {
+      if (SECURITY_OWNED_POLICY_KEYS.has(k)) continue // 双保险：目录层已校验拒收
+      managed[k] = v
+    }
   }
   // —— 文件访问限制策略（四层：单沙箱>用户>组>全局；缺省按系统默认）——
   const fp: FilePolicy = opts.filePolicy ?? {

@@ -23,12 +23,19 @@ import {
   importTemplatesAction,
 } from "@/server/actions/templates"
 import { TemplateVersionHistoryDialog } from "./version-history-dialog"
+import { validateExtraPolicies, CHROMIUM_POLICY_CATALOG } from "@/lib/chromium-policies"
+import { cn } from "@/lib/utils"
+
+// 目录键提示（按分类压缩展示）
+const POLICY_KEY_HINT = [...new Set(CHROMIUM_POLICY_CATALOG.map((p) => p.key))].slice(0, 12).join(" / ") + " 等36项"
 
 export interface TemplateConfig {
   ua: string
   timezone: string
   locale: string
   variables: Record<string, string>
+  exitGuard?: "normal" | "fullscreen" | "kiosk" // r27：防退出档位
+  policyJson?: Record<string, unknown> // r27：Chromium 企业策略项（目录校验）
 }
 
 export interface TemplateRow {
@@ -95,6 +102,9 @@ export function TemplatesTable({ rows, total, page, pageSize, keyword, sortField
   const [fTimezone, setFTimezone] = React.useState("Asia/Shanghai")
   const [fLocale, setFLocale] = React.useState("zh-CN")
   const [fVariables, setFVariables] = React.useState("{}")
+  // r27：防退出档位 + Chromium 策略项
+  const [fExitGuard, setFExitGuard] = React.useState<"inherit" | "normal" | "fullscreen" | "kiosk">("inherit")
+  const [fPolicies, setFPolicies] = React.useState("")
 
   const pushQuery = (patch: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString())
@@ -136,6 +146,8 @@ export function TemplatesTable({ rows, total, page, pageSize, keyword, sortField
     setFTimezone(row.config.timezone || "Asia/Shanghai")
     setFLocale(row.config.locale || "zh-CN")
     setFVariables(JSON.stringify(row.config.variables || {}, null, 2))
+    setFExitGuard(row.config.exitGuard || "inherit")
+    setFPolicies(row.config.policyJson ? JSON.stringify(row.config.policyJson, null, 2) : "")
     setFormOpen(true)
   }
 
@@ -160,6 +172,23 @@ export function TemplatesTable({ rows, total, page, pageSize, keyword, sortField
       return
     }
     const tags = fTags.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean).slice(0, 10)
+    // r27：策略项 JSON 目录校验（未知键/类型错误直接拒绝提交）
+    let policyJson: Record<string, unknown> | undefined
+    if (fPolicies.trim()) {
+      try {
+        const parsed = JSON.parse(fPolicies)
+        if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) throw new Error("not object")
+        const v = validateExtraPolicies(parsed as Record<string, unknown>)
+        if (!v.ok) {
+          toast.error(`策略项校验未过：\n${v.errors.join("\n")}`)
+          return
+        }
+        policyJson = parsed as Record<string, unknown>
+      } catch {
+        toast.error("Chromium 策略项 JSON 格式非法")
+        return
+      }
+    }
 
     setSubmitting(true)
     try {
@@ -170,7 +199,14 @@ export function TemplatesTable({ rows, total, page, pageSize, keyword, sortField
         scope: fScope,
         groupId: fScope === "GROUP" ? fGroupId || undefined : null,
         tags,
-        config: { ua: fUa, timezone: fTimezone.trim(), locale: fLocale.trim(), variables },
+        config: {
+          ua: fUa,
+          timezone: fTimezone.trim(),
+          locale: fLocale.trim(),
+          variables,
+          ...(fExitGuard !== "inherit" ? { exitGuard: fExitGuard } : {}),
+          ...(policyJson && Object.keys(policyJson).length > 0 ? { policyJson } : {}),
+        },
       })
       if (res.code !== 0) {
         toast.error(res.msg)
@@ -503,6 +539,51 @@ export function TemplatesTable({ rows, total, page, pageSize, keyword, sortField
                   rows={5}
                   className="font-mono text-xs"
                 />
+              </div>
+
+              {/* ---- r27-e：防退出档位 ---- */}
+              <div className="space-y-1.5">
+                <Label>防退出档位（隐藏关闭/最小化按钮与菜单退出）</Label>
+                <div className="grid gap-2 grid-cols-1 sm:grid-cols-2">
+                  {([
+                    { v: "inherit", label: "继承全局默认", desc: "跟随 workspace.exitGuardDefault 配置" },
+                    { v: "normal", label: "标准", desc: "窗口行为与历史一致（保留默认）" },
+                    { v: "fullscreen", label: "全屏守卫（推荐）", desc: "--start-fullscreen + 错误弹窗抑制 + Ctrl+Q 长按确认 + 账号/无痕逃逸封堵" },
+                    { v: "kiosk", label: "信息亭（最强）", desc: "--kiosk：无地址栏/无三点菜单 →「退出」入口物理不存在" },
+                  ] as const).map((opt) => (
+                    <button
+                      key={opt.v}
+                      type="button"
+                      onClick={() => setFExitGuard(opt.v)}
+                      className={cn(
+                        "rounded-lg border p-2.5 text-left transition-colors",
+                        fExitGuard === opt.v ? "border-teal-500 bg-teal-50 dark:bg-teal-950/30" : "hover:bg-muted/50",
+                      )}
+                    >
+                      <p className="text-xs font-medium">{opt.label}</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">{opt.desc}</p>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  说明：沙箱无窗口管理器 → 标题栏关闭/最小化按钮本就不存在；任何档位下浏览器退出都会被监督循环 1 秒内同 Profile 拉起
+                </p>
+              </div>
+
+              {/* ---- r27-d：Chromium 企业策略项 ---- */}
+              <div className="space-y-1.5">
+                <Label htmlFor="tpl-policies">Chromium 企业策略项（JSON，36 项目录校验）</Label>
+                <Textarea
+                  id="tpl-policies"
+                  value={fPolicies}
+                  onChange={(e) => setFPolicies(e.target.value)}
+                  placeholder={'{\n  "MetricsReportingEnabled": false,\n  "SafeBrowsingProtectionLevel": 2,\n  "IncognitoModeAvailability": 1\n}'}
+                  rows={5}
+                  className="font-mono text-xs"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  可用键（按分类）：{POLICY_KEY_HINT}（安全关键键如 URLBlocklist/ProxyMode/ExtensionSettings 归平台安全层，模板不可覆盖）
+                </p>
               </div>
             </div>
           </div>

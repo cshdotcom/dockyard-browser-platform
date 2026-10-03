@@ -13,7 +13,7 @@ import { toast } from "sonner"
 import {
   Loader2, MoreHorizontal, Square, RotateCw, Trash2, Flame, Unplug, Timer, UserRoundCog, Anchor,
   AlertTriangle, X, Columns3, ShieldCheck, ShieldX, Container, History, ArrowRightLeft, Share2,
-  UsersRound, Search, Snowflake, Sunrise,
+  UsersRound, Search, Snowflake, Sunrise, Video,
 } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
@@ -26,13 +26,14 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { cn } from "@/lib/utils"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import {
   forceStopWorkspaceAction, forceRestartWorkspaceAction, forceRecycleWorkspaceAction, forcePurgeWorkspaceAction,
   forceDisconnectVncAction, forceUpdateTtlAction, transferWorkspaceAction, batchWorkspaceAction, setWorkspaceVncLimitAction,
   freezeWorkspaceAction, unfreezeWorkspaceAction,
 } from "@/server/actions/admin-workspaces"
-import { adminForceUpdateWorkspaceTimersAction } from "@/server/actions/workspaces"
+import { adminForceUpdateWorkspaceTimersAction, updateWorkspaceAction } from "@/server/actions/workspaces"
 
 export interface AdminWorkspaceRow {
   id: string
@@ -50,6 +51,8 @@ export interface AdminWorkspaceRow {
   singboxName: string
   browserNodeName: string
   vncSessionMaxMinutes: number | null // 沙箱级 VNC 连接总时长上限（null=继承，0=不限）
+  recordingOverride: string | null // r27：录像沙箱级覆盖（"on"/"off"/null=继承）
+  recordingEnabledNow: boolean | null // r27：当前解析结果（详情快照；null=未知/停止态）
   ttlMinutes: number
   idleTimeoutMinutes: number
   cdpCallCount: number
@@ -210,6 +213,21 @@ export function WorkspacesTable(props: Props) {
 
   // ---- r24-h：冻结弹窗状态 ----
   const [freezeTarget, setFreezeTarget] = React.useState<AdminWorkspaceRow | null>(null)
+  // r27：录像沙箱级覆盖三态弹窗
+  const [recTarget, setRecTarget] = React.useState<AdminWorkspaceRow | null>(null)
+  const [recChoice, setRecChoice] = React.useState<"on" | "off" | "inherit">("inherit")
+  const applyRecording = async () => {
+    if (!recTarget) return
+    try {
+      const res = await updateWorkspaceAction({ id: recTarget.id, recordingOverride: recChoice })
+      if (res.code !== 0) throw new Error(res.msg || "保存失败")
+      toast.success(`录像策略已更新：${recChoice === "inherit" ? "继承（用户>组>全局）" : recChoice === "on" ? "本沙箱强制开录" : "本沙箱强制不录"}（下次启动生效）`)
+      setRecTarget(null)
+      router.refresh()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "保存失败")
+    }
+  }
   const [freezeForm, setFreezeForm] = React.useState({ reason: "", autoUnfreeze: false, expireLocal: "" })
   const [freezing, setFreezing] = React.useState(false)
   const submitFreeze = async () => {
@@ -780,6 +798,10 @@ export function WorkspacesTable(props: Props) {
                   <DropdownMenuItem onClick={() => setTtlTarget(row)}>
                     <Timer className="h-4 w-4 mr-2" /> 强制修改 TTL
                   </DropdownMenuItem>
+                  {/* r27：录像沙箱级覆盖三态（下次启动生效） */}
+                  <DropdownMenuItem onClick={() => { setRecTarget(row); setRecChoice((row.recordingOverride as "on" | "off" | null) || "inherit") }}>
+                    <Video className="h-4 w-4 mr-2" /> 录像策略（开/关/继承）
+                  </DropdownMenuItem>
                   {row.hasNovncSession && (
                     <DropdownMenuItem onClick={() => setVncLimitTarget(row)}>
                       <Anchor className="h-4 w-4 mr-2" /> VNC 会话时长上限
@@ -845,6 +867,47 @@ export function WorkspacesTable(props: Props) {
       />
 
       {/* ---- r24-h：单行离线冻结封存弹窗 ---- */}
+      {/* ---- r27：录像覆盖三态弹窗 ---- */}
+      <Dialog open={!!recTarget} onOpenChange={(v) => !v && setRecTarget(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Video className="h-4 w-4 text-teal-600" />
+              录像策略 · {recTarget?.name}
+            </DialogTitle>
+            <DialogDescription>
+              沙箱级覆盖最高优先（高于用户/用户组/全局默认）；下次启动生效
+              {recTarget?.recordingEnabledNow != null && (
+                <> · 当前解析：{recTarget.recordingEnabledNow ? "开录" : "不录"}</>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            {([
+              { v: "on", label: "强制开录", desc: "本沙箱无论上层策略如何，一律录制" },
+              { v: "off", label: "强制不录", desc: "本沙箱无论上层策略如何，一律不录" },
+              { v: "inherit", label: "继承上层", desc: "按 用户 > 用户组 > 全局默认 四级链解析" },
+            ] as const).map((opt) => (
+              <button
+                key={opt.v}
+                onClick={() => setRecChoice(opt.v)}
+                className={cn(
+                  "rounded-lg border p-3 text-left transition-colors",
+                  recChoice === opt.v ? "border-teal-500 bg-teal-50 dark:bg-teal-950/30" : "hover:bg-muted/50",
+                )}
+              >
+                <p className="text-sm font-medium">{opt.label}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{opt.desc}</p>
+              </button>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRecTarget(null)}>取消</Button>
+            <Button onClick={applyRecording}>保存</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={!!freezeTarget} onOpenChange={(v) => !freezing && setFreezeTarget(v ? freezeTarget : null)}>
         <DialogContent className="max-w-md">
           <DialogHeader>

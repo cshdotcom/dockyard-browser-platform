@@ -15,12 +15,16 @@ import { moveToRecycle } from "@/lib/recycle"
 import { diffTemplateConfig, isCrxRelatedField, parseTemplateConfig, fmtTemplateVal, type TemplateVersionDiffItem } from "@/lib/template-diff"
 import { trackBehavior } from "@/lib/risk"
 import { bizError, ErrorCode } from "@/lib/errors"
+import { validateExtraPolicies } from "@/lib/chromium-policies"
 
 const templateConfigSchema = z.object({
   ua: z.string().max(512).optional().default(""),
   timezone: z.string().max(64).optional().default(""),
   locale: z.string().max(32).optional().default(""),
   variables: z.record(z.string(), z.string()).optional().nullable(),
+  // r27：防退出档位（exitGuard）+ Chromium 企业策略项（policyJson，目录校验）
+  exitGuard: z.enum(["normal", "fullscreen", "kiosk"]).optional(),
+  policyJson: z.record(z.string(), z.unknown()).optional().nullable(),
 })
 
 const templateInputSchema = z.object({
@@ -38,14 +42,23 @@ interface TemplateConfig {
   timezone?: string
   locale?: string
   variables?: Record<string, string> | null
+  exitGuard?: "normal" | "fullscreen" | "kiosk"
+  policyJson?: Record<string, unknown> | null
 }
 
 function buildConfigJson(config: TemplateConfig): string {
+  // r27：策略项目录校验（未知键/类型错误/安全键 → 拒绝入库）
+  if (config.policyJson && Object.keys(config.policyJson).length > 0) {
+    const v = validateExtraPolicies(config.policyJson)
+    if (!v.ok) throw bizError(ErrorCode.PARAM_ERROR, `策略项校验未过：${v.errors.join("；")}`)
+  }
   return JSON.stringify({
     ua: config.ua || "",
     timezone: config.timezone || "",
     locale: config.locale || "",
     variables: config.variables || {},
+    ...(config.exitGuard ? { exitGuard: config.exitGuard } : {}),
+    ...(config.policyJson && Object.keys(config.policyJson).length > 0 ? { policyJson: config.policyJson } : {}),
   })
 }
 

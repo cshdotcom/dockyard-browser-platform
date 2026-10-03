@@ -36,6 +36,7 @@ const PAGE_ENTRIES: SearchableFunction[] = [
   { id: "p-templates", title: "会话模板", desc: "预置规格（分辨率/代理/首页）快速创建沙箱", href: "/templates", group: "工作台", keywords: ["模板", "template", "规格", "预设"], roles: ALL },
   { id: "p-snapshots", title: "Profile 快照", desc: "浏览器资料归档：导出 / 恢复 / 过期管理", href: "/snapshots", group: "工作台", keywords: ["快照", "snapshot", "profile", "归档", "备份资料"], roles: ALL },
   { id: "p-announcements", title: "平台公告", desc: "平台通知与公告（弹窗/跑马灯/常驻）", href: "/announcements", group: "工作台", keywords: ["公告", "通知", "announcement", "notice"], roles: ALL },
+  { id: "p-my-recordings", title: "我的录像", desc: "我的工作区 VNC 会话录像：回放 / 下载（用户空间）", href: "/recordings", group: "工作台", keywords: ["我的录像", "录像", "回放", "录屏", "my recording", "会话录像", "播放"], roles: ALL },
 
   // 个人中心
   { id: "a-profile", title: "个人资料", desc: "头像 / 昵称 / 主题偏好 / 配额总览", href: "/account/profile", group: "个人中心", keywords: ["资料", "头像", "昵称", "主题", "偏好", "profile"], roles: ALL },
@@ -50,6 +51,8 @@ const PAGE_ENTRIES: SearchableFunction[] = [
   { id: "m-policies", title: "策略下发中心", desc: "按用户/组批量下发网络与访问策略 + 灰度 + 回滚", href: "/admin/policies", group: "管理后台", keywords: ["策略", "下发", "policy", "灰度", "批量下发", "访问控制"], roles: ADMIN_ROLES },
   { id: "m-crx", title: "CRX 插件管控", desc: "插件库 / 五级策略合并 / 安装状态 / 扩展审计", href: "/admin/crx", group: "管理后台", keywords: ["插件", "扩展", "crx", "chrome插件", "extension", "插件库", "扩展审计"], roles: ADMIN_ROLES },
   { id: "m-sessions", title: "在线会话管控", desc: "全部在线会话：查看 / 强制下线 / 批量管理", href: "/admin/sessions", group: "管理后台", keywords: ["在线", "会话管控", "online", "强制下线", "踢人"], roles: ADMIN_ROLES },
+  { id: "m-recordings", title: "录像管理", desc: "VNC 会话录像审计：回放 / 下载 / 取证备注 / 回收站", href: "/admin/recordings", group: "管理后台", keywords: ["录像", "录屏", "回放", "播放", "video", "recording", "会话录像", "审计录像", "取证"], roles: ADMIN_ROLES },
+  { id: "m-feature-flags", title: "功能开关", desc: "全平台功能型开关总览：一键启停 / 版本快照 / 审计", href: "/admin/feature-flags", group: "管理后台", keywords: ["功能开关", "开关", "feature", "flag", "启停", "禁用功能", "功能治理"], roles: ADMIN_ROLES },
   { id: "m-workspaces", title: "工作区管控", desc: "全部用户沙箱：运维操作 / 共享管控 / 冻结封存", href: "/admin/workspaces", group: "管理后台", keywords: ["沙箱管理", "工作区管控", "全部工作区", "admin workspace", "冻结", "封存"], roles: ADMIN_ROLES },
 
   // 平台运维
@@ -73,6 +76,8 @@ const PAGE_ENTRIES: SearchableFunction[] = [
 // ---- 高频设置项（人工补充同义词，深链到配置页定位）----
 const FEATURED_SETTINGS: SearchableFunction[] = [
   { id: "c-mail", title: "邮件通道（SMTP）", desc: "发件服务器 / 发件人 / 测试发送 / 预警邮件", href: "/admin/config?tab=MAIL", group: "设置项", keywords: ["邮件", "邮箱", "smtp", "发件", "email", "邮件服务器", "发邮件"], roles: ADMIN_ROLES },
+  { id: "c-recording", title: "VNC 会话录像开关", desc: "录像总开关 / 帧率 / 分段 / 保留期 / 配额 / 用户可见", href: "/admin/config?tab=GENERAL&key=vnc.recordingEnabled", group: "设置项", keywords: ["录像开关", "开启录像", "录屏", "帧率", "保留期", "录像配额", "回放开关", "recording"], roles: ADMIN_ROLES },
+  { id: "c-exitguard", title: "浏览器防退出档位", desc: "normal/fullscreen/kiosk 三档 + 关闭/最小化/菜单退出隐藏说明", href: "/admin/config?tab=GENERAL&key=workspace.exitGuardDefault", group: "设置项", keywords: ["防退出", "退出", "关闭按钮", "最小化", "kiosk", "信息亭", "全屏", "exitguard", "禁止退出"], roles: ADMIN_ROLES },
   { id: "c-alert", title: "预警中心配置", desc: "邮件预警 / CPU / 内存 / 磁盘水位阈值 / 九类功能预警", href: "/admin/config?tab=ALERT", group: "设置项", keywords: ["预警", "阈值", "告警配置", "水位", "邮件提醒", "alert"], roles: ADMIN_ROLES },
   { id: "c-security", title: "安全防护配置", desc: "IP 封禁阈值 / 强制 2FA / 注册开关 / 密码策略", href: "/admin/config?tab=SECURITY", group: "设置项", keywords: ["安全配置", "封禁配置", "2fa", "注册", "密码策略", "security"], roles: ADMIN_ROLES },
   { id: "c-clipboard", title: "剪贴板 VNC 透传开关", desc: "workspace.clipboardVncSync：关闭后沙箱剪贴板不向 VNC 端透传", href: "/admin/config?tab=GENERAL&key=workspace.clipboardVncSync", group: "设置项", keywords: ["剪贴板", "clipboard", "复制粘贴", "透传", "clipboardvncsync"], roles: ADMIN_ROLES },

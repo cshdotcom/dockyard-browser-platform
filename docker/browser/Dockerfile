@@ -26,6 +26,8 @@ RUN apt-get update -o Acquire::Retries=5 \
     x11-utils \
     procps \
     psmisc \
+    # r27：VNC 会话录像（ffmpeg x11grab 分段编码；ffprobe 由 ffmpeg 包携带）
+    ffmpeg \
     fonts-noto-cjk \
     fonts-liberation \
     # r25-c 多语言字体全覆盖（与平台主镜像同标准：零乱码）

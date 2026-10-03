@@ -22,6 +22,7 @@ import {
 } from "./docker"
 import { externalBrowserEndpoint, probeExternalBrowser, externalBrowserHardening } from "./browser-endpoint"
 import { writeNetworkPolicyFile, sessionNetworkGateway, embeddedSandboxBaseline, type NetworkPolicy } from "../network-policy"
+import { exitGuardManagedPolicy } from "../chromium-policies"
 import { resolveWorkspaceCrxPolicy, buildCrxManagedPolicy } from "../crx-policy"
 import type { DomainPolicy } from "../domain-policy"
 import type { EndpointPolicy } from "../endpoint-policy"
@@ -36,6 +37,7 @@ export interface NovncSession {
   containerName?: string | null // 内嵌沙箱 id / 自托管容器名（防退出看门狗/进程级重启）
   hardening?: BrowserHardeningInfo | null // 隔离防护快照（落库展示）
   cdpUrl?: string | null // 内嵌形态：真实 CDP 端点（http://127.0.0.1:<port>/json）
+  recording?: { recordDir: string; fps: number; segmentSec: number; maxSec: number } | null // r27：录像已下发（业务层据此注册会话行）
 }
 
 // VNC 桥拨号目标（与 mini-services/vnc-bridge 票据 tgt 结构一致）
@@ -83,6 +85,10 @@ export interface NovncProvisionParams {
   clipboardEnabled?: boolean // VNC 侧 X 剪贴板透传开关（false → x11vnc -nosel -noclipboard）
   workspaceUuid?: string | null // 工作区 UUID（沙箱专属 Linux 用户 dyu-<uuid8>-<uname6> 命名）
   ownerUsername?: string | null // 所有者用户名（同上，参与命名）
+  // —— r27：会话录像 + 防退出 + 模板级额外 Chromium 托管策略 ——
+  recording?: { enabled: boolean; fps: number; segmentSec: number; maxSec: number } // 策略四级链解析结果（业务层传入）
+  exitGuard?: "normal" | "fullscreen" | "kiosk" // 防退出档位（模板 > 全局默认）
+  extraManagedPolicy?: Record<string, unknown> | null // 模板策略项目录注入（安全层优先，详见 network-policy 合并顺序）
 }
 
 export async function createNovncSession(params: NovncProvisionParams): Promise<NovncSession> {
@@ -133,6 +139,9 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       endpointPolicy: params.endpointPolicy || null,
       crxManagedPolicy: crxManaged,
       filePolicy: params.filePolicy || null,
+      // r27：模板级 Chromium 策略项（安全层后注入 → 网络/CRX/代理锁定永不裨覆盖）
+      // + 防退出档位附加策略（全档位附加账号/无痕逃逸路径封堵）
+      extraManagedPolicy: { ...(params.extraManagedPolicy || null), ...exitGuardManagedPolicy(params.exitGuard) },
       // deny-wins 基线：跨沙箱 CDP/RFB 端口段 + 平台回环端口（安全位置未授予时）
       extraBaselineBlock: embeddedSandboxBaseline(!policy.allowSecureLocationAccess),
     }).catch(() => null)
@@ -152,6 +161,9 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       clipboardEnabled: params.clipboardEnabled !== false,
       workspaceUuid: params.workspaceUuid || null,
       ownerUsername: params.ownerUsername || null,
+      // r27：录像 + 防退出档位
+      exitGuard: params.exitGuard,
+      recording: params.recording?.enabled ? params.recording : undefined,
     })
     return {
       novncSessionId: sb.id,
@@ -163,6 +175,7 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       containerName: sb.id,
       hardening: sb.hardening,
       cdpUrl: `http://127.0.0.1:${sb.cdpPort}/json`,
+      recording: sb.recording || null,
     }
   }
   if (externalAvailable.novnc) {
@@ -227,7 +240,7 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       : null
     const policyFile =
       params.userId && params.profileKey
-        ? await writeNetworkPolicyFile(`ws-${params.profileKey}`, { policy, gatewayIp, proxyUrl: params.proxyUrl || null, domainPolicy: params.domainPolicy || null, endpointPolicy: params.endpointPolicy || null, crxManagedPolicy: crxManaged, filePolicy: params.filePolicy || null }).catch(() => null)
+        ? await writeNetworkPolicyFile(`ws-${params.profileKey}`, { policy, gatewayIp, proxyUrl: params.proxyUrl || null, domainPolicy: params.domainPolicy || null, endpointPolicy: params.endpointPolicy || null, crxManagedPolicy: crxManaged, filePolicy: params.filePolicy || null, extraManagedPolicy: { ...(params.extraManagedPolicy || null), ...exitGuardManagedPolicy(params.exitGuard) } }).catch(() => null)
         : null
     const spec: BrowserHardeningSpec = {
       image: ENV.browserImage,
@@ -249,6 +262,10 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
         : { blackPatterns: [], whitePatterns: [] },
       policyFile,
       gatewayIp,
+      // r27：录像 + 防退出档位（录像目录由 createIsolatedBrowserContainer 按容器名统一推导）
+      exitGuard: params.exitGuard,
+      recording: params.recording?.enabled ? params.recording : undefined,
+      recordingUserId: params.userId || null,
     }
     const cont = await createIsolatedBrowserContainer(spec)
     return {
@@ -260,6 +277,9 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       rfb: cont.ip ? { host: cont.ip, port: ENV.browserVncPort } : null,
       containerName: cont.name,
       hardening: cont.hardening,
+      recording: params.recording?.enabled && params.userId
+        ? { recordDir: `${ENV.storageLocalPath.replace(/\/$/, "")}/recordings/${params.userId}/${cont.name}`, fps: params.recording.fps, segmentSec: params.recording.segmentSec, maxSec: params.recording.maxSec }
+        : null,
     }
   }
   const id = "vnc-" + randomUUID().replace(/-/g, "").slice(0, 12)
@@ -429,6 +449,9 @@ export async function destroyNovncSession(sessionId: string, containerRef?: stri
   if ((containerRef || sessionId).startsWith("emb-")) {
     const { destroyEmbeddedSandbox } = await import("../embedded-sandbox")
     await destroyEmbeddedSandbox(containerRef || sessionId)
+    // r27：录像会话终结（SIGTERM 已让 ffmpeg 写完 trailer → 分段收尾入库）
+    const { finalizeRecordingSession } = await import("../recording")
+    await finalizeRecordingSession(containerRef || sessionId, { reason: "session_destroy" }).catch(() => 0)
     return true
   }
   if (externalAvailable.novnc) {
