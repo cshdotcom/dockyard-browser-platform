@@ -122,6 +122,16 @@
 
 ## 四、快速开始
 
+### 生产部署（推荐：3 步 · 一容器跑全部）
+```bash
+cd deploy                                  # 仓库内 deploy 目录
+# 编辑 docker-compose.yml：修改 AUTH_SECRET / ENCRYPTION_KEY（32字节）/ CRON_SECRET / ADMIN_PASSWORD
+docker compose up -d                       # 打开 http://<主机IP>:3000
+```
+- 一个容器 = 全部功能（网页 + SQLite + 沙箱浏览器 + VNC 网关 + 调度），零外部依赖、零 docker.sock 挂载
+- 数据全部持久化在 `dockyard-db` / `dockyard-storage` 两个卷，升级 `pull && up -d` 不丢数据
+- 多容器形态（PostgreSQL 外置 / 外部浏览器节点扩缩容）见 **[deploy/README.md](deploy/README.md)**，全部形态共用同一镜像
+
 ### 管理员账号引导（三通道，均幂等，后期可修改）
 | 通道 | 说明 |
 |---|---|
@@ -145,6 +155,10 @@ bun run dev            # http://localhost:3000
 ```
 
 ### Docker 部署（host 网络模式 · CDP 端口可变）
+
+> 最简路径见上方「生产部署（3 步）」与 `deploy/` 目录（单容器 / +PostgreSQL / +外部浏览器节点三种 compose 形态）。
+> 以下是 host 网络模式的手工 docker run 等价写法（沙箱需直连宿主机内网/本机代理时使用）：
+
 ```bash
 # host 模式：容器直接使用宿主机网络；对外仅 网页（GATEWAY_PORT，默认3000）+ CDP（CDP_SERVICE_PORT，默认9222）两个端口
 # VNC/WS枢纽/事件注入全部回环监听，统一经入口网关嵌入网页端 —— 无需额外 -p 映射

@@ -10,7 +10,7 @@ import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import {
-  Layers, Users, ShieldCheck, Undo2, Send, Search, Loader2, Save, Trash2, ChevronDown, ChevronRight,
+  Layers, Users, ShieldCheck, Undo2, Send, Search, Loader2, Save, Trash2, ChevronDown, ChevronRight, X,
   Network, Lock, Globe, CircleSlash, CheckCircle2, Ban, Info, Clock, Timer, CalendarClock, XCircle, Plug, MonitorSmartphone,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -201,6 +201,18 @@ export function PolicyDeployCenter(props: Props) {
   const [rollingBack, setRollingBack] = React.useState<DeploymentRow | null>(null)
   const [cancelling, setCancelling] = React.useState<DeploymentRow | null>(null)
   const [expanded, setExpanded] = React.useState<string | null>(null)
+  // r25-b 批次历史关键词搜索：名称/备注/操作人/状态（客户端实时过滤）
+  const [deployFilter, setDeployFilter] = React.useState("")
+  const filteredDeployments = React.useMemo(() => {
+    const kw = deployFilter.trim().toLowerCase()
+    if (!kw) return props.deployments
+    return props.deployments.filter((d) =>
+      d.name.toLowerCase().includes(kw)
+      || (d.note || "").toLowerCase().includes(kw)
+      || d.createdByUsername.toLowerCase().includes(kw)
+      || d.status.toLowerCase().includes(kw)
+      || (d.results || []).some((r) => r.targetName.toLowerCase().includes(kw)))
+  }, [deployFilter, props.deployments])
   const [saveTplOpen, setSaveTplOpen] = React.useState(false)
   const [tplName, setTplName] = React.useState("")
   const [tplDesc, setTplDesc] = React.useState("")
@@ -831,15 +843,33 @@ export function PolicyDeployCenter(props: Props) {
 
       {/* ===== 批次历史 ===== */}
       <div className="rounded-xl border">
-        <div className="p-4 border-b flex items-center justify-between">
+        <div className="p-4 border-b flex items-center justify-between gap-2 flex-wrap">
           <h2 className="text-sm font-semibold flex items-center gap-1.5"><Undo2 className="h-4 w-4 text-teal-600" /> 下发批次历史</h2>
+          {/* r25-b 批次历史关键词搜索：名称/备注/操作人/状态实时过滤 */}
+          <div className="flex min-w-52 md:max-w-xs items-center gap-2 rounded-md border px-2">
+            <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <Input
+              value={deployFilter}
+              onChange={(e) => setDeployFilter(e.target.value)}
+              placeholder="搜批次 / 备注 / 操作人 / 状态…"
+              className="h-8 border-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+              aria-label="搜索下发批次"
+            />
+            {deployFilter && (
+              <button type="button" aria-label="清空搜索" onClick={() => setDeployFilter("")} className="rounded p-0.5 text-muted-foreground hover:text-foreground shrink-0">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
           <span className="text-xs text-muted-foreground">最近 50 批</span>
         </div>
         {props.deployments.length === 0 ? (
           <p className="p-8 text-center text-sm text-muted-foreground">暂无下发批次</p>
+        ) : filteredDeployments.length === 0 ? (
+          <p className="p-8 text-center text-sm text-muted-foreground">无匹配「{deployFilter}」的下发批次</p>
         ) : (
           <div className="divide-y">
-            {props.deployments.map((d) => (
+            {filteredDeployments.map((d) => (
               <div key={d.id}>
                 <div className="p-3 flex items-center gap-3 flex-wrap">
                   <button className="h-6 w-6 rounded inline-flex items-center justify-center hover:bg-muted" onClick={() => setExpanded(expanded === d.id ? null : d.id)}>

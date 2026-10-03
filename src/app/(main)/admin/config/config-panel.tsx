@@ -97,11 +97,17 @@ export function ConfigPanel({
   versions,
   canEdit,
   selfCheck,
+  initialTab,
+  focusKey,
 }: {
   items: ConfigItem[]
   versions: ConfigVersionRow[]
   canEdit: boolean
   selfCheck?: SelfCheckData
+  /** r25-a 深链初始页签（/admin/config?tab=MAIL）：全局搜索设置项直达 */
+  initialTab?: string
+  /** r25-a 深链聚焦配置项（/admin/config?tab=X&key=Y）：高亮 + 滚动定位 */
+  focusKey?: string
 }) {
   const router = useRouter()
 
@@ -190,6 +196,21 @@ export function ConfigPanel({
     return m
   }, [items])
 
+  // r25-a 深链页签（受控 Tabs）：初始 / 后续聚焦均以 URL 参数驱动
+  const validTab = (t?: string) => (t && (CATEGORY_ORDER as readonly string[]).includes(t) && byCategory.has(t) ? t : undefined)
+  const [tab, setTab] = React.useState<string>(validTab(initialTab) || CATEGORY_ORDER[0])
+  // 深链 focusKey：目标页签激活后滚动定位 + 高亮；行不在当前页签时先切换到其所属分类
+  React.useEffect(() => {
+    if (!focusKey) return
+    const el = document.getElementById(`cfg-row-${encodeURIComponent(focusKey)}`)
+    if (el) {
+      el.scrollIntoView({ block: "center", behavior: "smooth" })
+      return
+    }
+    const own = items.find((i) => i.key === focusKey)
+    if (own && own.category !== tab && byCategory.has(own.category)) setTab(own.category)
+  }, [focusKey, tab, items, byCategory])
+
   const versionsByKey = React.useMemo(() => {
     const m = new Map<string, ConfigVersionRow[]>()
     for (const v of versions) {
@@ -261,8 +282,16 @@ export function ConfigPanel({
 
   const renderItemRow = (item: ConfigItem) => {
     const isDirty = dirty.has(item.key)
+    const isFocused = focusKey === item.key
     return (
-      <div key={item.key} className="flex flex-wrap items-start justify-between gap-3 rounded-lg border p-4">
+      <div
+        key={item.key}
+        id={`cfg-row-${encodeURIComponent(item.key)}`}
+        className={cn(
+          "flex flex-wrap items-start justify-between gap-3 rounded-lg border p-4 transition-shadow",
+          isFocused && "ring-2 ring-teal-500 ring-offset-1 border-teal-600/40",
+        )}
+      >
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-sm font-medium break-all">{item.key}</span>
@@ -379,8 +408,8 @@ export function ConfigPanel({
         </div>
       </div>
 
-      {/* ---- 分类 Tabs ---- */}
-      <Tabs defaultValue={CATEGORY_ORDER[0]} className="w-full">
+      {/* ---- 分类 Tabs（r25-a 受控：支持 ?tab= 深链） ---- */}
+      <Tabs value={tab} onValueChange={setTab} className="w-full">
         <TabsList className="flex-wrap h-auto gap-1">
           {CATEGORY_ORDER.filter((c) => byCategory.has(c)).map((c) => (
             <TabsTrigger key={c} value={c}>
@@ -424,26 +453,45 @@ export function ConfigPanel({
                 )}
               </div>
               <div className="grid gap-3 grid-cols-1 lg:grid-cols-2">
-                {c === "MAIL" && <SmtpCard canEdit={canEdit} initial={smtpInitial} />}
+                {/* r25-a 深链聚焦：专属卡片托管的键（smtp.* / ALERT_CARD_KEYS / SECURITY_CARD_KEYS）
+                    无通用行 → 卡片自身承接 ring 高亮 + 定位锚点（id 与行规则一致） */}
+                {c === "MAIL" && (
+                  <div
+                    id={focusKey?.startsWith("smtp.") ? `cfg-row-${encodeURIComponent(focusKey)}` : undefined}
+                    className={cn("lg:col-span-2", focusKey?.startsWith("smtp.") && "ring-2 ring-teal-500 ring-offset-1 rounded-xl")}
+                  >
+                    <SmtpCard canEdit={canEdit} initial={smtpInitial} />
+                  </div>
+                )}
                 {c === "ALERT" && (
-                  <AlertCard
-                    canEdit={canEdit}
-                    values={values}
-                    dirtyKeys={dirty}
-                    busyKey={busyKey}
-                    setLocal={setLocal}
-                    saveItems={saveItems}
-                  />
+                  <div
+                    id={focusKey && ALERT_CARD_KEYS.has(focusKey) ? `cfg-row-${encodeURIComponent(focusKey)}` : undefined}
+                    className={cn("lg:col-span-2", focusKey && ALERT_CARD_KEYS.has(focusKey) && "ring-2 ring-teal-500 ring-offset-1 rounded-xl")}
+                  >
+                    <AlertCard
+                      canEdit={canEdit}
+                      values={values}
+                      dirtyKeys={dirty}
+                      busyKey={busyKey}
+                      setLocal={setLocal}
+                      saveItems={saveItems}
+                    />
+                  </div>
                 )}
                 {c === "SECURITY" && (
-                  <SecurityCard
-                    canEdit={canEdit}
-                    values={values}
-                    dirtyKeys={dirty}
-                    busyKey={busyKey}
-                    setLocal={setLocal}
-                    saveItems={saveItems}
-                  />
+                  <div
+                    id={focusKey && SECURITY_CARD_KEYS.has(focusKey) ? `cfg-row-${encodeURIComponent(focusKey)}` : undefined}
+                    className={cn("lg:col-span-2", focusKey && SECURITY_CARD_KEYS.has(focusKey) && "ring-2 ring-teal-500 ring-offset-1 rounded-xl")}
+                  >
+                    <SecurityCard
+                      canEdit={canEdit}
+                      values={values}
+                      dirtyKeys={dirty}
+                      busyKey={busyKey}
+                      setLocal={setLocal}
+                      saveItems={saveItems}
+                    />
+                  </div>
                 )}
                 {list.map(renderItemRow)}
               </div>

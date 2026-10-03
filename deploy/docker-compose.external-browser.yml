@@ -1,0 +1,62 @@
+# ============================================================
+# Dockyard 浏览器工作平台 — 多容器部署（平台 + 外部硬隔离浏览器节点）
+# 适合：浏览器工作负载独立扩缩容 / 浏览器节点与平台分机部署
+#
+# 形态：EXTERNAL_BROWSER_URL 指向独立浏览器容器（docker/browser 硬隔离镜像：
+#   supervisor 防退出 + 只读根 FS + CapDrop=ALL + 下载 noexec）
+#   · CDP 轻量会话 → 挂接外部浏览器（平台只连接不编排）
+#   · NoVNC 重度会话 → 同样经外部浏览器 RFB/CDP 端点接入
+#   平台容器内不再运行浏览器进程（BROWSER_RUNTIME=external）
+#
+# 使用：docker compose -f docker-compose.external-browser.yml up -d
+# 扩展浏览器节点：复制 browser 服务改容器名/端口（多节点接入 /admin/network 浏览器节点页登记）
+# ============================================================
+
+services:
+  browser:
+    image: ghcr.io/cshdotcom/dockyard-browser-platform-browser:latest
+    build:
+      context: ../docker/browser
+      dockerfile: Dockerfile
+    container_name: dockyard-browser
+    restart: always          # 容器级自愈（supervisor 进程级自愈之上双保险）
+    environment:
+      RESOLUTION: "1280x800"
+      START_URL: "about:blank"
+      TZ: Asia/Shanghai
+      # 出网代理（可选）：
+      # PROXY_URL: "socks5://host.docker.internal:1080"
+    volumes:
+      - dockyard-browser-profile:/home/browser/profile   # 浏览器 Profile 持久化
+    # 5900(RFB)/9222(CDP) 仅 compose 网络内可达，不对宿主机暴露
+
+  dockyard:
+    image: ghcr.io/cshdotcom/dockyard-browser-platform:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: dockyard
+    restart: unless-stopped
+    depends_on:
+      - browser
+    ports:
+      - "3000:3000"
+    environment:
+      TZ: Asia/Shanghai
+      # ---- 外部浏览器分离部署（平台连接不编排；supervisor 自管理生命周期）----
+      EXTERNAL_BROWSER_URL: "http://browser:9222"
+      EXTERNAL_BROWSER_VNC_PORT: "5900"
+      BROWSER_RUNTIME: "external"
+      # ---- 三个必改密钥 ----
+      AUTH_SECRET: "change-me-to-a-long-random-string"
+      ENCRYPTION_KEY: "change-me-32-bytes-secret-key-!!!"
+      CRON_SECRET: "change-me-cron-secret"
+      ADMIN_PASSWORD: "Admin@2026"
+    volumes:
+      - dockyard-db:/app/db
+      - dockyard-storage:/app/storage
+
+volumes:
+  dockyard-browser-profile:
+  dockyard-db:
+  dockyard-storage:

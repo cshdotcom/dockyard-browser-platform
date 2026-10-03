@@ -847,3 +847,23 @@ Work Log:
 Stage Summary:
 - r24 全批次九个子项闭环（a 自定义执行内容 / b Steel 零残留 / c IME / d 剪贴板隔离 / e 专属用户+UID 台账 / f 持久化挂载 / g 质量门 / h 离线冻结闭环 / i 快照真实归档）
 - 冒烟测试 69+ 断言、浏览器端到端 5 条链路（shell 任务创建→执行→日志输出、链编排 2/2 步、浏览器节点表、IME 切换器渲染+降级、冻结→guard→自动解冻）全部实测通过；QA 数据全部清理归零
+
+---
+Task ID: 25
+Agent: main
+Task: r25 全局搜索命令面板化 + 页面搜索补齐 + 多语言零乱码 + VNC 创建零出错加固 + 部署简化（单容器/多容器）
+
+Work Log:
+- 【r25-a 功能搜索】src/lib/search/functions.ts 新建：功能目录（页面直达 31 条 + 高频设置 8 条 + CONFIG_DEFAULTS 动态生成 87 条），角色过滤（USER/GROUP_ADMIN/ADMIN/SUPER_ADMIN）+ 同义词关键词 + 评分排序（标题前缀 100 > 标题 80 > 关键词 60 > 描述 40）；/api/search 新增 func 类型（永远置顶、单类型 take30/多类型 take8）；GlobalSearch 重写：空输入显示「你的功能直达」网格（menuGroups 快捷入口）、func 组 teal 主题卡片渲染
+- 【r25-a 深链】配置页 /admin/config?tab=X&key=Y：page.tsx 读 searchParams 透传 initialTab/focusKey；ConfigPanel 受控 Tabs + 行 id=cfg-row-<key> ring 高亮 + scrollIntoView 定位 + 行不在当前页签自动切换所属分类；专属卡片（SmtpCard/AlertCard/SecurityCard）承接卡片级 ring+锚点（smtp.*/ALERT_CARD_KEYS/SECURITY_CARD_KEYS）；/workspaces?create=1 自动打开创建弹窗（URL 一次性消费剥离）
+- 【r25-b 页面搜索】groups-tree.tsx：树内关键词搜索（组名/描述/组员/标签实时过滤 + 祖先链保留 + 自动展开 + 命中计数 + 无匹配空态 + X 清空恢复）；deploy-center.tsx：下发批次历史关键词搜索（名称/备注/操作人/状态/目标名客户端过滤）；其余页面审计确认（users/workspaces/sessions/audit/alerts/files/crx/templates/snapshots/tokens/singbox/rules/risk/recycle/mcp/backups/ipban/tasks 均已有 DataTable/UnifiedFilterBar 关键词搜索）
+- 【r25-c 多语言零乱码】Dockerfile：fonts-noto-core/mono/extra + color-emoji + unifont（终极兜底任意码位有字形）+ fontconfig + 区域字体软失败（thai-tlwg/lao/khmeros/padauk/abyssinica）；fontconfig local.conf 全语言回退链（拉丁→CJK→阿拉伯/希伯来/泰/天城→emoji→unifont，sans/serif/monospace/system-ui 四族）；locale 13→34 个；docker/browser 同标准；smoke-r25c-fonts.py 44/44（local.conf XML 校验 + 包清单断言 + chromium 真实渲染 24 语言逐行墨水像素 + fc-list 覆盖）截图 download/qa-r25/fonts-multilang.png
+- 【r25-d VNC 零出错】embedded-sandbox.ts 创建链路重构：幂等复用（同 workspaceId 存活树直接返回句柄）+ 每工作区在途互斥（并发启动共享同一 Promise）+ 三次重试（每次重新分配显示号/端口、容量类失败不重试）+ 结构化诊断（逐次明细+分类排查建议）+ 磁盘余量预检（<200MB 拒绝）+ 陈旧 Chromium 单例锁清理（死 pid 符号链接/非链接残留）+ waitRfbUp 前置密集探测（100ms）+ 首试 30s 窗口；startWorkspaceAction 失败落 ERROR 态 + lastError 持久化 hardeningJson；工作区列表 ERROR 态显示失败原因（红字截断+title 全文）；smoke-r25d-vnc-hardening.ts 19/19（x11vnc 垫片 + 真实 Xvfb/chromium：创建/幂等/并发/重试/三失败诊断/陈旧锁/磁盘自检）
+- 【r25-e 部署简化】deploy/ 新增 docker-compose.yml（单容器零外部依赖）+ docker-compose.postgres.yml（自动建库+触发器+播种）+ docker-compose.external-browser.yml（外部浏览器节点扩缩容）+ README（三步快速开始 + 形态选择表 + 环境变量速查 + FAQ）；主 README 顶部加「生产部署 3 步」；YAML 语法校验通过；全部形态共用同一镜像
+- 【QA 修复发现】r24 新增配置键（clipboardVncSync/allowShellExec/webhookAllowPrivate）未进开发库 → bun prisma/seed.ts 重播种（幂等 upsert；生产容器 start.sh 每次启动均执行种子，不受影响）126 项配置
+- 【QA 浏览器实测 agent-browser --session qa25】①全局搜索空态功能直达网格渲染 ②admin 搜「沙箱」→ 功能组置顶（新建工作区动作/页面/设置项混排）③点「剪贴板 VNC 透传开关」→ /admin/config?tab=GENERAL&key=workspace.clipboardVncSync 页签切换+ring 高亮+滚动定位 ④smtp.host 深链 → 邮件页签+SmtpCard 卡片级 ring ⑤demo 搜「用户管理」→ 零结果（角色过滤）；搜「令牌」→ 我的 API 令牌直达可导航 ⑥用户组树搜索「默认」→ 过滤命中；无匹配空态；X 清空恢复全树 ⑦策略下发历史搜索框渲染+无匹配态 ⑧/workspaces?create=1 → 创建弹窗自动打开（表单完整）+URL 参数剥离 ⑨ERROR 态工作区列表显示失败原因；11 张截图 download/qa-r25/
+- 【QA 清理】QA25-ERROR 展示测试工作区删除归零；QA 数据零残留（搜索测试只读）
+
+Stage Summary:
+- r25 全部五项交付：全局搜索升级为命令面板（功能/设置项/页面/动作全可搜、按角色过滤、深链直达含配置行级定位与卡片级高亮）、缺口页面搜索补齐（用户组树+策略批次历史）、多语言字体全覆盖（Noto 全家桶+Unifont 兜底+34 locale+fontconfig 回退链，24 语言真实渲染实证零乱码）、VNC 创建零出错（幂等/并发去重/三重试/结构化诊断/磁盘预检/陈旧锁清理/ERROR 态可见可重试）、部署三形态 compose 化（单容器 3 步最简 + PostgreSQL/外部浏览器节点可选）
+- 质量门：tsc 75=基线持平（零新增）；eslint 全部改动文件 0 error 0 warning；bun run build 全绿 60 路由；冒烟 44+19 断言全过；QA 数据清理归零

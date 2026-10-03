@@ -9,7 +9,7 @@ import {
   Users, FolderTree, ScrollText, Settings2, Timer, FolderOpen, DatabaseBackup,
   Bell, Server, Network, Recycle, ShieldAlert, MessageSquareCode,
   ChevronLeft, Menu, LogOut, Search, UserCog, MonitorSmartphone,
-  AlertTriangle, CheckCircle2, Loader2, ChevronRight,
+  AlertTriangle, CheckCircle2, Loader2, ChevronRight, Sparkles,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { UserAvatar } from "@/components/shared/user-avatar"
@@ -173,9 +173,9 @@ export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenan
               </DialogTrigger>
               <DialogContent className="max-w-xl">
                 <DialogHeader>
-                  <DialogTitle>全局搜索（工作区/用户/任务/告警等全部资源）</DialogTitle>
+                  <DialogTitle>全局搜索（功能 / 设置 / 工作区 / 用户等全部资源）</DialogTitle>
                 </DialogHeader>
-                <GlobalSearch onClose={() => setSearchOpen(false)} />
+                <GlobalSearch onClose={() => setSearchOpen(false)} menuGroups={menuGroups} />
               </DialogContent>
             </Dialog>
 
@@ -474,7 +474,7 @@ interface SearchTypeMeta { type: string; label: string; adminOnly: boolean }
 interface SearchHit { id: string; label: string; sub?: string; href: string }
 interface SearchGroup { group: string; type: string; items: SearchHit[] }
 
-function GlobalSearch({ onClose }: { onClose: () => void }) {
+function GlobalSearch({ onClose, menuGroups }: { onClose: () => void; menuGroups: MenuGroup[] }) {
   const [q, setQ] = React.useState("")
   const [catalog, setCatalog] = React.useState<SearchTypeMeta[]>([])
   const [selectedTypes, setSelectedTypes] = React.useState<Set<string>>(new Set())
@@ -549,7 +549,30 @@ function GlobalSearch({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="space-y-3">
-      <Input autoFocus placeholder="输入关键词：名称 / UUID / 用户名 / 告警标题..." value={q} onChange={(e) => setQ(e.target.value)} />
+      <Input autoFocus placeholder="搜索功能 / 设置项 / 沙箱 / 用户…（命令面板）" value={q} onChange={(e) => setQ(e.target.value)} />
+
+      {/* ---- 空输入：当前账号可用功能直达（命令面板初始视图）---- */}
+      {q.trim().length < 2 && menuGroups.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+            <Sparkles className="h-3.5 w-3.5 text-teal-600" /> 你的功能直达（输入关键词可搜全部功能与设置项）
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-[45vh] overflow-y-auto pr-1">
+            {menuGroups.flatMap((g) => g.items.map((it) => (
+              <Link
+                key={it.key}
+                href={it.href}
+                onClick={onClose}
+                className="flex items-center gap-2.5 rounded-md border px-3 py-2 text-sm hover:bg-muted hover:border-teal-600/40 transition-colors"
+              >
+                <span className="text-muted-foreground shrink-0">{it.icon}</span>
+                <span className="truncate">{it.label}</span>
+                <ChevronRight className="ml-auto h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
+              </Link>
+            )))}
+          </div>
+        </div>
+      )}
 
       {/* ---- 筛选栏：类型多选 Chip + 日期范围 + 管理员用户过滤 ---- */}
       {catalog.length > 0 && (
@@ -620,8 +643,9 @@ function GlobalSearch({ onClose }: { onClose: () => void }) {
       )}
       <div className="space-y-3 max-h-[60vh] overflow-y-auto">
         {results.map((g) => (
-          <div key={g.group}>
-            <p className="text-xs text-muted-foreground mb-1 flex items-center gap-1.5">
+          <div key={g.group} className={g.type === "func" ? "rounded-lg border border-teal-600/30 bg-teal-600/5 p-2.5" : ""}>
+            <p className={cn("text-xs mb-1 flex items-center gap-1.5", g.type === "func" ? "text-teal-700 dark:text-teal-400 font-medium" : "text-muted-foreground")}>
+              {g.type === "func" && <Sparkles className="h-3.5 w-3.5" />}
               {g.group}
               <Badge variant="secondary" className="text-[10px] px-1.5">{g.items.length}</Badge>
             </p>
@@ -631,7 +655,10 @@ function GlobalSearch({ onClose }: { onClose: () => void }) {
                   key={item.id}
                   href={item.href}
                   onClick={onClose}
-                  className="block rounded-md border px-3 py-2 text-sm hover:bg-muted"
+                  className={cn(
+                    "block rounded-md border px-3 py-2 text-sm hover:bg-muted",
+                    g.type === "func" ? "border-transparent bg-background/80 hover:border-teal-600/40" : "",
+                  )}
                 >
                   <span className="break-all">{item.label}</span>
                   {item.sub && <span className="block mt-0.5 text-xs text-muted-foreground truncate">{item.sub}</span>}

@@ -2,12 +2,15 @@ import { NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { getAuthContext } from "@/lib/permissions"
 import { apiHandler } from "@/lib/api"
+import { searchFunctions } from "@/lib/search/functions"
 
 // ============================================================
-// 全局搜索（r23 全面增强）
+// 全局搜索（r23 全面增强 / r25-a 功能命令面板化）
 // · 搜索范围：该用户有权限使用的所有资源（普通用户=自己的+共享给我的；管理员=全平台）
 //   工作区 / SingBox实例 / 用户 / 用户组 / 代理节点 / 宿主机 / 脚本模板 / 文件 /
 //   API-Key / 公告 / 回收站 / 告警 / 备份 / 审计日志(管理员) / 定时任务(管理员)
+// · r25-a 新增「功能与设置」类型（func）：搜当前账号可用的全部功能入口与设置项，
+//   结果永远置顶（命令面板语义：跳转优先于资源检索）
 // · 筛选栏：类型多选（types=ws,user,group,...）/ 日期范围（from,to）/ 用户过滤（user=xxx，管理员）
 // · 每类 take 5（type 单选时 take 20）；结果按类型分组，标注权限语义（如「共享给我」）
 // ============================================================
@@ -25,12 +28,13 @@ interface SearchGroup {
 }
 
 const ALL_TYPES = [
-  "ws", "singbox", "user", "group", "proxy", "host", "file",
+  "func", "ws", "singbox", "user", "group", "proxy", "host", "file",
   "token", "announce", "recycle", "alert", "backup", "audit", "task",
 ] as const
 type SearchType = (typeof ALL_TYPES)[number]
 
 const TYPE_LABEL: Record<SearchType, string> = {
+  func: "功能与设置",
   ws: "浏览器工作区",
   singbox: "SingBox 实例",
   user: "用户",
@@ -96,6 +100,18 @@ export async function GET(req: NextRequest) {
 
     const wants = (t: SearchType) => types.includes(t)
     const groups: SearchGroup[] = []
+
+    // ---- r25-a 功能与设置（命令面板：角色过滤 + 同义词匹配；永远置顶）----
+    if (wants("func")) {
+      const funcHits = searchFunctions(q, ctx.role, types.length === 1 ? 30 : 8)
+      if (funcHits.length > 0) {
+        groups.push({
+          group: TYPE_LABEL.func,
+          type: "func",
+          items: funcHits.map((f) => ({ id: f.id, label: f.title, sub: `${f.group} · ${f.desc}`, href: f.href })),
+        })
+      }
+    }
 
     // ---- 工作区（普通用户：自己的 + 共享给我的；管理员：全部或按用户过滤） ----
     if (wants("ws")) {
@@ -234,4 +250,5 @@ function typeCatalog(role: string): { type: string; label: string; adminOnly: bo
 }
 function adminOnly(t: SearchType): boolean {
   return ["singbox", "user", "group", "proxy", "host", "alert", "backup", "audit", "task"].includes(t)
+  // func 不在此列：功能条目本身按角色过滤（普通用户可搜自己的功能页与个人中心）
 }

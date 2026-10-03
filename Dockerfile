@@ -58,6 +58,18 @@ RUN apt-get update -o Acquire::Retries=5 \
       util-linux \
       fonts-noto-cjk \
       fonts-liberation \
+      # r25-c 多语言字体全覆盖（浏览器内容零乱码）：
+      #   fonts-noto-core —— 拉丁/希腊/西里尔/阿拉伯/希伯来/天城文/孟加拉/泰米尔/
+      #                     泰/高棉/老挝/缅甸/格鲁吉亚/亚美尼亚/提格雷纳等 100+ 文字体系
+      #   fonts-noto-mono / extra —— 等宽字形与补充字重
+      #   fonts-noto-color-emoji —— 彩色 emoji（网页 ubiquitous）
+      #   fonts-unifont —— 终极兜底（任意码位均有字形，绝不出现豆腐块□）
+      fonts-noto-core \
+      fonts-noto-mono \
+      fonts-noto-extra \
+      fonts-noto-color-emoji \
+      fonts-unifont \
+      fontconfig \
       openssl \
       ca-certificates \
       wget \
@@ -77,13 +89,56 @@ RUN apt-get update -o Acquire::Retries=5 \
         || echo "[warn] fcitx5-mozc 不可用，跳过（日文输入以 fcitx5-table 日文码表兜底）") \
     && (apt-get install -y --no-install-recommends fcitx5-hangul fcitx5-unikey fcitx5-thai fcitx5-arabic \
         || echo "[warn] 部分语言输入法包不可用，跳过（以键盘布局兜底）") \
-    && (apt-get install -y --no-install-recommends fonts-noto-color \
-        || echo "[warn] fonts-noto-color 不可用，跳过（CJK 字体已含于 fonts-noto-cjk）") \
-    # 常用语言 locale（输入法候选窗/应用本地化）：中英日韩德法西葡俄泰越阿拉伯
-    && for loc in en_US.UTF-8 zh_CN.UTF-8 zh_TW.UTF-8 ja_JP.UTF-8 ko_KR.UTF-8 de_DE.UTF-8 fr_FR.UTF-8 es_ES.UTF-8 pt_BR.UTF-8 ru_RU.UTF-8 th_TH.UTF-8 vi_VN.UTF-8 ar_SA.UTF-8; do \
+    && (apt-get install -y --no-install-recommends fonts-thai-tlwg fonts-lao fonts-khmeros fonts-sil-padauk fonts-sil-abyssinica \
+        || echo "[warn] 部分区域字体包不可用，跳过（Noto core 已含对应文字体系）") \
+    # r25-c 常用语言 locale 扩充（输入法候选窗/应用本地化/网页内容 lang 检测）：
+    #   中简繁/日韩 + 欧洲主要语言 + 俄/乌/希腊/土耳其 + 阿拉伯/希伯来/波斯 + 印地/泰/越/印尼 + 商
+    && for loc in en_US.UTF-8 en_GB.UTF-8 zh_CN.UTF-8 zh_TW.UTF-8 zh_HK.UTF-8 ja_JP.UTF-8 ko_KR.UTF-8 \
+        de_DE.UTF-8 fr_FR.UTF-8 es_ES.UTF-8 es_MX.UTF-8 pt_BR.UTF-8 pt_PT.UTF-8 it_IT.UTF-8 \
+        nl_NL.UTF-8 sv_SE.UTF-8 da_DK.UTF-8 fi_FI.UTF-8 nb_NO.UTF-8 pl_PL.UTF-8 cs_CZ.UTF-8 \
+        hu_HU.UTF-8 ro_RO.UTF-8 el_GR.UTF-8 ru_RU.UTF-8 uk_UA.UTF-8 tr_TR.UTF-8 \
+        ar_SA.UTF-8 he_IL.UTF-8 fa_IR.UTF-8 hi_IN.UTF-8 th_TH.UTF-8 vi_VN.UTF-8 id_ID.UTF-8; do \
         sed -i "/^# $loc /s/^# //" /etc/locale.gen 2>/dev/null || true; \
+        grep -q "^$loc " /etc/locale.gen 2>/dev/null || echo "$loc UTF-8" >> /etc/locale.gen; \
       done \
     && (locale-gen || echo "[warn] locale-gen 部分失败（不影响核心功能）") \
+    # r25-c fontconfig 全语言回退链（Chromium 等 X 应用经 fontconfig 逐文字体系选字体：
+    # 拉丁→CJK→阿拉伯/希伯来/泰/天城→emoji→unifont，任意文字均有字形，零乱码）
+    && printf '%s\n' \
+      '<?xml version="1.0"?>' \
+      '<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">' \
+      '<fontconfig>' \
+      '  <alias binding="strong"><family>sans-serif</family><prefer>' \
+      '    <family>Liberation Sans</family>' \
+      '    <family>Noto Sans</family>' \
+      '    <family>Noto Sans CJK SC</family>' \
+      '    <family>Noto Sans Arabic</family>' \
+      '    <family>Noto Sans Hebrew</family>' \
+      '    <family>Noto Sans Thai</family>' \
+      '    <family>Noto Sans Devanagari</family>' \
+      '    <family>Noto Color Emoji</family>' \
+      '    <family>Unifont</family>' \
+      '  </prefer></alias>' \
+      '  <alias binding="strong"><family>serif</family><prefer>' \
+      '    <family>Liberation Serif</family>' \
+      '    <family>Noto Serif CJK SC</family>' \
+      '    <family>Noto Color Emoji</family>' \
+      '    <family>Unifont</family>' \
+      '  </prefer></alias>' \
+      '  <alias binding="strong"><family>monospace</family><prefer>' \
+      '    <family>Liberation Mono</family>' \
+      '    <family>Noto Sans Mono CJK SC</family>' \
+      '    <family>Noto Color Emoji</family>' \
+      '    <family>Unifont</family>' \
+      '  </prefer></alias>' \
+      '  <alias binding="strong"><family>system-ui</family><prefer>' \
+      '    <family>Liberation Sans</family>' \
+      '    <family>Noto Sans</family>' \
+      '    <family>Noto Sans CJK SC</family>' \
+      '    <family>Noto Color Emoji</family>' \
+      '  </prefer></alias>' \
+      '</fontconfig>' > /etc/fonts/local.conf \
+    && fc-cache -f >/dev/null 2>&1 || true \
     && rm -rf /var/lib/apt/lists/* \
     # X socket 目录（Xvfb 挂载 unix socket 用）
     && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix \

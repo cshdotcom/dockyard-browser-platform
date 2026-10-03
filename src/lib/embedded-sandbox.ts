@@ -26,7 +26,7 @@
 import { spawn, spawnSync } from "child_process"
 import net from "net"
 import fs from "fs"
-import { mkdir, readFile, writeFile, rm, readdir, stat, access } from "fs/promises"
+import { mkdir, readFile, writeFile, rm, readdir, stat, access, lstat, readlink } from "fs/promises"
 import { join, dirname } from "path"
 import { randomUUID } from "crypto"
 import { ENV } from "./env"
@@ -547,15 +547,132 @@ function launchScriptPath(): string {
 }
 
 async function waitRfbUp(port: number, timeoutMs = 20000): Promise<boolean> {
+  // r25-d：前 2 秒 100ms 密集探测（x11vnc 正常 <1s 就绪）；随后 250ms 常规节奏
   const t0 = Date.now()
   while (Date.now() - t0 < timeoutMs) {
     if (!(await tcpProbe(port))) return true // 能连上 = x11vnc 已就绪
-    await new Promise((r) => setTimeout(r, 250))
+    await new Promise((r) => setTimeout(r, Date.now() - t0 < 2000 ? 100 : 250))
   }
   return false
 }
 
+// ---- r25-d 磁盘余量检查（启动前自检：空间不足直接拒绝，避免半途失败产生半残树） ----
+function diskFreeMb(path: string): number | null {
+  try {
+    const r = spawnSync("df", ["-P", path], { timeout: 5_000 })
+    if (r.status !== 0 || !r.stdout) return null
+    const lines = String(r.stdout).split("\n")
+    const cols = lines[1]?.trim().split(/\s+/)
+    if (!cols || cols.length < 4) return null
+    const kb = Number(cols[3])
+    return Number.isFinite(kb) ? Math.round(kb / 1024) : null
+  } catch {
+    return null
+  }
+}
+
+// ---- r25-d 陈旧 Chromium 单例锁清理 ----
+// Profile 目录下的 SingletonLock/SingletonCookie/SingletonSocket 是指向 "<hostname>-<pid>"
+// 的符号链接；容器重启/平台重启后旧 chromium 已死，但锁残留会让 Chromium 启动卡在
+// 实例冲突分支（或反复重启）。仅当目标 pid 已死时移除（活锁不动，避免误伤并发会话）。
+async function cleanStaleProfileLocks(profileDir: string): Promise<void> {
+  for (const f of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+    const p = join(profileDir, f)
+    try {
+      const l = await lstat(p)
+      if (l.isSymbolicLink()) {
+        const target = await readlink(p)
+        const pid = Number(target.split("-").pop())
+        if (!Number.isFinite(pid) || !procAlive(pid)) await rm(p, { force: true })
+      } else {
+        // 非符号链接形态 = 崩溃残留（正常应为符号链接），直接清理
+        await rm(p, { force: true })
+      }
+    } catch {
+      /* 不存在 → 无锁，跳过 */
+    }
+  }
+}
+
+// 每工作区在途互斥（r25-d：双击启动/并发请求不会创建两棵重复进程树）
+const gStart = globalThis as unknown as { __dySandboxStartLock?: Map<string, Promise<EmbeddedSandboxHandle>> }
+
+function handleFromEntry(entry: EmbeddedSandboxEntry, spec: EmbeddedSandboxSpec): EmbeddedSandboxHandle {
+  return {
+    id: entry.id,
+    name: entry.id,
+    rfb: { host: "127.0.0.1", port: entry.rfbPort },
+    cdpPort: entry.cdpPort,
+    display: entry.display,
+    linuxUser: entry.linuxUser,
+    simulated: false as const,
+    hardening: embeddedHardeningSummary(spec, entry.linuxUser),
+  }
+}
+
+// ============================================================
+// 沙箱创建（r25-d 零出错加固版）
+// 主入口幂等 + 并发去重 + 三次重试 + 结构化诊断：
+//   1. 同一工作区已有存活进程树 → 直接复用（绝不重复创建）
+//   2. 同一工作区并发启动请求 → 共享同一次在途 Promise
+//   3. 单次尝试失败（显示冲突/端口抢占/x11vnc 未就绪）→ 换新显示号/新端口自动重试
+//   4. 三次均失败 → 汇总各次日志尾部 + 自检结论给出可操作错误信息
+// ============================================================
 export async function createEmbeddedSandbox(spec: EmbeddedSandboxSpec): Promise<EmbeddedSandboxHandle> {
+  // ---- 幂等复用：同工作区健康树直接返回（启动重试/双击零重复）----
+  if (spec.workspaceId) {
+    await adoptEmbeddedSandboxes().catch(() => null)
+    for (const e of registry().values()) {
+      if (e.workspaceId === spec.workspaceId && embeddedSandboxAlive(e)) {
+        return handleFromEntry(e, spec)
+      }
+    }
+    // ---- 并发去重：同工作区在途创建共享同一 Promise ----
+    const locks = (gStart.__dySandboxStartLock ??= new Map())
+    const key = `ws:${spec.workspaceId}`
+    const inFlight = locks.get(key)
+    if (inFlight) return inFlight
+    const p = createWithRetry(spec).finally(() => locks.delete(key))
+    locks.set(key, p)
+    return p
+  }
+  return createWithRetry(spec)
+}
+
+// 三次重试 + 结构化诊断（r25-d）
+async function createWithRetry(spec: EmbeddedSandboxSpec): Promise<EmbeddedSandboxHandle> {
+  const storage = ENV.storageLocalPath.replace(/\/$/, "")
+  // 启动前磁盘自检（<200MB 直接拒绝，避免半途磁盘写满产生半残树）
+  const freeMb = diskFreeMb(storage)
+  if (freeMb != null && freeMb < 200) {
+    throw new Error(`存储空间不足（剩余 ${freeMb}MB，沙箱启动需至少 200MB）：请清理文件存储/旧沙箱目录后重试`)
+  }
+
+  const attemptTails: string[] = []
+  let lastErr = ""
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await attemptCreateEmbeddedSandbox(spec, attempt)
+    } catch (e) {
+      lastErr = (e as Error).message || String(e)
+      attemptTails.push(`第 ${attempt} 次：${lastErr}`)
+      // 容量类失败重试无意义（显示号/端口池耗尽）→ 直接汇总报错
+      if (lastErr.includes("无可用虚拟显示编号") || lastErr.includes("无可用端口") || lastErr.includes("存储空间不足")) break
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 600 * attempt))
+    }
+  }
+  // 结构化诊断：三次失败根因汇总 + 可操作建议（用户可看懂、管理员可排查）
+  const hints: string[] = []
+  if (/显示|display|Xvfb/i.test(lastErr)) hints.push("虚拟显示冲突（已自动换号重试 3 次仍失败）：请检查 /tmp/.X*-lock 残留")
+  if (/x11vnc/i.test(lastErr)) hints.push("x11vnc 未就绪：请查看 storage/sandboxes/<id>/logs/x11vnc.log 与 supervisor.log")
+  if (/权限|Permission|denied/i.test(lastErr)) hints.push("目录权限问题：容器需以 root 运行（沙箱目录 700 归属沙箱专用用户）")
+  if (/组件缺失|chromium/i.test(lastErr)) hints.push("浏览器组件缺失：请检查镜像内 chromium/xvfb/x11vnc 安装完整")
+  if (hints.length === 0) hints.push("请查看 storage/sandboxes/<沙箱ID>/logs/ 下 supervisor.log / x11vnc.log / chromium.log 排查")
+  throw new Error(`沙箱启动失败（已自动重试 3 次）\n${attemptTails.join("\n")}\n排查建议：${hints.join("；")}`)
+}
+
+// 单次创建尝试（原主流程；每次重试均重新分配显示号/端口）
+async function attemptCreateEmbeddedSandbox(spec: EmbeddedSandboxSpec, attempt: number): Promise<EmbeddedSandboxHandle> {
   await adoptEmbeddedSandboxes()
   const bins = embeddedBinaries()
   if (!bins.chrome || !bins.xvfb || !bins.x11vnc) throw new Error("容器内浏览器组件缺失（chromium/xvfb/x11vnc）")
@@ -573,6 +690,9 @@ export async function createEmbeddedSandbox(spec: EmbeddedSandboxSpec): Promise<
   await Promise.all(
     [sandboxDir, logDir, profileDir, downloadsDir, join(storage, "netpolicy")].map((d) => mkdir(d, { recursive: true })),
   )
+  // r25-d：清理陈旧 Chromium 单例锁（旧进程已死的 Singleton* 符号链接）
+  // ——避免 Chromium 启动卡在实例冲突分支导致沙箱反复自愈循环
+  await cleanStaleProfileLocks(profileDir).catch(() => null)
 
   const [display, rfbPort, cdpPort] = await Promise.all([allocateDisplay(), allocatePort(RFB_PORT_BASE), allocatePort(CDP_PORT_BASE)])
   // r24-e：优先每沙箱专属用户（dyu-<uuid8>-<uname6>）；无 UUID 场景回退每平台用户（兼容）
@@ -677,7 +797,8 @@ ${nprocExec} "${bins.chrome}" \\
   })
   child.unref()
 
-  const ok = await waitRfbUp(rfbPort)
+  // r25-d：首试给予更长就绪窗口（冷启动负载下 Xvfb+x11vnc 链路可能较慢）；重试轮缩短
+  const ok = await waitRfbUp(rfbPort, attempt === 1 ? 30000 : 20000)
   if (!ok) {
     // 监督脚本自灭（X 冲突/组件异常）→ 读取日志给出可诊断错误
     let tail = ""

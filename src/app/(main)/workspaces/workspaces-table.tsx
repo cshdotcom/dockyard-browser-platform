@@ -39,6 +39,8 @@ export interface WorkspaceRow {
   tags: string[]
   createdAt: string
   profileSnapshotId: string | null
+  /** r25-d：最近一次启动失败原因（status=ERROR 时展示；引擎已自动重试 3 次） */
+  lastError?: string | null
   /** r13c：共享管控状态（四级解析结果；仅 isOwner 行有意义） */
   shareControl?: { allowed: boolean; reason: string }
 }
@@ -69,6 +71,18 @@ export function WorkspacesTable(props: Props) {
   const [proxyTarget, setProxyTarget] = React.useState<WorkspaceRow | null>(null)
   const [shareTarget, setShareTarget] = React.useState<WorkspaceRow | null>(null)
   const [selectedIds, setSelectedIds] = React.useState<string[]>([])
+
+  // r25-a 全局搜索深链 /workspaces?create=1：自动打开创建弹窗（一次性消费后从 URL 剥离）
+  React.useEffect(() => {
+    if (typeof window === "undefined") return
+    const sp = new URLSearchParams(window.location.search)
+    if (sp.get("create") === "1") {
+      setCreateOpen(true)
+      sp.delete("create")
+      const qs = sp.toString()
+      window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""))
+    }
+  }, [])
 
   const query = (patch: Record<string, string | undefined>) => {
     const params = new URLSearchParams()
@@ -121,7 +135,16 @@ export function WorkspacesTable(props: Props) {
       key: "mode", title: "模式",
       render: (r) => r.mode === "cdp_light" ? <Badge variant="secondary">CDP 轻量</Badge> : <Badge className="bg-violet-600 hover:bg-violet-600">NoVNC 重度</Badge>,
     },
-    { key: "status", title: "状态", sortable: true, render: (r) => <StatusBadge status={r.status} /> },
+    { key: "status", title: "状态", sortable: true, render: (r) => (
+      <div className="min-w-0">
+        <StatusBadge status={r.status} />
+        {r.status === "ERROR" && r.lastError && (
+          <p className="mt-1 max-w-52 truncate text-[11px] text-red-600 dark:text-red-400" title={r.lastError}>
+            {r.lastError.split("\n")[0].slice(0, 90)}
+          </p>
+        )}
+      </div>
+    ) },
     {
       key: "owner", title: "归属",
       render: (r) => (

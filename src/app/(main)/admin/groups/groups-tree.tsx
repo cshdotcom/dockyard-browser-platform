@@ -5,10 +5,11 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { ChevronDown, ChevronRight, FileDown, FileUp, KeyRound, MoreHorizontal, Plus, Trash2, X, Loader2, UserX } from "lucide-react"
+import { ChevronDown, ChevronRight, FileDown, FileUp, KeyRound, MoreHorizontal, Plus, Search, Trash2, X, Loader2, UserX } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Input } from "@/components/ui/input"
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
@@ -157,6 +158,41 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
       return next
     })
   }
+
+  // ---- r25-b 树内关键词搜索：组名/描述/组员/标签匹配；命中节点及其祖先自动展开 ----
+  const [groupFilter, setGroupFilter] = React.useState("")
+  const kw = groupFilter.trim().toLowerCase()
+  const { visibleRoots, matchCount } = React.useMemo(() => {
+    if (!kw) return { visibleRoots: roots, matchCount: allNodes.length }
+    const matchSelf = (n: AdminGroupNode) =>
+      n.name.toLowerCase().includes(kw)
+      || (n.description || "").toLowerCase().includes(kw)
+      || n.tags.some((t) => t.toLowerCase().includes(kw))
+      || n.members.some((m) => m.username.toLowerCase().includes(kw))
+    const keep = new Set<string>()
+    let count = 0
+    const walk = (n: AdminGroupNode): boolean => {
+      const self = matchSelf(n)
+      const kept = n.children.map((c) => walk(c)).some(Boolean)
+      if (self || kept) {
+        keep.add(n.id)
+        if (self) count++
+        return true
+      }
+      return false
+    }
+    roots.forEach((r) => walk(r))
+    // 过滤树：仅保留命中节点及其祖先链（复制节点构建新树，不改原引用）
+    const filterTree = (nodes: AdminGroupNode[]): AdminGroupNode[] =>
+      nodes
+        .filter((n) => keep.has(n.id))
+        .map((n) => ({ ...n, children: filterTree(n.children) }))
+    return { visibleRoots: filterTree(roots), matchCount: count }
+  }, [kw, roots, allNodes])
+  // 搜索命中时自动展开全部可见节点（祖先链可见即展开）
+  React.useEffect(() => {
+    if (kw) setExpanded(new Set(allNodes.map((n) => n.id)))
+  }, [kw, allNodes])
 
   const expandAll = () => setExpanded(new Set(allNodes.map((n) => n.id)))
   const collapseAll = () => setExpanded(new Set())
@@ -311,6 +347,22 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
     <div className="space-y-4">
       {/* 顶部操作栏 */}
       <div className="flex flex-wrap items-center gap-2">
+        {/* r25-b 组树关键词搜索：名称/描述/组员/标签实时过滤 + 自动展开 */}
+        <div className="flex min-w-56 flex-1 md:max-w-xs items-center gap-2 rounded-md border px-2">
+          <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <Input
+            value={groupFilter}
+            onChange={(e) => setGroupFilter(e.target.value)}
+            placeholder="搜索用户组 / 描述 / 组员 / 标签…"
+            className="h-8 border-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+            aria-label="搜索用户组"
+          />
+          {groupFilter && (
+            <button type="button" aria-label="清空搜索" onClick={() => setGroupFilter("")} className="rounded p-0.5 text-muted-foreground hover:text-foreground shrink-0">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
         <Button size="sm" className="bg-teal-600 hover:bg-teal-700" onClick={() => { setFormMode("create"); setFormParentId(null); setEditingGroup(null); setFormOpen(true) }}>
           <Plus className="mr-1 h-4 w-4" /> 新建用户组
         </Button>
@@ -361,7 +413,12 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
             暂无用户组，点击「新建用户组」创建第一个组织节点
           </div>
         )}
-        {roots.map((r) => renderNode(r, 0))}
+        {kw && matchCount === 0 && (
+          <div className="rounded-lg border bg-card py-12 text-center text-sm text-muted-foreground">
+            无匹配「{groupFilter}」的组（可搜组名 / 描述 / 组员 / 标签）
+          </div>
+        )}
+        {visibleRoots.map((r) => renderNode(r, 0))}
       </div>
 
       {/* 新建/编辑弹窗 */}

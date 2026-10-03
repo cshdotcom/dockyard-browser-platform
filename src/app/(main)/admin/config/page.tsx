@@ -43,8 +43,16 @@ function buildSelfCheck(items: ConfigItem[]): SelfCheckData {
   return { rows, activeCount: rows.length - reservedCount, reservedCount }
 }
 
-export default async function AdminConfigPage() {
+export default async function AdminConfigPage({
+  searchParams,
+}: {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>
+}) {
   const ctx = await requireAdmin()
+  // r25-a 全局搜索深链：/admin/config?tab=MAIL&key=smtp.host（页签直达 + 行高亮定位）
+  const sp = await searchParams
+  const initialTab = typeof sp?.tab === "string" ? sp.tab : undefined
+  const focusKey = typeof sp?.key === "string" ? sp.key : undefined
 
   // 全量配置 + 最近版本历史（300条），一次性下发客户端 Tabs
   const [items, versions] = await Promise.all([
@@ -101,6 +109,8 @@ export default async function AdminConfigPage() {
         versions={versionRows}
         canEdit={ctx.role === "SUPER_ADMIN"}
         selfCheck={ctx.role === "SUPER_ADMIN" ? buildSelfCheck(configItems) : undefined}
+        initialTab={initialTab}
+        focusKey={focusKey}
       />
     </div>
   )

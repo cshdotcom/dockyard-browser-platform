@@ -1,0 +1,47 @@
+# ============================================================
+# Dockyard 浏览器工作平台 — 一容器部署（默认，最简）
+# 一个容器 = 全部功能：网页端 + 数据库(SQLite) + 沙箱浏览器进程 + VNC 网关 + 调度器
+# 零外部依赖、零 Docker-in-Docker、零 docker.sock 挂载
+#
+# 使用：
+#   1) 修改下方三个密钥（AUTH_SECRET / ENCRYPTION_KEY / CRON_SECRET）
+#   2) docker compose up -d
+#   3) 浏览器打开 http://<主机IP>:3000（初始账号 admin / ADMIN_PASSWORD）
+#
+# 升级：docker compose pull && docker compose up -d（数据卷保留全部数据）
+# ============================================================
+
+services:
+  dockyard:
+    image: ghcr.io/cshdotcom/dockyard-browser-platform:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: dockyard
+    restart: unless-stopped
+    ports:
+      - "3000:3000"        # 网页端（统一入口网关；VNC/WS/CDP 全部经此端口嵌入）
+      # CDP 对外端口（Puppeteer/Playwright 远程接入时才需要，默认注释）：
+      # - "9222:9222"
+    environment:
+      TZ: Asia/Shanghai
+      # ---- 三个必改密钥（首次启动前修改；改后已有加密数据无法解密，请牢记）----
+      AUTH_SECRET: "change-me-to-a-long-random-string"
+      ENCRYPTION_KEY: "change-me-32-bytes-secret-key-!!!"   # 必须 32 字节
+      CRON_SECRET: "change-me-cron-secret"
+      # ---- 初始超管密码（首次启动播种；之后后台可改）----
+      ADMIN_PASSWORD: "Admin@2026"
+      # ---- 可选（默认全部留空即可用）----
+      # PUBLIC_BASE_URL: "https://browser.example.com"   # 对外域名（邮件链接/CDP 展示基准）
+      # EXTERNAL_BROWSER_URL: ""                          # 外部浏览器分离部署时填写
+    volumes:
+      - dockyard-db:/app/db          # SQLite 数据库（用户/工作区/审计/配置）
+      - dockyard-storage:/app/storage # 沙箱 Profile/快照/UID 台账/日志（核心持久化卷）
+    # 健康检查已内置（HEALTHCHECK），无需重复声明
+
+    # 沙箱需要访问宿主机代理/内网设备时，改用 host 网络（删除 ports 段）：
+    # network_mode: host
+
+volumes:
+  dockyard-db:
+  dockyard-storage:

@@ -112,6 +112,8 @@ export default async function WorkspacesPage({
       profileSnapshotId: r.profileSnapshotId,
       browserSessionId: r.browserSessionId,
       novncSessionId: r.novncSessionId,
+      // r25-d：启动失败原因（引擎重试 3 次后落库的 lastError，ERROR 态展示）
+      lastError: ((r.hardeningJson as Record<string, unknown> | null)?.lastError as string) || null,
       shareControl,
     }
   })

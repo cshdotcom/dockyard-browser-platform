@@ -28,8 +28,44 @@ RUN apt-get update -o Acquire::Retries=5 \
     psmisc \
     fonts-noto-cjk \
     fonts-liberation \
-  && (apt-get install -y --no-install-recommends fonts-noto-color \
-      || echo "[warn] fonts-noto-color 不可用，跳过（CJK 字体已含于 fonts-noto-cjk）") \
+    # r25-c 多语言字体全覆盖（与平台主镜像同标准：零乱码）
+    fonts-noto-core \
+    fonts-noto-mono \
+    fonts-noto-color-emoji \
+    fonts-unifont \
+    fontconfig \
+  && (apt-get install -y --no-install-recommends fonts-noto-extra fonts-thai-tlwg fonts-lao fonts-khmeros fonts-sil-padauk \
+      || echo "[warn] 部分区域字体包不可用，跳过（fonts-noto-core 已含对应文字体系）") \
+  # fontconfig 全语言回退链（拉丁→CJK→emoji→unifont 兜底，任意文字均有字形）
+  && printf '%s\n' \
+    '<?xml version="1.0"?>' \
+    '<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">' \
+    '<fontconfig>' \
+    '  <alias binding="strong"><family>sans-serif</family><prefer>' \
+    '    <family>Liberation Sans</family>' \
+    '    <family>Noto Sans</family>' \
+    '    <family>Noto Sans CJK SC</family>' \
+    '    <family>Noto Sans Arabic</family>' \
+    '    <family>Noto Sans Hebrew</family>' \
+    '    <family>Noto Sans Thai</family>' \
+    '    <family>Noto Sans Devanagari</family>' \
+    '    <family>Noto Color Emoji</family>' \
+    '    <family>Unifont</family>' \
+    '  </prefer></alias>' \
+    '  <alias binding="strong"><family>serif</family><prefer>' \
+    '    <family>Liberation Serif</family>' \
+    '    <family>Noto Serif CJK SC</family>' \
+    '    <family>Noto Color Emoji</family>' \
+    '    <family>Unifont</family>' \
+    '  </prefer></alias>' \
+    '  <alias binding="strong"><family>monospace</family><prefer>' \
+    '    <family>Liberation Mono</family>' \
+    '    <family>Noto Sans Mono CJK SC</family>' \
+    '    <family>Noto Color Emoji</family>' \
+    '    <family>Unifont</family>' \
+    '  </prefer></alias>' \
+    '</fontconfig>' > /etc/fonts/local.conf \
+  && fc-cache -f >/dev/null 2>&1 || true \
   && rm -rf /var/lib/apt/lists/*
 
 # 非 root 运行用户（与平台 BROWSER_USER 常量一致）

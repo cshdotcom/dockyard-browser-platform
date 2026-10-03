@@ -1,0 +1,54 @@
+# ============================================================
+# Dockyard 浏览器工作平台 — 多容器部署（平台 + PostgreSQL）
+# 适合：多实例/高并发/企业数据合规（数据独立于应用容器）
+# 平台容器自身仍是 All-In-One（沙箱浏览器同容器内嵌），仅数据库外置
+#
+# 使用：docker compose -f docker-compose.postgres.yml up -d
+# 首次启动自动建库 + 播种（无需手工执行 SQL）
+# ============================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dockyard-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dockyard
+      POSTGRES_PASSWORD: "change-me-db-password"
+      POSTGRES_DB: dockyard
+    volumes:
+      - dockyard-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dockyard -d dockyard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  dockyard:
+    image: ghcr.io/cshdotcom/dockyard-browser-platform:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: dockyard
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      TZ: Asia/Shanghai
+      # ---- 数据库（PostgreSQL 外置；启动脚本自动 prisma db push + 播种 + 审计触发器）----
+      DATABASE_PROVIDER: postgres
+      DATABASE_URL: "postgresql://dockyard:change-me-db-password@postgres:5432/dockyard?schema=public"
+      # ---- 三个必改密钥 ----
+      AUTH_SECRET: "change-me-to-a-long-random-string"
+      ENCRYPTION_KEY: "change-me-32-bytes-secret-key-!!!"
+      CRON_SECRET: "change-me-cron-secret"
+      ADMIN_PASSWORD: "Admin@2026"
+    volumes:
+      - dockyard-storage:/app/storage
+
+volumes:
+  dockyard-pgdata:
+  dockyard-storage:

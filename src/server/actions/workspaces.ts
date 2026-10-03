@@ -347,25 +347,44 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
       const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
       // 重建时重新解析生效策略（管理员收紧/放宽即时作用于新容器；四层解析含单沙箱级）
       const { network: netPolicy, domain: domPolicy, endpoint: endPolicy, file: filePolicy } = await resolveAccessPolicies(ws.userId, ws.id)
-      const novnc = await createNovncSession({
-        proxyUrl: proxyInfo.proxyUrl,
-        ttlMinutes: ws.ttlMinutes || undefined,
-        profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
-        userId: ws.userId,
-        profileKey,
-        workspaceId: ws.id, // CRX/网络/域名/端点/文件策略按沙箱级解析注入
-        labels: { "dockyard.owner": ws.userId, "dockyard.profile-key": profileKey },
-        networkPolicy: netPolicy,
-        domainPolicy: domPolicy,
-        endpointPolicy: endPolicy,
-        filePolicy,
-        // r24-c/d/e：沙箱输入法/布局偏好随重建应用；剪贴板透传全局开关；沙箱专属用户身份
-        imeEngine: ws.imeEngine,
-        kbLayout: ws.kbLayout,
-        clipboardEnabled: await getConfigBool("workspace.clipboardVncSync", true),
-        workspaceUuid: ws.uuid,
-        ownerUsername: (await db.user.findUnique({ where: { id: ws.userId }, select: { username: true } }))?.username || "u",
-      })
+      let novnc
+      try {
+        novnc = await createNovncSession({
+          proxyUrl: proxyInfo.proxyUrl,
+          ttlMinutes: ws.ttlMinutes || undefined,
+          profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
+          userId: ws.userId,
+          profileKey,
+          workspaceId: ws.id, // CRX/网络/域名/端点/文件策略按沙箱级解析注入
+          labels: { "dockyard.owner": ws.userId, "dockyard.profile-key": profileKey },
+          networkPolicy: netPolicy,
+          domainPolicy: domPolicy,
+          endpointPolicy: endPolicy,
+          filePolicy,
+          // r24-c/d/e：沙箱输入法/布局偏好随重建应用；剪贴板透传全局开关；沙箱专属用户身份
+          imeEngine: ws.imeEngine,
+          kbLayout: ws.kbLayout,
+          clipboardEnabled: await getConfigBool("workspace.clipboardVncSync", true),
+          workspaceUuid: ws.uuid,
+          ownerUsername: (await db.user.findUnique({ where: { id: ws.userId }, select: { username: true } }))?.username || "u",
+        })
+      } catch (e) {
+        // r25-d：启动失败不再静默回 STOPPED —— 落 ERROR 状态 + 失败原因持久化到 hardeningJson
+        //（用户在列表即可见失败态与原因，重试入口保留；引擎层已自动重试 3 次）
+        const reason = (e as Error).message || String(e)
+        await db.browserWorkspace.update({
+          where: { id },
+          data: {
+            status: "ERROR",
+            hardeningJson: JSON.parse(JSON.stringify({
+              ...(prevHardening || {}),
+              lastError: reason.slice(0, 2000),
+              lastErrorAt: new Date().toISOString(),
+            })) as Prisma.InputJsonValue,
+          },
+        }).catch(() => {})
+        throw new Error(`沙箱启动失败：${reason}`)
+      }
       await db.browserWorkspace.update({
         where: { id },
         data: {
