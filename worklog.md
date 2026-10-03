@@ -957,3 +957,20 @@ Work Log:
 Stage Summary:
 - 用户五项指令全部落地：①VNC 会话录像回放企业级全链路（四级策略链/进程树内 ffmpeg 分段/Range 流回放/RBAC 四角色/回收站/保留期配额治理/用户空间/后台全站可见可操作/审计闭环）②更多 Chromium 策略项（37 项目录+校验+模板注入+安全层不可覆盖）③防退出档位（fullscreen 默认/kiosk 最强——菜单退出入口物理不存在+关闭最小化按钮隐藏+Ctrl+Q 长按+1s 自动重启兜底）④后台审计+策略+功能开关（/admin/feature-flags 24 项治理）⑤打 tag v1.7.0（CI 全绿后）
 - 35+23 断言 + 浏览器真实回放实测全部通过；QA 数据清理归零
+
+---
+Task ID: 27-final
+Agent: main
+Task: r27 终态 — CI 全绿 + tag v1.7.0 发布 + 全链路收尾
+
+Work Log:
+- 【提交链】98a3902（r27 主体 40 文件）→ CI Lint 首跑失败（QA 脚本 require() 导入触发 no-require-imports；本地 lint 只查指定文件未覆盖）→ 6e276ba 修复（ESM 导入 + SystemConfig valueJson 解析 + 可选链断言）→ 重跑冒烟 35/35 确认无回归
+- 【CI 终态】6e276ba：CI Lint ✅ success + Build & Push Docker Image ✅ success（ffmpeg 新依赖层全量重建双平台 ~26 分钟）；98a3902 的 Build 亦 success
+- 【tag v1.7.0】annotated tag（含 r27 功能清单）推送 → docker-image.yml tags 触发 → 同 commit 全层缓存命中秒级完成 ✅ success
+- 【GHCR 发布确认】Packages API：02:59 发布 1.7.0 / 1.7 / latest 三 tag；02:52 发布 main（含 ffmpeg 录像组件）
+- 【dev 三服务】app:200 / bridge:health ok / hub 正常；QA 数据清理归零（录像 0 / 工作区 0 / 审计 0 / storage/recordings 空）
+
+Stage Summary:
+- r27 全部交付并发布：VNC 会话录像回放企业级闭环（四级策略链→进程树内 ffmpeg 分段→Range 流回放→RBAC→回收站→保留期配额→用户空间→OpenAPI）、防退出三档（kiosk 菜单退出入口物理不存在）、Chromium 策略目录 37 项、功能开关中心 24 项
+- CI 全绿 + v1.7.0 版本镜像发布 GHCR（1.7.0/1.7/latest/main）
+- 质量证据：smoke 35/35 + 真实沙箱 E2E 23/23（含 fMP4 缓冲根因修复与验证）+ 浏览器实测（video readyState=4 真实流加载）+ tsc 78=78 零新增 + eslint 0/0 + build 74 路由全绿
