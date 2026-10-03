@@ -1060,3 +1060,20 @@ Work Log:
 Stage Summary:
 - 用户三项指令全部落地：①启动疯狂/日志无成功四层根因组修复（日志洪水关/db push 失败可见/PG+guard 退避不自旋/healthcheck 宽限与形态感知 + 启动成功横幅三重可观测）②公告发布用户+用户组双多选+搜索（union 可见性/混合投放/双面板 UI/兼容旧数据零迁移）③v1.8.0 双镜像（主平台完整包 + Worker 分布式执行节点包，CI 同批构建）
 - 冒烟 54 + 回归 47 + 浏览器 E2E 全链路（含 DB/审计/API 断言）全部通过；QA 数据归零
+---
+Task ID: 30-final
+Agent: main
+Task: r30 终态 — CI 全绿 + tag v1.8.0 双镜像发布确认 + 收尾
+
+Work Log:
+- 【提交链】c384eaf（r30 主体 20 文件：启动硬化/公告双多选/Worker 镜像/CI 双镜像）→ 4fc127d（worklog）→ c50c786（CI 修复：Image summary 步骤 $GITHUB_STEP_SUM 笔误补全 MARY —— 4fc127d 轮双镜像均已成功推送但收尾步 ambiguous redirect 导致整体 failure）
+- 【CI 终态】c50c786：CI Lint ✅ success + Build & Push ✅ success（8 步全绿：主镜像构建 + Worker 镜像构建 + Image summary + 全部 Post 步骤）
+- 【tag v1.8.0】annotated tag（含双包发布说明 + 三重硬化 + 公告双多选清单）推送 → 37125653900 运行 ✅ success
+- 【GHCR 双镜像发布确认】主管理平台完整包：tags 1.8.0 / 1.8 / latest（13:30Z）；Worker 执行节点包：tags 1.8.0 / 1.8 / latest（13:36Z）；ghcr.io/v2 双镜像 manifest HTTP 200 可拉取（pull token 实测）
+- 【QA 交付】download/qa-r30/ 2 张截图：公告多选表单（双面板+搜索+chips）/ 多选范围列表摘要（2 个组+2 位用户）
+- 【环境】dev 三服务守护健康（app 200 / bridge health ok / hub 200）；QA 数据归零（公告/用户/组/站内信 0 残留）
+
+Stage Summary:
+- r30 全部交付并发布 v1.8.0：启动可靠性三重硬化（查询日志洪水/db push 失败掩盖/PG+guard 自旋/healthcheck 误判死 + 启动成功横幅三重可观测）、公告范围双多选（组+用户可搜索混合投放）、双镜像体系（主平台 All-In-One + Worker 分布式执行节点，CI 同批构建）
+- CI 终态：c50c786 双工作流全绿；v1.8.0 tag 构建成功；GHCR 双镜像 1.8.0/1.8/latest 在位且 manifest 200 可拉取
+- 质量证据：冒烟 54（公告 29 + 启动 15 + Worker 10）+ 回归 47（worknode 16 + hardware 31）+ 浏览器 E2E 全链路（双多选/搜索/混合投放/摘要/投递/demo 可见/30s API）+ tsc 22=基线零新增 + lint 0 error + build 76 路由
