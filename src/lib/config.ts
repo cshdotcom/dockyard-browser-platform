@@ -73,6 +73,8 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   // —— r28：回放安全（水印/导出）全局默认（沙箱>用户>组>全局 四级链）——
   "vnc.playbackWatermark": { value: "on", category: "GENERAL", type: "string", description: "回放水印默认档：force 强制水印(不可关) | on 默认开(可临时关) | off 关闭" },
   "vnc.playbackAllowExport": { value: false, category: "GENERAL", type: "boolean", description: "回放导出/下载默认策略（false=仅在线回放；用户/组/沙箱可覆盖）" },
+  // —— r29：17 项浏览器硬件权限全局默认（稀疏 JSON；四级链：沙箱>用户>组>全局）——
+  "hardware.defaults": { value: "{}", category: "GENERAL", type: "string", description: "硬件权限默认档 JSON（如 {\"camera\":{\"enabled\":true,\"audit\":true}}；17 项：camera/microphone/location/screenShare/clipboardRead/clipboardWrite/notifications/bluetooth/usb/serial/accelerometer/gyroscope/magnetometer/deviceOrientation/deviceMotion/midi/hid）" },
   "vnc.recordingManualStop": { value: false, category: "GENERAL", type: "boolean", description: "允许用户在沙箱停止前手动结束自己的录像（false=仅管理员可操作）" },
   "workspace.exitGuardDefault": { value: "fullscreen", category: "GENERAL", type: "string", description: "浏览器防退出默认档位（normal=现状/fullscreen=全屏守卫/kiosk=信息亭最强档；模板可按沙箱覆盖）" },
   "smtp.enabled": { value: false, category: "MAIL", type: "boolean", description: "邮件服务启用（关闭=控制台模拟模式）" },

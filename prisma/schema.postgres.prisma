@@ -64,6 +64,8 @@ model User {
   recycleRetentionDays   Int?
   // —— r28：文件传输限速（KB/s，null=继承组/全局；0=不限）——
   fileTransferKBps       Int?
+  // —— r29：17 项硬件权限用户级覆盖（稀疏 JSON；null=继承组/全局）——
+  hardwarePolicy         Json?
   loginSessionCount   Int       @default(0)
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -223,6 +225,8 @@ model Group {
   recycleRetentionDays Int?
   // —— r28：文件传输限速组级基线（KB/s，null=继承全局；0=不限）——
   fileTransferKBps Int?
+  // —— r29：17 项硬件权限组级基线（稀疏 JSON；null=继承父组/全局）——
+  hardwarePolicy  Json?
   createdByUserId  String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -616,6 +620,8 @@ model BrowserWorkspace {
   recordingOverride  String? // on | off | null=inherit
   // —— r28：回放安全沙箱级覆盖 { watermark: force|on|off, allowExport }（null=继承上层）——
   vncPlayback        Json?
+  // —— r29：17 项硬件权限沙箱级覆盖（稀疏 JSON；null=继承用户/组/全局）——
+  hardwareOverride   Json?
   lastActiveAt       DateTime? // 最近活跃（VNC取票/CDP指令/脚本执行触发）
   createdByUserId    String?
   createdAt          DateTime  @default(now())
@@ -1154,6 +1160,48 @@ model FileShareLink {
 
   @@index([ownerUserId])
   @@index([revokedAt, expiresAt])
+}
+
+// ============================================================
+// r29：Master/Worker 双包架构 —— Worker 工作节点
+//   Master（本服务）：元数据/调度/权限/策略/审计中枢；Worker：纯执行节点
+//   注册：管理员创建 → WORKER_NODE_UUID + WORKER_API_KEY（仅创建时一次性展示）
+//   通信：心跳（10s）上报资源；密钥泄露 → 驱逐（Worker 永久失效）
+// ============================================================
+
+model WorkNode {
+  id               String    @id @default(cuid())
+  nodeUuid         String    @unique // WORKER_NODE_UUID
+  name             String
+  region           String    @default("default") // 归属区域（调度锁定用）
+  note             String?
+  apiKeyHash       String    // WORKER_API_KEY SHA-256（明文永不回显）
+  enabled          Boolean   @default(true)
+  status           String    @default("PENDING") // PENDING(已注册未接入) | ONLINE | OFFLINE | EVICTED
+  // 心跳上报（最近一次快照）
+  cpuUsage         Float?
+  memUsage         Float?
+  diskUsage        Float?
+  diskFreeMb       Int?
+  sandboxCount     Int       @default(0)
+  sandboxRunning   Int       @default(0)
+  netInKbps        Float?
+  netOutKbps       Float?
+  version          String?
+  hostname         String?
+  lastHeartbeatAt  DateTime?
+  // 调度容量
+  maxSandboxes     Int       @default(20)
+  storageUsedMb    Int       @default(0)
+  evictedAt        DateTime?
+  evictReason      String?
+  createdByUserId  String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([region, status])
+  @@index([status])
+  @@index([lastHeartbeatAt])
 }
 
 model RiskListRule {

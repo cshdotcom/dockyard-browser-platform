@@ -76,6 +76,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
       items: [
         { key: "a-singbox", label: "SingBox 实例", href: "/admin/singbox", icon: <Server className="h-4 w-4" /> },
         { key: "a-network", label: "网络与节点", href: "/admin/network", icon: <Network className="h-4 w-4" /> },
+        { key: "a-worknodes", label: "Worker 节点", href: "/admin/worknodes", icon: <Server className="h-4 w-4" /> },
         { key: "a-config", label: "系统配置", href: "/admin/config", icon: <Settings2 className="h-4 w-4" /> },
         { key: "a-tasks", label: "定时任务", href: "/admin/tasks", icon: <Timer className="h-4 w-4" /> },
         { key: "a-files", label: "文件存储", href: "/admin/files", icon: <FolderOpen className="h-4 w-4" /> },
