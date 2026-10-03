@@ -1037,3 +1037,26 @@ Stage Summary:
 - r29 全部交付并发布：Master/Worker 双包架构主体（17 项硬件权限四级链/双模式监控/实时监控中心 16 宫格+CDP 控制/资源失联自动迁移/虚拟媒体投递/分布式文件存储 9 大条件/行为时间轴/Worker 文件通道）；打印机部分按用户指令整体跳过
 - 质量证据：冒烟 8 套 159 断言全过（worknode 16 + hardware 31 + monitor 24 + worknode-monitor 21 + media-cast 19 + dfs 32 + timeline 8 + clipboard-isolation 8）+ r28 回归 50 断言 + 浏览器 E2E 5 链路 5 截图 + tsc 零新增 + eslint 0/0 + build 76 路由全绿 + CI 双绿 + GHCR 发布确认
 - CI 状态：cd917a3 CI Lint ✅ + Build & Push ✅；GHCR main/latest 双 tag 在位
+---
+Task ID: 30
+Agent: main
+Task: r30 — 启动可靠性三重硬化（修"启动一直疯狂重启、日志从未显示启动成功"）+ 公告范围双多选（用户+用户组可搜索）+ Worker 分布式部署镜像 + CI 双镜像 + tag v1.8.0
+
+Work Log:
+- 【诊断】本地以镜像同布局（standalone + 完整 node_modules 叠加 + start.sh 语义）复现启动链路：全新卷启动本身正常 → 锁定四层放大器根因而非单一崩溃点
+- 【根因 1·日志洪水】src/lib/db.ts 生产环境 PrismaClient log:["query"] 每条 SQL 全量打印（30 项定时任务 + 全部页面请求 → docker logs/server.log 疯狂刷屏；长期运行把 storage 卷写满 → SQLite 写失败 → 服务崩溃 → guard 疯狂重启链）→ r30 默认仅 error/warn；PRISMA_LOG_QUERY=1 显式开启（r23 慢查询观测不受影响）
+- 【根因 2·失败掩盖】SQLite db push 旧写法 `... | tail -2 || log` 管道退出码取自 tail 恒为 0 —— 结构推送真实失败被完全掩盖（实测复现：失败无任何警告继续带病运行）→ 临时文件捕获真实退出码 + 3 次重试 + 高亮错误块 + 排查指引（磁盘满/只读/权限）
+- 【根因 3·自旋】PostgreSQL 不可达旧逻辑 3 次失败 exit 1 → guard 5 秒整轮重启 = 疯狂自旋；guard 固定 5s 无退避 → 崩溃越快重启越快 → r30：PG 轮内无限退避重试（5→60s 封顶，容器保持存活等 DB 恢复）；guard 指数退避 5→10→20→40→60s + 连续快崩降速 + 排查三步指引（server.log/桥日志/磁盘水位）
+- 【根因 4·误判死】healthcheck 旧版恒要求 /app/db/custom.db（postgres 部署永不存在 → 恒 unhealthy → 带健康门禁的编排器无限重启容器）+ start-period 40s 不够升级卷迁移 → r30：boot-state 标记（start.sh starting/ready + guard crashed）+ 15 分钟启动宽限期 + postgres 形态感知 + start-period 150s/retries 5
+- 【可观测】启动成功高亮横幅「DOCKYARD 启动成功（全部服务就绪）」+ 端口/数据库形态/初始账号摘要 + 主服务穿透探测（网关→Next /api/openapi/doc 全链路非仅网关自身）+ 服务日志 20MB 轮转（cp .1 + 原地截断，O_APPEND/tail -F 均不受影响）
+- 【公告范围双多选】schema 新增 groupIdsJson/userIdsJson（兼容字段=数组首项，旧单选数据零迁移）；announcement-targets.ts union 谓词（组数组∪单值 / 用户数组∪单值 / GLOBAL）；upsertAnnouncementAction 多选校验（存在性/去重/上限 100/类型派生：仅组=GROUP 含用户=USER 混合可组+用户）+ 审计快照带多选范围；fanOutInboxNotices 混合投放（全部组成员并集 ∪ 全部定向用户）；可见性 API/用户公告页/管理页全部改 union 匹配（先时间窗查询再内存过滤，量级小最稳）
+- 【公告 UI】范围改「全站 / 指定范围」二态；指定范围下双面板（用户组多选 + 用户多选）：搜索框（组名/用户名/昵称匹配）+ 字母序列表（服务端预排）+ 已选徽章 + 可移除 chips + 一键清空；列表「范围」列多选摘要（2 个组+2 位用户，悬停全量）；详情弹窗全量展示
+- 【Worker 分布式镜像】Dockerfile.worker：沙箱执行运行时（chromium/Xvfb/x11vnc/ffmpeg/fcitx5 全家桶/全语言字体/locale/fontconfig 回退链，与主镜像同标准）+ mini-services/worker 守护 + sandbox-launch.sh + worker-entrypoint.sh（三环境变量校验拒绝启动 + 三步部署指引 + 崩溃退避 5→30s + 驱逐识别 exit 2/3 不再冲击主控 + SIGTERM 优雅退出）；compose.worker + deploy README 双包章节
+- 【CI 双镜像】docker-image.yml 两段构建：主镜像（All-In-One 完整包）+ -worker 后缀镜像（semver/branch/latest 同批 tag）；tag v1.8.0 将发布 1.8.0/1.8/latest 三组×2 镜像
+- 【E2E 实证】冒烟：r30a 公告多选 29/29（谓词 5 形态/旧单值兼容/混合范围/局外人/DB 全链路/摘要/解析安全）；r30b 启动链路 15/15（横幅/boot-state 三态语义/宽限期/洪水关闭实测 0 行/PG 快速失败/SQLite 失败重试+高亮+继续启动/轮存活非自旋）；r30c Worker 入口 10/10（缺凭据拒绝+指引/主控不可达存活+health 三字段/心跳失败仅告警/SIGTERM 优雅退出，顺带实证退避 5→10→20s）；回归 r29-worknode 16/16 + r29a-hardware 31/31
+- 【浏览器 E2E】admin 登录→新建公告→指定范围→组搜索（"默"精确过滤）+用户搜索（"demo"精确过滤）→勾选 2 组+2 用户（4 chips 徽章）→标题/内容/站内信→提交→列表「定向用户 2 个组+2 位用户」摘要→落库验证（groupIdsJson 2 组/userIdsJson 2 用户/兼容字段首项）→站内信投递 2 位（demo 组成员并集 + admin 定向）→审计快照 targetGroups=2/targetUsers=2→demo 登录→/announcements 可见→30s 轮询 API 可见；QA 数据清理归零
+- 【质量门】tsc 22=基线 22 零新增（stash 对照法）；bun run lint 0 error（2 既有 warning 与本次无关）；bun run build 全绿 76 路由；三套新冒烟 + 两套回归全过
+
+Stage Summary:
+- 用户三项指令全部落地：①启动疯狂/日志无成功四层根因组修复（日志洪水关/db push 失败可见/PG+guard 退避不自旋/healthcheck 宽限与形态感知 + 启动成功横幅三重可观测）②公告发布用户+用户组双多选+搜索（union 可见性/混合投放/双面板 UI/兼容旧数据零迁移）③v1.8.0 双镜像（主平台完整包 + Worker 分布式执行节点包，CI 同批构建）
+- 冒烟 54 + 回归 47 + 浏览器 E2E 全链路（含 DB/审计/API 断言）全部通过；QA 数据归零
