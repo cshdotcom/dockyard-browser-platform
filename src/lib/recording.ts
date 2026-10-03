@@ -20,7 +20,7 @@ import { writeAudit } from "./audit"
 import { createHmac, timingSafeEqual } from "crypto"
 import { mkdir, readdir, stat, rm, writeFile } from "fs/promises"
 import { join } from "path"
-import { execFile } from "child_process"
+import { execFile, spawn } from "child_process"
 
 export interface RecordingPolicy {
   enabled: boolean
@@ -321,7 +321,263 @@ async function probeDurationSec(abs: string): Promise<number> {
 }
 
 // ---- 沙箱存活探测（孤儿终结判据）----
+// ============================================================
+// r31：手动录屏引擎（VNC 工具栏「录屏」按钮触发；异步后台 ffmpeg）
+//   会话组：`${novncSessionId}-man`（独立会话组 → 独立分段行，UI 可区分策略录像与手动录像）
+//   嵌入形态：平台侧直接 spawn ffmpeg x11grab 目标显示号（同进程树外、detached 保活）
+//   外部容器形态：docker exec 容器内 ffmpeg（需该容器创建时已挂录像目录；无挂载给出明确指引）
+//   停止：SIGTERM 优雅收尾（fMP4 trailer 落盘）→ finalizeRecordingSession 收口
+// ============================================================
+const MANUAL_SUFFIX = "-man"
+
+export function manualSessionId(sessionId: string): string {
+  return `${sessionId}${MANUAL_SUFFIX}`
+}
+
+function ffmpegArgs(dir: string, display: number, size: string, fps: number, segSec: number, startIdx: number): string[] {
+  return [
+    "-f", "x11grab",
+    "-framerate", String(fps),
+    "-video_size", size,
+    "-i", `:${display}`,
+    "-c:v", "libx264",
+    "-preset", "ultrafast",
+    "-tune", "zerolatency",
+    "-pix_fmt", "yuv420p",
+    "-g", String(Math.max(12, fps * 3)),
+    "-movflags", "+frag_keyframe+empty_moov",
+    "-f", "segment",
+    "-segment_time", String(segSec),
+    "-segment_start_number", String(startIdx),
+    "-reset_timestamps", "1",
+    join(dir, "seg-%03d.mp4"),
+  ]
+}
+
+interface ManualWorkspaceInfo {
+  id: string
+  uuid: string
+  name: string
+  userId: string
+  novncSessionId: string
+  containerRef: string | null
+  resolution: string
+}
+
+// pid 存活（0 信号探测；跨进程仅限本机嵌入形态）
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function startManualRecording(
+  ws: ManualWorkspaceInfo,
+  opts?: { operatorUserId?: string; operatorName?: string },
+): Promise<{ started: boolean; sessionId: string; mode: "embedded" | "docker"; reason?: string }> {
+  const sessionId = manualSessionId(ws.novncSessionId)
+  if (!safeId(ws.novncSessionId)) return { started: false, sessionId, mode: "embedded", reason: "会话标识非法" }
+
+  // 已有活跃手动会话 → 幂等返回
+  const live = await db.vncRecording.findFirst({
+    where: { sessionId, status: "RECORDING", deletedAt: null },
+    select: { id: true },
+  })
+  if (live) return { started: true, sessionId, mode: "embedded", reason: "已在录制中（幂等）" }
+
+  const tuning = await recordingTuning()
+  const dir = recordingSessionDir(ws.userId, sessionId)
+  if (!dir) return { started: false, sessionId, mode: "embedded", reason: "录像目录不可用" }
+  await mkdir(dir, { recursive: true }).catch(() => null)
+
+  // 续录：已有分段数起步（不覆盖历史分段）
+  let startIdx = 0
+  try {
+    startIdx = (await readdir(dir)).filter((f) => /^seg-\d{3,6}\.mp4$/.test(f)).length
+  } catch { /* 空目录 */ }
+
+  // 解析执行形态：嵌入沙箱（平台可直达显示号）优先
+  let mode: "embedded" | "docker" = "embedded"
+  let display = -1
+  let spawned = false
+  let pid: number | null = null
+  try {
+    const { embeddedSandbox } = await import("./embedded-sandbox")
+    const entry = await embeddedSandbox(ws.novncSessionId)
+    if (entry) {
+      display = entry.display
+      const size = ws.resolution || "1280x800"
+      const child = spawn("ffmpeg", ffmpegArgs(dir, display, size, tuning.fps, tuning.segmentSec, startIdx), {
+        env: { ...process.env, DISPLAY: `:${display}` },
+        detached: true,
+        stdio: "ignore",
+      })
+      child.unref()
+      pid = child.pid ?? null
+      spawned = true
+    }
+  } catch { /* 嵌入引擎不可用 → 走 docker 形态 */ }
+
+  if (!spawned) {
+    // 外部容器形态：docker exec 容器内 ffmpeg（录像目录 bind 必须在创建时已挂载）
+    try {
+      const { ENV: env, externalAvailable } = await import("./env")
+      if (!externalAvailable.docker || !ws.containerRef) {
+        return { started: false, sessionId, mode: "docker", reason: "当前会话无可用录像通道（外部容器形态需启用录像策略挂载）" }
+      }
+      // 探测容器内录像目录是否挂载
+      const probe = await new Promise<boolean>((resolve) => {
+        execFile("docker", ["exec", ws.containerRef!, "test", "-d", "/home/browser/recordings"], { timeout: 8000 }, (e) => resolve(!e))
+      })
+      if (!probe) {
+        return { started: false, sessionId, mode: "docker", reason: "该沙箱未挂载录像目录（外部容器形态需在创建时启用录像策略）" }
+      }
+      // 容器内启动（docker exec -d 后台；pid 由容器内 pgrep 回查）
+      const args = ["exec", "-d", "-e", "DISPLAY=:99", ws.containerRef, "ffmpeg",
+        "-f", "x11grab", "-framerate", String(tuning.fps), "-video_size", ws.resolution || "1280x800",
+        "-i", ":99", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+        "-pix_fmt", "yuv420p", "-g", String(Math.max(12, tuning.fps * 3)),
+        "-movflags", "+frag_keyframe+empty_moov", "-f", "segment",
+        "-segment_time", String(tuning.segmentSec), "-segment_start_number", String(startIdx),
+        "-reset_timestamps", "1", "/home/browser/recordings/seg-%03d.mp4"]
+      const execRes = await new Promise<{ ok: boolean; err?: string }>((resolve) => {
+        execFile("docker", args, { timeout: 15000 }, (e, _so, se) => resolve({ ok: !e, err: (e as Error | null)?.message || String(se) }))
+      })
+      if (!execRes.ok) return { started: false, sessionId, mode: "docker", reason: `容器内 ffmpeg 启动失败：${execRes.err}` }
+      mode = "docker"
+      spawned = true
+    } catch (e) {
+      return { started: false, sessionId, mode: "docker", reason: `录像通道异常：${(e as Error).message}` }
+    }
+  }
+
+  // 登记会话行（trigger=MANUAL；幂等）+ pid 溯源
+  await registerWorkspaceRecording({
+    workspace: { id: ws.id, uuid: ws.uuid, name: ws.name, userId: ws.userId },
+    sessionId,
+    resolution: ws.resolution,
+    policy: { enabled: true, source: "GLOBAL_DEFAULT", resolvedAt: new Date().toISOString() },
+    tuning,
+    trigger: "MANUAL",
+    metadata: { manual: true, mode, pid, display: display >= 0 ? display : undefined, containerRef: ws.containerRef || undefined, operatorUserId: opts?.operatorUserId, operatorName: opts?.operatorName },
+  })
+  // pid/mode 溯源回写（行可能由扫描任务先行创建 → 显式覆盖元数据，确保停止时可定位进程）
+  const firstRow = await db.vncRecording.findFirst({ where: { sessionId, segmentIndex: 0 }, select: { id: true } })
+  if (firstRow) {
+    await db.vncRecording.update({
+      where: { id: firstRow.id },
+      data: { metadata: { manual: true, mode, pid, display: display >= 0 ? display : undefined, containerRef: ws.containerRef || undefined, operatorUserId: opts?.operatorUserId, operatorName: opts?.operatorName } as never },
+    }).catch(() => null)
+  }
+  // 扫描补行（立即落第一段行）
+  await scanRecordingSegments(sessionId).catch(() => null)
+  await writeAudit({
+    operatorUserId: opts?.operatorUserId || null,
+    operatorName: opts?.operatorName || null,
+    operationType: "RECORDING_MANUAL_START",
+    resourceType: "RECORDING",
+    resourceId: sessionId,
+    resourceName: ws.name,
+    ownerUserId: ws.userId,
+    severity: "INFO",
+    after: { sessionId, mode, pid, display: display >= 0 ? display : 99, fps: tuning.fps, segmentSec: tuning.segmentSec, resolution: ws.resolution },
+  })
+  return { started: true, sessionId, mode }
+}
+
+export async function stopManualRecording(
+  sessionId: string,
+  opts?: { operatorUserId?: string; operatorName?: string },
+): Promise<{ stopped: boolean; reason?: string }> {
+  const rows = await db.vncRecording.findMany({ where: { sessionId, status: "RECORDING", deletedAt: null }, take: 1 })
+  if (rows.length === 0) return { stopped: false, reason: "没有进行中的手动录像" }
+  const meta = (rows[0].metadata as Record<string, unknown> | null) || {}
+  const mode = meta.mode === "docker" ? "docker" : "embedded"
+  const pid = typeof meta.pid === "number" ? meta.pid : null
+  const containerRef = typeof meta.containerRef === "string" ? meta.containerRef : null
+  try {
+    if (mode === "embedded" && pid) {
+      try { process.kill(pid, "SIGTERM") } catch { /* 已退出 */ }
+      // 优雅收尾窗口（fMP4 trailer 落盘），杀不死再补 KILL
+      for (let i = 0; i < 20 && pidAlive(pid); i++) await new Promise((r) => setTimeout(r, 100))
+      if (pidAlive(pid)) { try { process.kill(pid, "SIGKILL") } catch { /* noop */ } }
+    } else if (mode === "docker" && containerRef) {
+      await new Promise<void>((resolve) => {
+        execFile("docker", ["exec", containerRef, "pkill", "-TERM", "-f", "recordings/seg-"], { timeout: 8000 }, () => resolve())
+      })
+      await new Promise((r) => setTimeout(r, 1500))
+    }
+  } catch { /* 收尾尽力而为，finalize 兜底 */ }
+  const finalized = await finalizeRecordingSession(sessionId, {
+    operatorUserId: opts?.operatorUserId,
+    operatorName: opts?.operatorName,
+    reason: "manual_stop",
+  })
+  await writeAudit({
+    operatorUserId: opts?.operatorUserId || null,
+    operatorName: opts?.operatorName || null,
+    operationType: "RECORDING_MANUAL_STOP",
+    resourceType: "RECORDING",
+    resourceId: sessionId,
+    resourceName: rows[0].workspaceName,
+    ownerUserId: rows[0].userId,
+    severity: "INFO",
+    after: { sessionId, finalized },
+  })
+  return { stopped: true }
+}
+
+// 手动录像状态查询（VNC 工具栏按钮轮询）
+export async function manualRecordingStatus(workspaceId: string): Promise<{
+  active: boolean
+  sessionId: string | null
+  startedAt: string | null
+  segments: number
+}> {
+  const rows = await db.vncRecording.findMany({
+    where: { workspaceId, status: "RECORDING", deletedAt: null, trigger: "MANUAL" },
+    orderBy: { startedAt: "desc" },
+  })
+  if (rows.length === 0) return { active: false, sessionId: null, startedAt: null, segments: 0 }
+  return {
+    active: true,
+    sessionId: rows[0].sessionId,
+    startedAt: rows[0].startedAt.toISOString(),
+    segments: rows.length,
+  }
+}
+
 async function sandboxAlive(sessionId: string): Promise<boolean> {
+  // r31：手动录像会话组（`-man` 后缀）→ 存活 = 父沙箱存活 且 ffmpeg 进程存活
+  if (sessionId.endsWith(MANUAL_SUFFIX)) {
+    const parent = sessionId.slice(0, -MANUAL_SUFFIX.length)
+    const parentAlive = await sandboxAlive(parent)
+    if (!parentAlive) return false // 父沙箱已死 → 手动录像也应终结
+    const rows = await db.vncRecording.findMany({
+      where: { sessionId, status: "RECORDING", deletedAt: null },
+      select: { metadata: true },
+      take: 1,
+    })
+    const meta = (rows[0]?.metadata as Record<string, unknown> | null) || {}
+    const pid = typeof meta.pid === "number" ? meta.pid : null
+    if (meta.mode === "embedded" && pid) return pidAlive(pid)
+    if (meta.mode === "docker" && typeof meta.containerRef === "string") {
+      // 容器内 ffmpeg 探测（探测失败按存活处理，下轮再试）
+      try {
+        const { externalAvailable } = await import("./env")
+        if (!externalAvailable.docker) return true
+        return await new Promise<boolean>((resolve) => {
+          execFile("docker", ["exec", meta.containerRef as string, "pgrep", "-f", "recordings/seg-"], { timeout: 8000 }, (e) => resolve(!e))
+        })
+      } catch {
+        return true
+      }
+    }
+    return true // 元数据缺失：不贸然终结（停止动作兜底）
+  }
   try {
     const { embeddedSandbox, embeddedSandboxAlive } = await import("./embedded-sandbox")
     const entry = await embeddedSandbox(sessionId)

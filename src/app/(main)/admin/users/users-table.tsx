@@ -9,7 +9,7 @@ import { Cpu } from "lucide-react"
 import { RetentionPolicyDialog } from "@/components/recycle/retention-policy-dialog"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2, Share2, Ban, Undo2, UserX , Video , Recycle , Gauge } from "lucide-react"
+import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2, Share2, Ban, Undo2, UserX , Video , Recycle , Gauge, Pencil } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { UserAvatar } from "@/components/shared/user-avatar"
@@ -173,6 +173,10 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
   const [tempPassword, setTempPassword] = React.useState<{ username: string; password: string } | null>(null)
   const [backupCodes, setBackupCodes] = React.useState<{ username: string; codes: string[] } | null>(null)
   const [busyAction, setBusyAction] = React.useState("")
+
+  // r31：用户级 VNC 会话时长自定义弹窗（预设菜单 + 任意分钟数）
+  const [vncLimitUser, setVncLimitUser] = React.useState<AdminUserRow | null>(null)
+  const [vncLimitValue, setVncLimitValue] = React.useState(120)
 
   // ---- 通用 action 调用 ----
   const callAction = async (name: string, fn: () => Promise<{ code: number; msg: string }>) => {
@@ -507,6 +511,10 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />
+            {/* r31：自定义时长（任意分钟数；三级策略统一“预设+自定义”交互） */}
+            <DropdownMenuItem onClick={() => { setVncLimitUser(row); setVncLimitValue(row.vncSessionMaxMinutes && row.vncSessionMaxMinutes > 0 ? row.vncSessionMaxMinutes : 120) }}>
+              <Pencil className="mr-2 h-3 w-3" /> 自定义时长…
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: row.allowInternalNetwork, allowSecureLocationAccess: row.allowSecureLocationAccess, vncSessionMaxMinutes: 0 }))}>
               不限制（显式）
             </DropdownMenuItem>
@@ -718,6 +726,45 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
             targetId={hwPolicyUser.id}
             targetName={hwPolicyUser.username}
           />
+        )}
+
+        {/* r31：用户级 VNC 会话时长自定义弹窗 */}
+        {vncLimitUser && (
+          <Dialog open onOpenChange={(v) => !v && setVncLimitUser(null)}>
+            <DialogContent className="max-w-sm">
+              <DialogHeader>
+                <DialogTitle>VNC 会话时长 · {vncLimitUser.username}</DialogTitle>
+                <DialogDescription>
+                  当前：{vncLimitUser.vncSessionMaxMinutes == null ? "继承（组/全局）" : vncLimitUser.vncSessionMaxMinutes > 0 ? `${vncLimitUser.vncSessionMaxMinutes} 分钟` : "不限"}
+                  。用户级覆盖优先于用户组与全局；沙箱级策略仍最高。
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="flex flex-wrap gap-1.5">
+                  {[15, 30, 60, 120, 240, 480, 720].map((m) => (
+                    <button key={m} type="button" onClick={() => setVncLimitValue(m)}
+                      className={`h-7 rounded-md border px-2 text-xs ${vncLimitValue === m ? "bg-primary text-primary-foreground border-primary" : "bg-background hover:bg-muted"}`}>
+                      {m >= 60 ? `${m / 60}h` : `${m}m`}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2">
+                  <PrecisionInput value={vncLimitValue} onChange={(v) => setVncLimitValue(Math.max(1, Math.min(43200, Math.round(v))))} min={1} max={43200} suffix="分" />
+                  <span className="text-xs text-muted-foreground whitespace-nowrap">
+                    = {Math.floor(vncLimitValue / 60)} 小时 {vncLimitValue % 60} 分
+                  </span>
+                </div>
+              </div>
+              <DialogFooter className="gap-2">
+                <Button variant="outline" size="sm" onClick={() => { void callAction(vncLimitUser.id, () => setUserNetworkPolicyAction({ id: vncLimitUser.id, allowInternalNetwork: vncLimitUser.allowInternalNetwork, allowSecureLocationAccess: vncLimitUser.allowSecureLocationAccess, vncSessionMaxMinutes: null })); setVncLimitUser(null) }}>
+                  恢复继承
+                </Button>
+                <Button size="sm" onClick={() => { void callAction(vncLimitUser.id, () => setUserNetworkPolicyAction({ id: vncLimitUser.id, allowInternalNetwork: vncLimitUser.allowInternalNetwork, allowSecureLocationAccess: vncLimitUser.allowSecureLocationAccess, vncSessionMaxMinutes: vncLimitValue })); setVncLimitUser(null) }}>
+                  应用自定义时长
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         )}
 
       {/* 删除确认 */}

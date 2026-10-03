@@ -71,6 +71,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         { key: "a-workspaces", label: "工作区管控", href: "/admin/workspaces", icon: <Globe className="h-4 w-4" /> },
         { key: "a-monitor", label: "实时监控中心", href: "/admin/monitor", icon: <Monitor className="h-4 w-4" /> },
         { key: "a-feature-flags", label: "功能开关", href: "/admin/feature-flags", icon: <ToggleLeft className="h-4 w-4" /> },
+        { key: "a-permissions", label: "权限中心", href: "/admin/permissions", icon: <ShieldCheck className="h-4 w-4" /> },
       ],
     },
     {

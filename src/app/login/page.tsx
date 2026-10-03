@@ -29,7 +29,7 @@ export default async function LoginPage({
       <div className="w-full max-w-md space-y-6">
         <div className="text-center space-y-2">
           {siteLogo ? (
-            // eslint-disable-next-line @next/next/no-img-element
+             
             <img src={siteLogo} alt={siteName} className="mx-auto h-12 w-12 rounded-xl object-cover" />
           ) : (
             <div className="mx-auto h-12 w-12 rounded-xl bg-teal-600 flex items-center justify-center text-white font-bold text-xl">D</div>

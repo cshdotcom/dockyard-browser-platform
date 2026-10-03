@@ -162,20 +162,29 @@ function emptyStats(): RecordingStats {
   return { segments: 0, sessions: 0, totalBytes: 0, totalDurationSec: 0, recordingNow: 0, quotaGb: 0, retentionDays: 0, userVisible: false }
 }
 
-// ---- 我的录像（用户空间简版：配额卡片 + 分组列表）----
+// ---- 我的录像（用户空间简版：配额卡片 + 分组列表；r31 支持关键词 + 多选沙箱筛选）----
 export async function myRecordingsAction(input: unknown): Promise<ActionResult<{ rows: RecordingRow[]; usage: { segments: number; totalBytes: number; totalDurationSec: number; quotaGb: number; oldestAt: string | null }; retentionDays: number }>> {
   return actionHandler(async () => {
     const ctx = await requireAuth()
-    const p = zodValidate(z.object({ keyword: z.string().max(64).optional(), take: z.number().int().min(1).max(200).optional() }), input)
+    const p = zodValidate(z.object({
+      keyword: z.string().max(64).optional(),
+      workspaceIds: z.array(z.string().max(64)).max(50).optional(), // r31：多选沙箱筛选
+      take: z.number().int().min(1).max(200).optional(),
+    }), input)
     const visible = await getConfigBool("vnc.recordingUserVisible", true)
     const usage = await recordingUserUsage(ctx.userId)
     if (!visible && ctx.role === "USER") {
       return { rows: [], usage: { ...usage, oldestAt: usage.oldestAt?.toISOString() || null }, retentionDays: Math.max(0, await getConfigNumber("vnc.recordingRetentionDays", 90)) }
     }
     const rows = await db.vncRecording.findMany({
-      where: { userId: ctx.userId, deletedAt: null, ...(p.keyword ? { OR: [{ workspaceName: { contains: p.keyword } }, { sessionId: { contains: p.keyword } }] } : {}) },
+      where: {
+        userId: ctx.userId,
+        deletedAt: null,
+        ...(p.workspaceIds && p.workspaceIds.length > 0 ? { workspaceId: { in: p.workspaceIds } } : {}),
+        ...(p.keyword ? { OR: [{ workspaceName: { contains: p.keyword } }, { sessionId: { contains: p.keyword } }] } : {}),
+      },
       orderBy: [{ startedAt: "desc" }],
-      take: p.take ?? 100,
+      take: p.take ?? 200,
     })
     const segBySession = new Map<string, number>()
     for (const r of rows) segBySession.set(r.sessionId, (segBySession.get(r.sessionId) || 0) + 1)
@@ -378,5 +387,88 @@ export async function triggerRecordingScanAction(): Promise<ActionResult<{ sessi
       severity: "INFO", after: r,
     })
     return r
+  })
+}
+
+// ============================================================
+// r31：VNC 工具栏手动录屏按钮（异步启动/停止）
+//   权限：所有者 / OPERATE 共享 / 所辖组管理员 / ADMIN+（与 VNC 接入权限同构）
+//   状态轮询：manualRecordingStatusAction（15s 间隔，按钮脉冲显示）
+// ============================================================
+
+// ---- VNC 接入权限同构解析（与 workspaces.resolveVncAccess 同语义：所有者/OPERATE 共享/组管理员/ADMIN+）----
+async function vncOperateAccess(ctx: { userId: string; role: string }, ws: { id: string; userId: string; groupId: string | null }): Promise<boolean> {
+  if (ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN") return true
+  if (ctx.userId === ws.userId) return true
+  const share = await db.workspaceShare.findFirst({
+    where: {
+      workspaceId: ws.id, targetUserId: ctx.userId, revokedAt: null,
+      OR: [{ expireAt: null }, { expireAt: { gt: new Date() } }],
+    },
+    select: { permission: true },
+  })
+  if (share?.permission === "OPERATE") return true
+  if (ctx.role === "GROUP_ADMIN" && ws.groupId) {
+    const { userGroupIds } = await import("@/lib/permissions")
+    const gids = await userGroupIds(ctx.userId)
+    if (gids.includes(ws.groupId)) return true
+  }
+  return false
+}
+
+export async function manualRecordingStatusAction(input: unknown): Promise<ActionResult<{ active: boolean; sessionId: string | null; startedAt: string | null; segments: number; canControl: boolean }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { workspaceId } = zodValidate(z.object({ workspaceId: zId }), input)
+    const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null }, select: { id: true, userId: true, groupId: true } })
+    if (!ws) throw new Error("工作区不存在")
+    const canControl = await vncOperateAccess(ctx, ws)
+    const { manualRecordingStatus } = await import("@/lib/recording")
+    const st = await manualRecordingStatus(workspaceId)
+    return { ...st, canControl }
+  })
+}
+
+export async function manualRecordingControlAction(input: unknown): Promise<ActionResult<{ active: boolean; sessionId: string | null; message: string }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const p = zodValidate(z.object({ workspaceId: zId, op: z.enum(["start", "stop"]) }), input)
+    const ws = await db.browserWorkspace.findFirst({
+      where: { id: p.workspaceId, deletedAt: null },
+      select: { id: true, uuid: true, name: true, userId: true, groupId: true, novncSessionId: true, containerRef: true, hardeningJson: true, status: true },
+    })
+    if (!ws) throw new Error("工作区不存在")
+    if (ws.status !== "RUNNING" && ws.status !== "IDLE") throw new Error(`会话当前不可录制（${ws.status}）`)
+    if (!ws.novncSessionId) throw new Error("会话未运行（无法定位录像通道）")
+    if (!(await vncOperateAccess(ctx, ws))) throw new Error("仅所有者/操作共享/管理员可控制录屏")
+
+    const hardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
+    const resolution = (hardening.resolution as string) || "1280x800"
+
+    const { startManualRecording, stopManualRecording, manualRecordingStatus, manualSessionId } = await import("@/lib/recording")
+    if (p.op === "start") {
+      // 用户端可见性关闭时不允许用户自己发起（管理员不受限）
+      if (ctx.role === "USER") {
+        const visible = await getConfigBool("vnc.recordingUserVisible", true)
+        if (!visible) throw new Error("管理员已关闭用户端录像功能")
+      }
+      const r = await startManualRecording(
+        {
+          id: ws.id, uuid: ws.uuid, name: ws.name, userId: ws.userId,
+          novncSessionId: ws.novncSessionId, containerRef: ws.containerRef, resolution,
+        },
+        { operatorUserId: ctx.userId, operatorName: ctx.username },
+      )
+      if (!r.started) throw new Error(r.reason || "录屏启动失败")
+      return {
+        active: true,
+        sessionId: r.sessionId,
+        message: `手动录屏已启动（${r.mode === "embedded" ? "内嵌通道" : "容器通道"}·异步分段落盘，停止后自动入库回放）`,
+      }
+    }
+    const sessionId = manualSessionId(ws.novncSessionId)
+    const r = await stopManualRecording(sessionId, { operatorUserId: ctx.userId, operatorName: ctx.username })
+    if (!r.stopped) throw new Error(r.reason || "没有进行中的手动录像")
+    return { active: false, sessionId, message: "录屏已停止（分段正在收口，稍后可在录像列表回放）" }
   })
 }

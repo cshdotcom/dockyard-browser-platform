@@ -16,6 +16,7 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { TIMEZONE_OPTIONS, TIMEZONE_LABELS, tzOffsetLabel } from "@/lib/tz-constants"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { HardwarePermsDialog } from "@/components/hardware/hardware-perms-dialog"
@@ -240,6 +241,32 @@ export function ConfigPanel({
         <Badge variant="secondary" className="text-[11px]">
           {String(v ?? "") ? "已配置（AES 加密）" : "未配置"}
         </Badge>
+      )
+    }
+    // r31：平台时区选择器（常用时区下拉 + 当前生效标注）
+    if (item.key === "general.timezone") {
+      const cur = String(v ?? "Asia/Shanghai")
+      return (
+        <div className="flex flex-col items-end gap-1">
+          <Select value={cur} onValueChange={(val) => setLocal(item.key, val)} disabled={disabled}>
+            <SelectTrigger className="w-64 h-9 text-sm">
+              <SelectValue placeholder="选择平台时区" />
+            </SelectTrigger>
+            <SelectContent className="max-h-72">
+              {TIMEZONE_OPTIONS.map((tz) => (
+                <SelectItem key={tz} value={tz}>
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-xs">{tz}</span>
+                    <span className="text-[10px] text-muted-foreground">{TIMEZONE_LABELS[tz] || ""} · {tzOffsetLabel(tz)}</span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <span className="text-[10px] text-muted-foreground">
+            邮件/录像水印/到期时间等面向用户的服务器时间统一按此时区显示（存储仍为 UTC；变更约 1 分钟内生效）
+          </span>
+        </div>
       )
     }
     if (item.type === "boolean") {

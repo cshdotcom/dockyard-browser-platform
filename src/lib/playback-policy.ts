@@ -87,12 +87,31 @@ export async function resolvePlaybackPolicy(userId: string, workspaceId?: string
     watermark: merged.watermark,
     allowExport: merged.allowExport,
     source,
-    serverNow: beijingNow(),
-    serverTz: "UTC+8 (北京时间)",
+    serverNow: await tzNowString(),
+    serverTz: await tzLabel(),
   }
 }
 
-/** 北京时间字符串（服务器权威；不依赖客户端时钟） */
+/** 服务器权威时间（r31：按平台时区配置；不再硬编码北京时间） */
+async function tzNowString(): Promise<string> {
+  try {
+    const { tzNow } = await import("./tz")
+    return (await tzNow()).now
+  } catch {
+    return beijingNow()
+  }
+}
+
+async function tzLabel(): Promise<string> {
+  try {
+    const { tzNow } = await import("./tz")
+    return (await tzNow()).label
+  } catch {
+    return "UTC+8 (北京时间)"
+  }
+}
+
+ /** 北京时间字符串（兼容旧路径；水印时间权威源已切换为平台时区配置） */
 export function beijingNow(): string {
   const now = new Date()
   return beijingFormat(now)

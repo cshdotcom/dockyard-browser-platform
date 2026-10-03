@@ -1,16 +1,17 @@
 "use client"
 
-// 我的录像面板（r27 用户空间）：工作区分组 + 回放播放器 + 下载
+// 我的录像面板（r27 用户空间；r31 增强）：关键词搜索 + 可搜索多选沙箱筛选 + 回放播放器 + 下载
 // 用户仅可查看/回放/下载（不可删除 —— 审计完整性；删除与回收站归管理后台）
 
-import { useState, useTransition, useRef } from "react"
+import { useState, useTransition, useRef, useMemo } from "react"
 import { playbackRecordingAction, type RecordingRow, type PlaybackTicketInfo } from "@/server/actions/recordings"
 import { WatermarkOverlay, PlaybackSpeedBar } from "@/components/recordings/watermark-overlay"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
+import { MultiSelectPopover, type MultiOption } from "@/components/shared/multi-select-popover"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { toast } from "sonner"
-import { Play, Download, Info } from "lucide-react"
+import { Play, Download, Info, MonitorPlay } from "lucide-react"
 
 const STATUS_MAP: Record<string, "default" | "secondary" | "destructive" | "outline" | "success"> = {
   RECORDING: "success",
@@ -18,13 +19,46 @@ const STATUS_MAP: Record<string, "default" | "secondary" | "destructive" | "outl
   FAILED: "destructive",
 }
 
-export function MyRecordingsPanel({ rows, keyword, quotaPct }: { rows: RecordingRow[]; keyword: string; quotaPct: number | null }) {
+export interface WsFilterItem {
+  id: string
+  name: string
+  status: string
+  recordingCount: number
+}
+
+export function MyRecordingsPanel({ rows, keyword, wsIds, workspaces, quotaPct }: {
+  rows: RecordingRow[]
+  keyword: string
+  wsIds: string[]
+  workspaces: WsFilterItem[]
+  quotaPct: number | null
+}) {
   const [pending, startTransition] = useTransition()
   const [playRow, setPlayRow] = useState<RecordingRow | null>(null)
   const [playUrl, setPlayUrl] = useState<string | null>(null)
   const [playTicket, setPlayTicket] = useState<PlaybackTicketInfo | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const [dlUrl, setDlUrl] = useState<string | null>(null)
+  const [sel, setSel] = useState<string[]>(wsIds)
+
+  const wsOptions: MultiOption[] = useMemo(
+    () => workspaces.map((w) => ({
+      id: w.id,
+      label: w.name,
+      sub: `${w.recordingCount} 段`,
+      dot: w.status === "RUNNING" || w.status === "IDLE" ? "bg-emerald-500" : "bg-slate-400",
+    })),
+    [workspaces],
+  )
+
+  // 多选沙箱变更 → URL 参数（服务端重新过滤）
+  const applyWsFilter = (next: string[]) => {
+    setSel(next)
+    const us = new URLSearchParams()
+    if (keyword) us.set("q", keyword)
+    if (next.length > 0) us.set("ws", next.join(","))
+    window.location.href = `/recordings${next.length > 0 || keyword ? `?${us.toString()}` : ""}`
+  }
 
   const openPlayback = (r: RecordingRow) => {
     startTransition(async () => {
@@ -116,6 +150,22 @@ export function MyRecordingsPanel({ rows, keyword, quotaPct }: { rows: Recording
           录像空间已使用 {quotaPct.toFixed(0)}%（超出配额后最旧录像将自动归档至回收站）
         </div>
       )}
+      {/* r31：可搜索多选沙箱筛选（沙箱多时快速定位） */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+          <MonitorPlay className="h-3.5 w-3.5" /> 沙箱筛选
+        </span>
+        <MultiSelectPopover
+          options={wsOptions}
+          selected={sel}
+          onChange={applyWsFilter}
+          placeholder="全部沙箱"
+          searchPlaceholder="搜索沙箱名…"
+          disabled={wsOptions.length === 0}
+          width={320}
+        />
+        <span className="text-xs text-muted-foreground">共 {rows.length} 段录像</span>
+      </div>
       <DataTable
         columns={columns}
         rows={rows}
@@ -126,7 +176,8 @@ export function MyRecordingsPanel({ rows, keyword, quotaPct }: { rows: Recording
         onQueryChange={(params) => {
           const us = new URLSearchParams()
           if (params.keyword !== undefined) us.set("q", params.keyword)
-          window.location.href = `/recordings?${us.toString()}`
+          if (sel.length > 0) us.set("ws", sel.join(","))
+          window.location.href = `/recordings${us.toString() ? `?${us.toString()}` : ""}`
         }}
         rowActions={rowActions}
         emptyText="暂无录像（会话录像由管理员策略开启后自动产生）"

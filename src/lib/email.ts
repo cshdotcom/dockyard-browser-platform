@@ -1,4 +1,15 @@
 import nodemailer from "nodemailer"
+
+// r31：邮件时间行统一按平台时区显示（含时区标注，避免歧义）
+async function tzMailTime(): Promise<string> {
+  try {
+    const { tzNow } = await import("./tz")
+    const t = await tzNow()
+    return `${t.now} ${t.label}`
+  } catch {
+    return new Date().toLocaleString("zh-CN")
+  }
+}
 import { ENV, externalAvailable } from "./env"
 import { getConfig, ensureConfigLoaded } from "./config"
 import { decrypt, encrypt } from "./crypto"
@@ -132,7 +143,7 @@ export async function verifySmtpConnection(to?: string): Promise<{ ok: boolean; 
       from: cfg.senderName ? `"${cfg.senderName}" <${cfg.from}>` : cfg.from,
       to,
       subject: "【Dockyard】SMTP 测试邮件",
-      html: smtpTestTemplate(),
+      html: await smtpTestTemplate(),
       text: "Dockyard SMTP 配置测试成功",
     })
     return { ok: true, verified: true, sent: true, message: `连接成功且测试邮件已发送至 ${to}`, source: cfg.source }
@@ -141,12 +152,12 @@ export async function verifySmtpConnection(to?: string): Promise<{ ok: boolean; 
   }
 }
 
-export function smtpTestTemplate(): string {
+export async function smtpTestTemplate(): Promise<string> {
   return `
   <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">
     <h2 style="color:#0f766e;margin:0 0 12px">SMTP 配置测试成功</h2>
     <p style="color:#374151;margin:0">您在 Dockyard 后台配置的邮件服务器工作正常。配置修改即时生效（30 秒内），验证码 / 告警邮件将经由该服务器发送。</p>
-    <p style="color:#6b7280;font-size:12px;margin:16px 0 0">发送时间：${new Date().toLocaleString("zh-CN")}</p>
+    <p style="color:#6b7280;font-size:12px;margin:16px 0 0">发送时间：${await tzMailTime()}</p>
   </div>`
 }
 
@@ -182,7 +193,7 @@ export function remoteLoginAlertTemplate(ip: string, ua: string, time: string): 
 }
 
 // r23：告警邮件模板（预警中心邮件通道）
-export function alertEmailTemplate(level: string, title: string, content: string): string {
+export async function alertEmailTemplate(level: string, title: string, content: string): Promise<string> {
   const tone = level === "CRITICAL" ? "#b91c1c" : level === "ERROR" ? "#c2410c" : "#0f766e"
   const label = level === "CRITICAL" ? "严重告警" : level === "ERROR" ? "错误告警" : "平台告警"
   return `
@@ -190,7 +201,7 @@ export function alertEmailTemplate(level: string, title: string, content: string
     <h2 style="color:${tone};margin:0 0 12px">【${label}】Dockyard 平台预警通知</h2>
     <div style="font-size:16px;font-weight:600;color:#111827;margin-bottom:8px">${escapeHtml(title)}</div>
     <div style="color:#374151;background:#f9fafb;padding:12px 16px;border-radius:8px;white-space:pre-wrap;word-break:break-word">${escapeHtml(content)}</div>
-    <p style="color:#6b7280;font-size:12px;margin:16px 0 0">触发时间：${new Date().toLocaleString("zh-CN")} · 本邮件由平台预警中心自动发送，可在 后台 → 配置 → 预警中心 调整级别与收件人。</p>
+    <p style="color:#6b7280;font-size:12px;margin:16px 0 0">触发时间：${await tzMailTime()} · 本邮件由平台预警中心自动发送，可在 后台 → 配置 → 预警中心 调整级别与收件人。</p>
   </div>`
 }
 

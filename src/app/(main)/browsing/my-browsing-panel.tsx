@@ -4,7 +4,7 @@
 // 沙箱隔离：顶部沙箱 Tab（仅本人沙箱），切换后列表按 workspaceId 过滤
 // 用户可本地删除（软标记）；审计归档不受影响
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import type { HistoryRow, BookmarkRow } from "@/server/actions/browsing"
 import { listHistoryAction, listBookmarksAction, myBrowsingWorkspacesAction, localDeleteBrowsingAction } from "@/server/actions/browsing"
@@ -12,7 +12,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Search, Trash2, RotateCcw, History, Bookmark, ChevronLeft, ChevronRight, Loader2 } from "lucide-react"
+import { MultiSelectPopover, type MultiOption } from "@/components/shared/multi-select-popover"
+import { Search, Trash2, RotateCcw, History, Bookmark, ChevronLeft, ChevronRight, Loader2, MonitorPlay } from "lucide-react"
 import { toast } from "sonner"
 
 interface WsItem { id: string; name: string; uuid: string | null; status: string; historyCount: number; bookmarkCount: number }
@@ -33,6 +34,7 @@ export function MyBrowsingPanel({ initialTab }: { initialTab: string }) {
   const [tab, setTab] = useState<"history" | "bookmark">(initialTab === "bookmark" ? "bookmark" : "history")
   const [workspaces, setWorkspaces] = useState<WsItem[]>([])
   const [activeWs, setActiveWs] = useState<string>("ALL")
+  const [multiWs, setMultiWs] = useState<string[]>([]) // r31：可搜索多选沙箱（沙箱多时主筛选）
   const [keyword, setKeyword] = useState("")
   const [debouncedKw, setDebouncedKw] = useState("")
   const [page, setPage] = useState(1)
@@ -58,10 +60,13 @@ export function MyBrowsingPanel({ initialTab }: { initialTab: string }) {
   const reload = useCallback(async () => {
     setLoading(true)
     try {
+      // r31：多选优先；无多选时保留单选 Tab 语义（activeWs）
+      const wsFilter = multiWs.length > 0 ? multiWs : activeWs !== "ALL" ? [activeWs] : undefined
       if (tab === "history") {
         const res = await listHistoryAction({
           keyword: debouncedKw || undefined,
-          workspaceId: activeWs !== "ALL" ? activeWs : undefined,
+          ...(wsFilter && wsFilter.length === 1 ? { workspaceId: wsFilter[0] } : {}),
+          ...(wsFilter && wsFilter.length > 1 ? { workspaceIds: wsFilter } : {}),
           page, pageSize,
         })
         setRows((res.data?.rows as HistoryRow[]) || [])
@@ -69,7 +74,8 @@ export function MyBrowsingPanel({ initialTab }: { initialTab: string }) {
       } else {
         const res = await listBookmarksAction({
           keyword: debouncedKw || undefined,
-          workspaceId: activeWs !== "ALL" ? activeWs : undefined,
+          ...(wsFilter && wsFilter.length === 1 ? { workspaceId: wsFilter[0] } : {}),
+          ...(wsFilter && wsFilter.length > 1 ? { workspaceIds: wsFilter } : {}),
           page, pageSize,
           includeRemoved: deletedShown,
         })
@@ -80,7 +86,7 @@ export function MyBrowsingPanel({ initialTab }: { initialTab: string }) {
     } finally {
       setLoading(false)
     }
-  }, [tab, debouncedKw, activeWs, page, pageSize, deletedShown])
+  }, [tab, debouncedKw, activeWs, multiWs, page, pageSize, deletedShown])
 
   useEffect(() => {
     void reload()
@@ -113,21 +119,33 @@ export function MyBrowsingPanel({ initialTab }: { initialTab: string }) {
   const wsBadge = (status: string) =>
     status === "RUNNING" ? "bg-emerald-500" : "bg-slate-400"
 
+  // r31：多选沙箱选项（含计数与状态点）
+  const wsOptions: MultiOption[] = useMemo(
+    () => workspaces.map((w) => ({
+      id: w.id,
+      label: w.name,
+      sub: tab === "history" ? `${w.historyCount} 条` : `${w.bookmarkCount} 条`,
+      dot: wsBadge(w.status),
+    })),
+    [workspaces, tab],
+  )
+  const quickTabs = workspaces.slice(0, 8) // 快速单选 Tab（沙箱多时折叠，用多选筛选器）
+
   return (
     <div className="space-y-4">
-      {/* 沙箱 Tab（用户自己的沙箱） */}
+      {/* 沙箱快速 Tab（用户自己的沙箱；前 8 个单选直达） */}
       <div className="flex items-center gap-2 flex-wrap">
         <button
-          onClick={() => { setActiveWs("ALL"); setPage(1) }}
-          className={`px-3 py-1.5 rounded-full text-xs font-medium border transition ${activeWs === "ALL" ? "bg-primary text-primary-foreground border-primary" : "bg-background border-border hover:bg-muted"}`}
+          onClick={() => { setActiveWs("ALL"); setMultiWs([]); setPage(1) }}
+          className={`px-3 py-1.5 rounded-full text-xs font-medium border transition ${activeWs === "ALL" && multiWs.length === 0 ? "bg-primary text-primary-foreground border-primary" : "bg-background border-border hover:bg-muted"}`}
         >
           全部沙箱
         </button>
-        {workspaces.map((w) => (
+        {quickTabs.map((w) => (
           <button
             key={w.id}
-            onClick={() => { setActiveWs(w.id); setPage(1) }}
-            className={`px-3 py-1.5 rounded-full text-xs font-medium border transition flex items-center gap-1.5 ${activeWs === w.id ? "bg-primary text-primary-foreground border-primary" : "bg-background border-border hover:bg-muted"}`}
+            onClick={() => { setActiveWs(w.id); setMultiWs([]); setPage(1) }}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium border transition flex items-center gap-1.5 ${activeWs === w.id && multiWs.length === 0 ? "bg-primary text-primary-foreground border-primary" : "bg-background border-border hover:bg-muted"}`}
             title={w.uuid || ""}
           >
             <span className={`w-1.5 h-1.5 rounded-full ${wsBadge(w.status)}`} />
@@ -138,6 +156,23 @@ export function MyBrowsingPanel({ initialTab }: { initialTab: string }) {
           </button>
         ))}
         {workspaces.length === 0 && <span className="text-xs text-muted-foreground">暂无沙箱</span>}
+      </div>
+
+      {/* r31：可搜索多选沙箱筛选（沙箱多时的主筛选器；与快速 Tab 互斥） */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+          <MonitorPlay className="h-3.5 w-3.5" /> 多选沙箱
+        </span>
+        <MultiSelectPopover
+          options={wsOptions}
+          selected={multiWs}
+          onChange={(next) => { setMultiWs(next); if (next.length > 0) setActiveWs("ALL"); setPage(1) }}
+          placeholder={multiWs.length === 0 && activeWs !== "ALL" ? "单选模式（Tab 已选）" : "不筛选"}
+          searchPlaceholder="搜索沙箱名…"
+          disabled={workspaces.length === 0}
+          width={320}
+        />
+        <span className="text-xs text-muted-foreground">共 {total} 条</span>
       </div>
 
       {/* 工具栏 */}

@@ -295,6 +295,7 @@ export default async function AdminWorkspacesPage({
       name: r.name,
       mode: r.mode,
       status: r.status,
+      ownerId: r.userId,
       ownerUsername: usernameById.get(r.userId) || "-",
       creatorUsername: r.createdByUserId ? usernameById.get(r.createdByUserId) || "-" : "-",
       transferred: !!r.createdByUserId && r.createdByUserId !== r.userId,

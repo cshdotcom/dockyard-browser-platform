@@ -20,6 +20,10 @@ export default async function WorkspacesPage({
   const mode = q.filters.mode
   const status = q.filters.status
 
+  // r31：管理员默认「自己的」工作区（与普通用户同视角）；可一键切换全部用户
+  //   语义：管理员个人沙箱操作与用户一致；需要全局管控时切全部（后台能力经行菜单深链继承）
+  const adminScope = q.filters.scope === "all" ? "all" : "mine"
+
   // 权限隔离：普通用户只看自己的 + 共享给他的；管理员看全部
   const gids = await userGroupIds(ctx.userId)
   const sharedIds = await db.workspaceShare.findMany({
@@ -27,7 +31,7 @@ export default async function WorkspacesPage({
     select: { workspaceId: true },
   })
 
-  const where = isAdmin
+  const where = isAdmin && adminScope === "all"
     ? {
         deletedAt: null,
         ...(mode ? { mode } : {}),
@@ -98,6 +102,7 @@ export default async function WorkspacesPage({
       name: r.name,
       mode: r.mode,
       status: r.status,
+      ownerId: r.userId,
       ownerName: userMap.get(r.userId)?.displayName || userMap.get(r.userId)?.username || "-",
       isOwner,
       isShared: sharedIds.some((s) => s.workspaceId === r.id),
@@ -123,7 +128,10 @@ export default async function WorkspacesPage({
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">浏览器工作区</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          CDP 轻量会话与 NoVNC 重度人机交互会话 · {isAdmin ? "管理员视图（全部用户）" : "我的工作区与共享给我的会话"}
+          CDP 轻量会话与 NoVNC 重度人机交互会话 ·{" "}
+          {isAdmin
+            ? (adminScope === "all" ? "管理员视图（全部用户，可后台级管控）" : "我的工作区（默认；行菜单继承后台管控能力，可切换全部用户）")
+            : "我的工作区与共享给我的会话"}
           {!isAdmin && ` · 运行中 ${runningCount}/${((myQuota?.quota as Record<string, number>)?.sessions) ?? "未限制"}`}
         </p>
       </div>
@@ -140,6 +148,7 @@ export default async function WorkspacesPage({
         snapshots={snapshots}
         proxyNodes={proxyNodes}
         isAdmin={isAdmin}
+        adminScope={adminScope}
         currentUserId={ctx.userId}
         idlePolicy={{
           locked: idlePolicy.locked,

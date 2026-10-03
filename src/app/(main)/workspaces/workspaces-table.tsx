@@ -4,7 +4,7 @@ import * as React from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { Plus, Loader2, Globe, MonitorPlay, Share2, Wifi, Zap, StopCircle, Play, Trash2, Settings2, Download, CopyPlus } from "lucide-react"
+import { Plus, Loader2, Globe, MonitorPlay, Share2, Wifi, Zap, StopCircle, Play, Trash2, Settings2, Download, CopyPlus, MoreVertical, ShieldCheck, Timer, Video, FolderOpen, Snowflake } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -19,6 +19,7 @@ import {
   switchProxyAction, exportWorkspaceConfigAction, cloneWorkspaceAction,
 } from "@/server/actions/workspaces"
 import { WorkspaceShareDialog } from "./share-dialogs"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 
 export interface WorkspaceRow {
@@ -27,6 +28,7 @@ export interface WorkspaceRow {
   name: string
   mode: string
   status: string
+  ownerId: string
   ownerName: string
   isOwner: boolean
   isShared: boolean
@@ -58,6 +60,8 @@ interface Props {
   snapshots: { id: string; name: string }[]
   proxyNodes: { id: string; name: string; type: string; status: string }[]
   isAdmin: boolean
+  /** r31：管理员视角范围（mine=默认自己的；all=全部用户） */
+  adminScope?: "mine" | "all"
   currentUserId: string
   /** r14（22-c）：闲置超时策略（创建表单默认值 + 锁定态） */
   idlePolicy: { locked: boolean; minutes: number; sourceLabel: string; lockSourceLabel: string }
@@ -240,12 +244,38 @@ export function WorkspacesTable(props: Props) {
       <Button variant="ghost" size="icon" title="删除（入回收站）" onClick={() => setDeleteTarget(r)}>
         <Trash2 className="h-4 w-4 text-red-500" />
       </Button>
+      {/* r31：管理员管控菜单（继承后台全部能力；深链直达带定位） */}
+      {props.isAdmin && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" title="后台管控（管理员能力继承）"><MoreVertical className="h-4 w-4 text-indigo-500" /></Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-60">
+            <DropdownMenuItem onClick={() => router.push(`/admin/workspaces?keyword=${encodeURIComponent(r.uuid.slice(0, 8))}`)}>
+              <ShieldCheck className="h-4 w-4 mr-2" /> 后台管控（定位该沙箱）
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => router.push(`/admin/files?domain=STORAGE&path=${encodeURIComponent(`home/${r.ownerId}`)}`)}>
+              <FolderOpen className="h-4 w-4 mr-2" /> 用户资料直达（{r.ownerName}）
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => router.push(`/admin/workspaces?keyword=${encodeURIComponent(r.uuid.slice(0, 8))}`)}>
+              <Timer className="h-4 w-4 mr-2" /> VNC 时长 / TTL / 转移
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => router.push(`/admin/workspaces?keyword=${encodeURIComponent(r.uuid.slice(0, 8))}`)}>
+              <Video className="h-4 w-4 mr-2" /> 录像策略 / 回放安全
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => router.push(`/admin/workspaces?keyword=${encodeURIComponent(r.uuid.slice(0, 8))}`)}>
+              <Snowflake className="h-4 w-4 mr-2" /> 冻结封存 / 强制操作
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
     </div>
   )
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Tabs defaultValue={props.filters.mode || "all"} onValueChange={(v) => query({ mode: v === "all" ? undefined : v, page: "1" })}>
           <TabsList>
             <TabsTrigger value="all">全部</TabsTrigger>
@@ -253,6 +283,25 @@ export function WorkspacesTable(props: Props) {
             <TabsTrigger value="novnc_full">NoVNC 重度</TabsTrigger>
           </TabsList>
         </Tabs>
+        {/* r31：管理员视角切换（默认自己的；一键切换全部用户进入管控视角） */}
+        {props.isAdmin && (
+          <div className="flex items-center rounded-lg border p-0.5">
+            {(["mine", "all"] as const).map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => query({ scope: s === "all" ? "all" : undefined, page: "1" })}
+                className={cn(
+                  "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                  (props.adminScope || "mine") === s ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+                )}
+                title={s === "mine" ? "仅显示我自己的工作区（默认；与普通用户同视角）" : "显示全部用户的工作区（后台级管控）"}
+              >
+                {s === "mine" ? "我的" : "全部用户"}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="ml-auto">
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="h-4 w-4 mr-1" /> 新建工作区

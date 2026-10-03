@@ -13,7 +13,7 @@ import { toast } from "sonner"
 import {
   Loader2, MoreHorizontal, Square, RotateCw, Trash2, Flame, Unplug, Timer, UserRoundCog, Anchor,
   AlertTriangle, X, Columns3, ShieldCheck, ShieldX, Container, History, ArrowRightLeft, Share2,
-  UsersRound, Search, Snowflake, Sunrise, Video,
+  UsersRound, Search, Snowflake, Sunrise, Video, FolderOpen,
 } from "lucide-react"
 import { PlaybackPolicyDialog } from "@/components/recordings/playback-policy-dialog"
 import { HardwarePermsDialog } from "@/components/hardware/hardware-perms-dialog"
@@ -44,6 +44,7 @@ export interface AdminWorkspaceRow {
   name: string
   mode: string
   status: string
+  ownerId: string // r31：用户资料直达（跳文件管理对应用户空间）
   ownerUsername: string
   creatorUsername: string
   transferred: boolean
@@ -481,7 +482,15 @@ export function WorkspacesTable(props: Props) {
       render: (row: AdminWorkspaceRow) => (
         <div className="text-xs">
           <p className="font-medium flex items-center gap-1">
-            {row.ownerUsername}
+            {/* r31：点击归属 → 自动筛选该用户的沙箱（scope=custom） */}
+            <button
+              type="button"
+              className="hover:text-teal-600 hover:underline"
+              title={`点击筛选 ${row.ownerUsername} 的全部沙箱`}
+              onClick={() => pushQuery({ page: "1", scope: "custom", users: row.ownerId, view: undefined })}
+            >
+              {row.ownerUsername}
+            </button>
             {row.transferred && (
               <span title="资源已转移（所有者 ≠ 创建人）">
                 <ArrowRightLeft className="h-3 w-3 text-amber-500" />
@@ -821,6 +830,10 @@ export function WorkspacesTable(props: Props) {
                   )}
                   <DropdownMenuItem onClick={() => setTransferTarget(row)}>
                     <UserRoundCog className="h-4 w-4 mr-2" /> 资源转移
+                  </DropdownMenuItem>
+                  {/* r31：用户资料直达（跳文件管理器对应用户专属空间） */}
+                  <DropdownMenuItem onClick={() => { window.location.href = `/admin/files?domain=STORAGE&path=${encodeURIComponent(`home/${row.ownerId}`)}` }}>
+                    <FolderOpen className="h-4 w-4 mr-2" /> 用户资料直达（{row.ownerUsername}）
                   </DropdownMenuItem>
                   {row.hasNovncSession && (
                     <DropdownMenuItem

@@ -45,6 +45,7 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "session.rememberDays": { value: 30, category: "SESSION", type: "number", description: "记住我会话时长（天）" },
   "session.novncIdleTimeoutMin": { value: 30, category: "SESSION", type: "number", description: "NoVNC会话闲置回收（分钟）" },
   "workspace.maxConcurrentSessions": { value: 50, category: "GENERAL", type: "number", description: "全局并发浏览器会话上限" },
+  "general.timezone": { value: "Asia/Shanghai", category: "GENERAL", type: "string", description: "平台展示时区（邮件/水印/到期时间等面向用户的服务器时间统一按此时区显示；存储仍为 UTC；默认北京时间）" },
   "workspace.maxConcurrentNovnc": { value: 20, category: "GENERAL", type: "number", description: "全局NoVNC会话上限" },
   "workspace.reservedSessions": { value: 5, category: "GENERAL", type: "number", description: "全局预留会话水位（普通用户不可挤占）" },
   "workspace.reservedNovnc": { value: 3, category: "GENERAL", type: "number", description: "全局预留NoVNC水位" },

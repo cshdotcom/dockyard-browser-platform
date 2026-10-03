@@ -187,10 +187,9 @@ export const MAIN_CAPS: KeyCap[] = [
   { label: "Q", keysym: 0x71 }, { label: "R", keysym: 0x72 }, { label: "S", keysym: 0x73 }, { label: "T", keysym: 0x74 },
   { label: "U", keysym: 0x75 }, { label: "V", keysym: 0x76 }, { label: "W", keysym: 0x77 }, { label: "X", keysym: 0x78 },
   { label: "Y", keysym: 0x79 }, { label: "Z", keysym: 0x7a },
-  { label: "0-9", keysym: -1 }, // 数字组占位（点击展开）
   { label: "Tab", keysym: KS.Tab }, { label: "Enter", keysym: KS.Enter }, { label: "Esc", keysym: KS.Esc },
   { label: "Space", keysym: 0x20 }, { label: "Del", keysym: KS.Delete }, { label: "Backspace", keysym: KS.BackSpace },
-  { label: "F1-F12", keysym: -2 }, { label: "方向键", keysym: -3 }, { label: "Home/End", keysym: -4 }, { label: "PgUp/PgDn", keysym: -5 },
+  { label: "Insert", keysym: KS.Insert },
 ]
 export const NUMBER_CAPS: KeyCap[] = Array.from({ length: 10 }, (_, i) => ({ label: String(i), keysym: 0x30 + i }))
 export const FUNCTION_CAPS: KeyCap[] = Array.from({ length: 12 }, (_, i) => ({ label: `F${i + 1}`, keysym: 0xffbe + i }))
@@ -203,4 +202,22 @@ export const PUNCT_CAPS: KeyCap[] = [
   { label: "-", keysym: 0x2d }, { label: "=", keysym: 0x3d }, { label: "[", keysym: 0x5b }, { label: "]", keysym: 0x5d },
   { label: ";", keysym: 0x3b }, { label: "'", keysym: 0x27 }, { label: "`", keysym: 0x60 }, { label: ",", keysym: 0x2c },
   { label: ".", keysym: 0x2e }, { label: "/", keysym: 0x2f }, { label: "\\", keysym: 0x5c },
+]
+
+// r31：上档符号层（Shift+数字 → !@#$%^&*() 等；keysym = 符号本身 ASCII 码）
+export const SHIFT_SYMBOL_CAPS: KeyCap[] = [
+  { label: "!", keysym: 0x21 }, { label: "@", keysym: 0x40 }, { label: "#", keysym: 0x23 }, { label: "$", keysym: 0x24 },
+  { label: "%", keysym: 0x25 }, { label: "^", keysym: 0x5e }, { label: "&", keysym: 0x26 }, { label: "*", keysym: 0x2a },
+  { label: "(", keysym: 0x28 }, { label: ")", keysym: 0x29 }, { label: "_", keysym: 0x5f }, { label: "+", keysym: 0x2b },
+  { label: "{", keysym: 0x7b }, { label: "}", keysym: 0x7d }, { label: "|", keysym: 0x7c }, { label: ":", keysym: 0x3a },
+  { label: "\"", keysym: 0x22 }, { label: "<", keysym: 0x3c }, { label: ">", keysym: 0x3e }, { label: "?", keysym: 0x3f },
+  { label: "~", keysym: 0x7e },
+]
+
+// r31：扩展控制键层（此前缺失 → “好多快捷方式创建不了”的补全项）
+export const EXTENDED_CAPS: KeyCap[] = [
+  { label: "Insert", keysym: KS.Insert }, { label: "Print", keysym: KS.Print },
+  { label: "Pause", keysym: KS.Pause }, { label: "ScrollLk", keysym: KS.ScrollLock },
+  { label: "Menu", keysym: KS.Menu }, { label: "NumLk", keysym: KS.NumLock },
+  { label: "Ctrl→", keysym: KS_CTRL_R }, { label: "Alt→", keysym: KS_ALT_R },
 ]

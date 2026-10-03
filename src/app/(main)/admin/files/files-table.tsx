@@ -160,7 +160,21 @@ export function FilesTable({ rows, total, page, pageSize, keyword, sortField, so
           {
             key: "username",
             title: "上传用户",
-            render: (r) => <span className="text-sm">{r.username || "-"}</span>,
+            render: (r) => (
+              r.userId ? (
+                // r31：点击归属 → 自动筛选该用户文件（统一“归属点击筛选”交互）
+                <button
+                  type="button"
+                  className="text-sm hover:text-teal-600 hover:underline"
+                  title={`点击筛选 ${r.username || r.userId} 的全部文件`}
+                  onClick={() => pushQuery({ page: "1", userId: r.userId! })}
+                >
+                  {r.username || "-"}
+                </button>
+              ) : (
+                <span className="text-sm">{r.username || "-"}</span>
+              )
+            ),
           },
           {
             key: "workspaceId",

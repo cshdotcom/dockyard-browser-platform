@@ -13,18 +13,25 @@ import {
   browseFilesAction, readFileAction, writeFileAction, createEntryAction, renameEntryAction,
   deleteEntriesAction, transferEntriesAction, archiveEntriesAction, extractArchiveAction,
   searchFilesAction, createShareLinkAction, listMyShareLinksAction, revokeShareLinkAction,
+  listShareTargetOptionsAction, extendShareLinkAction,
 } from "@/server/actions/file-explorer"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { MultiSelectPopover } from "@/components/shared/multi-select-popover"
+import { getFileExplorerPrefsAction, saveFileExplorerPrefsAction, type ExplorerFavorite, type ExplorerTabPref } from "@/server/actions/explorer-prefs"
 import {
   Folder, File, FileText, Image as ImageIcon, Video, Music, Archive, Binary,
   ChevronLeft, ChevronRight, Trash2, RotateCcw, Search, Download, Upload, Plus, Pencil,
-  Copy, MoveRight, PackageOpen, Share2, X, Loader2, Home, HardDrive, Server, Eye, Save, ChevronUp,
+  Copy, MoveRight, PackageOpen, Share2, X, Loader2, Home, HardDrive, Server, Eye, Save, ChevronUp, Clock,
+  Star, MoreVertical, FolderInput,
 } from "lucide-react"
 import { toast } from "sonner"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 
 export type Domain = "ROOT_FS" | "STORAGE" | "HOME"
 
@@ -123,23 +130,177 @@ interface ShareState {
   target?: FileEntry
   accessMode: "LOGIN" | "PUBLIC" | "USERS"
   expiresDays: number
+  customExpiry: string // r31：自定义到期时刻（datetime-local 原始值；非空时优先）
   maxDownloads: number
   downloadKBps: number
   note: string
+  allowedUserIds: string[] // r31：用户多选
+  allowedGroupIds: string[] // r31：用户组多选
   created?: { token: string; url: string; expiresAt: string | null }
 }
 
 interface ShareLinkRow {
-  token: string; fileName: string; accessMode: string; expiresAt: string | null
+  token: string; fileName: string; isDir: boolean; accessMode: string; expiresAt: string | null
   viewCount: number; downloadCount: number; revokedAt: string | null; createdAt: string; url: string
 }
 
-export function FileExplorerPanel({ initialDomain, domains }: {
+interface ShareTargets {
+  users: Array<{ id: string; username: string; displayName: string | null }>
+  groups: Array<{ id: string; name: string; memberCount: number }>
+}
+
+export function FileExplorerPanel({ initialDomain, initialPath, domains }: {
   initialDomain: Domain
+  initialPath?: string // r31：深链定位（如 /admin/files?path=home/<userId> 用户资料直达）
   domains: Array<{ key: Domain; label: string; icon: React.ReactNode }>
 }) {
   const [domain, setDomain] = useState<Domain>(initialDomain)
-  const [curPath, setCurPath] = useState("")
+  const [curPath, setCurPath] = useState(
+    initialPath && initialPath !== "/" ? initialPath.replace(/^\/+/, "").replace(/\/+$/, "") : "",
+  )
+  // —— r31：多标签页 + 收藏夹 + 跨端同步 ——
+  const [tabs, setTabs] = useState<ExplorerTabPref[]>([{ id: "t1", domain: initialDomain, path: initialPath ? initialPath.replace(/^\/+/, "").replace(/\/+$/, "") : "" }])
+  const [activeTabId, setActiveTabId] = useState("t1")
+  const [favorites, setFavorites] = useState<ExplorerFavorite[]>([])
+  const prefsLoadedRef = useRef(false)
+  const prefsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const allowedDomains = useMemo(() => new Set(domains.map((d) => d.key)), [domains])
+  const domainLabel = (d: Domain) => d === "ROOT_FS" ? "根目录" : d === "STORAGE" ? "存储空间" : "我的空间"
+  const tabTitle = (t: ExplorerTabPref) => (t.path ? t.path.split("/").filter(Boolean).pop() || t.path : domainLabel(t.domain))
+
+  // 载入用户偏好（首次挂载：恢复上次会话的多标签与收藏夹 → 跨端同步）
+  useEffect(() => {
+    if (prefsLoadedRef.current) return
+    prefsLoadedRef.current = true
+    ;(async () => {
+      const res = await getFileExplorerPrefsAction()
+      const data = res.data
+      if (res.code !== 0 || !data) return
+      // r31 深链优先：外层携带 initialPath 时忽略持久化的激活标签，直接定位深链目录
+      if (initialPath) {
+        setFavorites(data.favorites)
+        const next = [{ id: "t1", domain: initialDomain, path: initialPath.replace(/^\/+/, "").replace(/\/+$/, "") }]
+        setTabs(next)
+        return
+      }
+      setFavorites(data.favorites)
+      // 过滤当前用户可用的域（用户端无 STORAGE/ROOT_FS 权限时回退）
+      const restored = data.openTabs
+        .map((t) => ({ ...t, domain: (allowedDomains.has(t.domain) ? t.domain : initialDomain) as Domain }))
+      setTabs(restored)
+      const active = restored.find((t) => t.id === data.activeTabId) || restored[0]
+      if (active) {
+        setActiveTabId(active.id)
+        setDomain(active.domain as Domain)
+        setCurPath(active.path)
+      }
+    })().catch(() => null)
+  }, [allowedDomains, initialDomain])
+
+  // 偏好保存（去抖 1.2s：标签/收藏/激活态变化即同步到账号 → 任意设备恢复）
+  const schedulePrefsSave = useCallback((next: { tabs?: ExplorerTabPref[]; activeTabId?: string; favorites?: ExplorerFavorite[] }) => {
+    if (!prefsLoadedRef.current) return
+    if (prefsSaveTimer.current) clearTimeout(prefsSaveTimer.current)
+    prefsSaveTimer.current = setTimeout(() => {
+      void saveFileExplorerPrefsAction({
+        favorites: next.favorites ?? favorites,
+        openTabs: next.tabs ?? tabs,
+        activeTabId: next.activeTabId ?? activeTabId,
+      }).then((res) => {
+        if (res.code !== 0) { /* 静默：不影响本地使用 */ }
+      }).catch(() => null)
+    }, 1200)
+  }, [favorites, tabs, activeTabId])
+
+  // —— 标签操作：切换/新建/关闭/关闭其他/全部关闭 ——
+  const switchTab = (tabId: string) => {
+    const t = tabs.find((x) => x.id === tabId)
+    if (!t || tabId === activeTabId) return
+    setActiveTabId(tabId)
+    setDomain(t.domain as Domain)
+    setCurPath(t.path)
+    setPage(1)
+    schedulePrefsSave({ activeTabId: tabId })
+  }
+  const openNewTab = (d: Domain, path: string) => {
+    const id = `t-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    const next = [...tabs, { id, domain: d, path }].slice(-12) // 上限 12 个
+    setTabs(next)
+    setActiveTabId(id)
+    setDomain(d)
+    setCurPath(path)
+    setPage(1)
+    schedulePrefsSave({ tabs: next, activeTabId: id })
+  }
+  const closeTab = (tabId: string) => {
+    if (tabs.length <= 1) { toast.info("至少保留一个标签页"); return }
+    const idx = tabs.findIndex((t) => t.id === tabId)
+    const next = tabs.filter((t) => t.id !== tabId)
+    setTabs(next)
+    schedulePrefsSave({ tabs: next })
+    if (tabId === activeTabId) {
+      const fallback = next[Math.max(0, idx - 1)]
+      setActiveTabId(fallback.id)
+      setDomain(fallback.domain as Domain)
+      setCurPath(fallback.path)
+      setPage(1)
+      schedulePrefsSave({ tabs: next, activeTabId: fallback.id })
+    }
+  }
+  const closeOtherTabs = () => {
+    const active = tabs.find((t) => t.id === activeTabId)!
+    const next = [active]
+    setTabs(next)
+    schedulePrefsSave({ tabs: next })
+    toast.success("已关闭其他标签页")
+  }
+  const closeAllTabs = () => {
+    const next = [{ id: `t-${Date.now()}`, domain: initialDomain, path: "" }]
+    setTabs(next)
+    setActiveTabId(next[0].id)
+    setDomain(initialDomain)
+    setCurPath("")
+    setPage(1)
+    schedulePrefsSave({ tabs: next, activeTabId: next[0].id })
+    toast.success("已关闭全部标签（新开一个）")
+  }
+
+  // —— 收藏夹：收藏当前目录 / 移除 / 跳转 ——
+  const toggleFavoriteCurrent = () => {
+    const exists = favorites.find((f) => f.domain === domain && f.path === curPath)
+    if (exists) {
+      const next = favorites.filter((f) => f.id !== exists.id)
+      setFavorites(next)
+      schedulePrefsSave({ favorites: next })
+      toast.success("已从收藏夹移除")
+      return
+    }
+    if (favorites.length >= 60) { toast.error("收藏夹已达上限（60）"); return }
+    const fav: ExplorerFavorite = {
+      id: `f-${Date.now()}`,
+      domain,
+      path: curPath,
+      title: curPath ? (curPath.split("/").filter(Boolean).pop() || curPath) : domainLabel(domain),
+    }
+    const next = [...favorites, fav]
+    setFavorites(next)
+    schedulePrefsSave({ favorites: next })
+    toast.success(`已收藏「${fav.title}」（跨设备同步）`)
+  }
+  const removeFavorite = (id: string) => {
+    const next = favorites.filter((f) => f.id !== id)
+    setFavorites(next)
+    schedulePrefsSave({ favorites: next })
+  }
+  const gotoFavorite = (f: ExplorerFavorite) => {
+    const d = (allowedDomains.has(f.domain) ? f.domain : initialDomain) as Domain
+    // 在当前标签页打开（目录跳转）
+    setDomain(d)
+    setCurPath(d === f.domain ? f.path : "")
+    setPage(1)
+    // 同步到当前标签
+    setTabs((ts) => ts.map((t) => (t.id === activeTabId ? { ...t, domain: d, path: d === f.domain ? f.path : "" } : t)))
+  }
   const [entries, setEntries] = useState<FileEntry[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -169,9 +330,13 @@ export function FileExplorerPanel({ initialDomain, domains }: {
   const [movePath, setMovePath] = useState("")
   const uploadRef = useRef<HTMLInputElement>(null)
   const [uploadArmed, setUploadArmed] = useState(false)
-  const [shareState, setShareState] = useState<ShareState>({ open: false, accessMode: "LOGIN", expiresDays: 7, maxDownloads: 0, downloadKBps: 0, note: "" })
+  const [shareState, setShareState] = useState<ShareState>({ open: false, accessMode: "LOGIN", expiresDays: 7, customExpiry: "", maxDownloads: 0, downloadKBps: 0, note: "", allowedUserIds: [], allowedGroupIds: [] })
   const [shareLinks, setShareLinks] = useState<ShareLinkRow[]>([])
   const [shareListOpen, setShareListOpen] = useState(false)
+  // r31：分享目标选项（用户+组；USERS 模式双多选可搜索）
+  const [shareTargets, setShareTargets] = useState<ShareTargets>({ users: [], groups: [] })
+  const [extendTarget, setExtendTarget] = useState<ShareLinkRow | null>(null)
+  const [extendValue, setExtendValue] = useState("")
 
   const joinPath = (dir: string, name: string) => (dir ? `${dir}/${name}` : name)
 
@@ -195,7 +360,12 @@ export function FileExplorerPanel({ initialDomain, domains }: {
 
   useEffect(() => { void reload() }, [reload])
 
-  const go = (rel: string) => { setCurPath(rel); setPage(1) }
+  const go = (rel: string) => {
+    setCurPath(rel)
+    setPage(1)
+    // 同步到当前标签（保持标签页与导航一致）
+    setTabs((ts) => ts.map((t) => (t.id === activeTabId ? { ...t, path: rel } : t)))
+  }
   const pathParts = useMemo(() => (curPath ? curPath.split("/").filter(Boolean) : []), [curPath])
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
@@ -320,10 +490,27 @@ export function FileExplorerPanel({ initialDomain, domains }: {
 
   const createShare = async () => {
     if (!shareState.target) return
+    if (shareState.accessMode === "USERS" && shareState.allowedUserIds.length === 0 && shareState.allowedGroupIds.length === 0) {
+      toast.error("USERS 模式需至少选择一位用户或一个用户组")
+      return
+    }
+    // 自定义到期时刻（datetime-local 原始值 → ISO；含时区信息由用户本地时区解释）
+    let expiresAtIso: string | undefined
+    if (shareState.customExpiry) {
+      const t = new Date(shareState.customExpiry).getTime()
+      if (!Number.isFinite(t) || t <= Date.now() + 60_000) {
+        toast.error("自定义到期时间必须晚于当前时间至少 1 分钟")
+        return
+      }
+      expiresAtIso = new Date(t).toISOString()
+    }
     const res = await createShareLinkAction({
       domain: domain === "ROOT_FS" ? "STORAGE" : domain,
       path: joinPath(curPath, shareState.target.name),
-      accessMode: shareState.accessMode, expiresDays: shareState.expiresDays,
+      accessMode: shareState.accessMode,
+      expiresDays: expiresAtIso ? 0 : shareState.expiresDays,
+      ...(expiresAtIso ? { expiresAt: expiresAtIso } : {}),
+      ...(shareState.accessMode === "USERS" ? { allowedUserIds: shareState.allowedUserIds, allowedGroupIds: shareState.allowedGroupIds } : {}),
       maxDownloads: shareState.maxDownloads || undefined,
       downloadKBps: shareState.downloadKBps || undefined,
       note: shareState.note || undefined,
@@ -332,6 +519,15 @@ export function FileExplorerPanel({ initialDomain, domains }: {
       setShareState({ ...shareState, created: { token: res.data.token, url: res.data.url, expiresAt: res.data.expiresAt } })
       toast.success("分享链接已创建")
     } else toast.error(res.msg || "创建失败")
+  }
+
+  // r31：打开分享弹窗时预取目标选项（用户+组）
+  const openShareDialog = async (e: FileEntry) => {
+    setShareState({ open: true, target: e, accessMode: "LOGIN", expiresDays: 7, customExpiry: "", maxDownloads: 0, downloadKBps: 0, note: "", allowedUserIds: [], allowedGroupIds: [] })
+    if (shareTargets.users.length === 0 && shareTargets.groups.length === 0) {
+      const res = await listShareTargetOptionsAction({})
+      if (res.code === 0 && res.data) setShareTargets({ users: res.data.users, groups: res.data.groups })
+    }
   }
 
   const loadShareLinks = async () => {
@@ -366,7 +562,12 @@ export function FileExplorerPanel({ initialDomain, domains }: {
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 justify-between">
         {domains.length > 1 && (
-          <Tabs value={domain} onValueChange={(v) => { setDomain(v as Domain); setCurPath(""); setPage(1) }}>
+          <Tabs value={domain} onValueChange={(v) => {
+            const d = v as Domain
+            setDomain(d); setCurPath(""); setPage(1)
+            setTabs((ts) => ts.map((t) => (t.id === activeTabId ? { ...t, domain: d, path: "" } : t)))
+            schedulePrefsSave({})
+          }}>
             <TabsList>
               {domains.map((d) => (
                 <TabsTrigger key={d.key} value={d.key} className="gap-1.5">{d.icon}{d.label}</TabsTrigger>
@@ -377,6 +578,84 @@ export function FileExplorerPanel({ initialDomain, domains }: {
         {domains.length <= 1 && <div className="text-sm font-medium flex items-center gap-1.5">{domains[0]?.icon}{domains[0]?.label}</div>}
         <div className="flex-1 min-w-[200px]">{breadcrumb}</div>
       </div>
+
+      {/* ====== r31：多标签页条（新建/切换/关闭/关闭其他/全部关闭；会话跨设备同步） ====== */}
+      <div className="flex items-center gap-1 border-b pb-1.5 overflow-x-auto scrollbar-none">
+        <div className="flex items-center gap-0.5 min-w-0">
+          {tabs.map((t) => (
+            <div
+              key={t.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => switchTab(t.id)
+              }
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") switchTab(t.id) }}
+              className={`group flex shrink-0 items-center gap-1.5 rounded-t-md border border-b-0 px-2.5 py-1.5 text-xs cursor-pointer transition-colors ${
+                t.id === activeTabId ? "bg-primary/10 border-primary/30 text-primary font-medium" : "bg-muted/40 border-border text-muted-foreground hover:bg-muted"
+              }`}
+              title={`${domainLabel(t.domain as Domain)}${t.path ? ` / ${t.path}` : ""}`}
+            >
+              {t.domain === "ROOT_FS" ? <Server className="h-3 w-3 shrink-0" /> : t.domain === "STORAGE" ? <HardDrive className="h-3 w-3 shrink-0" /> : <Home className="h-3 w-3 shrink-0" />}
+              <span className="max-w-28 truncate">{tabTitle(t)}</span>
+              {tabs.length > 1 && (
+                <button
+                  type="button"
+                  aria-label="关闭标签"
+                  className="rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-background"
+                  onClick={(e) => { e.stopPropagation(); closeTab(t.id) }}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+        <button type="button" onClick={() => openNewTab(domain, "")} title="新建标签页（当前域根目录）"
+          className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground">
+          <Plus className="h-3.5 w-3.5" />
+        </button>
+        <div className="ml-auto flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={toggleFavoriteCurrent}
+            title={favorites.some((f) => f.domain === domain && f.path === curPath) ? "已收藏（点击移除）" : "收藏当前目录（跨设备同步）"}
+            className={`rounded-md p-1 ${favorites.some((f) => f.domain === domain && f.path === curPath) ? "text-amber-500" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
+          >
+            <Star className="h-3.5 w-3.5" />
+          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button type="button" className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground" title="标签页操作">
+                <MoreVertical className="h-3.5 w-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="text-xs">
+              <DropdownMenuItem onClick={closeOtherTabs}>关闭其他标签页</DropdownMenuItem>
+              <DropdownMenuItem onClick={closeAllTabs}>全部关闭</DropdownMenuItem>
+              <DropdownMenuItem onClick={toggleFavoriteCurrent}>{favorites.some((f) => f.domain === domain && f.path === curPath) ? "取消收藏当前目录" : "收藏当前目录"}</DropdownMenuItem>
+              <DropdownMenuItem disabled title="标签与收藏自动跨设备同步（登录即恢复）">已开启跨端同步</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+
+      {/* ====== r31：收藏夹快捷条 ====== */}
+      {favorites.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] text-muted-foreground shrink-0">收藏夹</span>
+          {favorites.map((f) => (
+            <span key={f.id} className="group inline-flex max-w-44 items-center gap-1 rounded-full border border-amber-200/60 bg-amber-50/60 dark:bg-amber-950/20 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-400">
+              <button type="button" onClick={() => gotoFavorite(f)} className="flex min-w-0 items-center gap-1" title={`${domainLabel(f.domain)}${f.path ? ` / ${f.path}` : ""}`}>
+                <Star className="h-3 w-3 shrink-0" />
+                <span className="truncate">{f.title || domainLabel(f.domain)}</span>
+              </button>
+              <button type="button" aria-label="移除收藏" className="shrink-0 rounded-full p-0.5 hover:bg-amber-100" onClick={() => removeFavorite(f.id)}>
+                <X className="h-2.5 w-2.5" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
 
       {/* 工具栏 */}
       <div className="flex flex-wrap items-center gap-2">
@@ -516,11 +795,16 @@ export function FileExplorerPanel({ initialDomain, domains }: {
                         {e.isDir && (
                           <a href={rawUrl(e, "zip")} className="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted" title="打包下载 ZIP"><Archive className="h-3.5 w-3.5" /></a>
                         )}
+                        {e.isDir && (
+                          <Button variant="ghost" size="icon" className="h-7 w-7" title="在新标签页打开" onClick={() => openNewTab(domain, joinPath(curPath, e.name))}>
+                            <FolderInput className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
                         {e.kind === "archive" && canWrite && (
                           <Button variant="ghost" size="icon" className="h-7 w-7" title="解压" onClick={() => { setExtractTarget(e); setExtractPassword("") }}><PackageOpen className="h-3.5 w-3.5" /></Button>
                         )}
-                        {(domain === "HOME" || domain === "STORAGE") && !e.isDir && (
-                          <Button variant="ghost" size="icon" className="h-7 w-7" title="分享" onClick={() => { setShareState({ open: true, target: e, accessMode: "LOGIN", expiresDays: 7, maxDownloads: 0, downloadKBps: 0, note: "" }) }}><Share2 className="h-3.5 w-3.5" /></Button>
+                        {(domain === "HOME" || domain === "STORAGE") && (
+                          <Button variant="ghost" size="icon" className="h-7 w-7" title={e.isDir ? "分享文件夹（预览页浏览/打包）" : "分享"} onClick={() => { void openShareDialog(e) }}><Share2 className="h-3.5 w-3.5" /></Button>
                         )}
                         {canWrite && (
                           <Button variant="ghost" size="icon" className="h-7 w-7" title="重命名" onClick={() => { setRenameTarget(e); setRenameValue(e.name) }}><Pencil className="h-3.5 w-3.5" /></Button>
@@ -609,7 +893,7 @@ export function FileExplorerPanel({ initialDomain, domains }: {
             <DialogHeader><DialogTitle className="flex items-center gap-2 text-base">{KIND_ICON[preview.kind]}{preview.name}</DialogTitle></DialogHeader>
             <div className="flex items-center justify-center bg-black/5 rounded p-2 min-h-[200px]">
               {preview.kind === "image" && (
-                // eslint-disable-next-line @next/next/no-img-element
+                 
                 <img src={rawUrl(preview, "preview")} alt={preview.name} className="max-h-[64vh] max-w-full object-contain" />
               )}
               {preview.kind === "video" && <video src={rawUrl(preview, "preview")} controls className="max-h-[64vh] w-full" />}
@@ -708,21 +992,29 @@ export function FileExplorerPanel({ initialDomain, domains }: {
         </Dialog>
       )}
 
-      {/* ====== 分享弹窗 ====== */}
+      {/* ====== 分享弹窗（r31：用户+组双多选可搜索 / 自定义到期时刻） ====== */}
       {shareState.open && shareState.target && (
         <Dialog open onOpenChange={(v) => { if (!v) setShareState({ ...shareState, open: false, created: undefined }) }}>
-          <DialogContent className="max-w-md">
+          <DialogContent className="max-w-lg max-h-[86vh] overflow-y-auto">
             <DialogHeader><DialogTitle className="flex items-center gap-2"><Share2 className="h-4 w-4" />分享「{shareState.target.name}」</DialogTitle></DialogHeader>
             {shareState.created ? (
               <div className="space-y-3">
-                <div className="p-3 rounded border bg-muted/50 break-all font-mono text-xs">{shareState.created.url}</div>
-                <div className="text-xs text-muted-foreground">
+                <div className="p-3 rounded border bg-muted/50 break-all font-mono text-xs">{location.origin}{shareState.created.url}</div>
+                <div className="text-xs text-muted-foreground flex items-center gap-1.5">
+                  <Clock className="h-3.5 w-3.5" />
                   有效期：{shareState.created.expiresAt ? new Date(shareState.created.expiresAt).toLocaleString("zh-CN") : "永久"}
                 </div>
-                <Button size="sm" variant="outline" onClick={() => {
-                  void navigator.clipboard.writeText(`${location.origin}${shareState.created!.url}`)
-                  toast.success("链接已复制")
-                }}>复制完整链接</Button>
+                <div className="text-xs text-muted-foreground leading-relaxed">
+                  接收人打开链接即可预览（文件夹分享支持在线浏览/多选打包下载；视频拖动进度条）。{""}
+                  {shareState.target.isDir ? "本次为文件夹分享。" : ""}
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => {
+                    void navigator.clipboard.writeText(`${location.origin}${shareState.created!.url}`)
+                    toast.success("链接已复制")
+                  }}>复制完整链接</Button>
+                  <Button size="sm" variant="secondary" onClick={() => window.open(shareState.created!.url, "_blank")}>打开预览页</Button>
+                </div>
               </div>
             ) : (
               <div className="space-y-3">
@@ -731,24 +1023,74 @@ export function FileExplorerPanel({ initialDomain, domains }: {
                   <select value={shareState.accessMode} onChange={(e) => setShareState({ ...shareState, accessMode: e.target.value as "LOGIN" | "PUBLIC" | "USERS" })} className="h-8 rounded border bg-background px-2 text-sm">
                     <option value="LOGIN">需登录</option>
                     <option value="PUBLIC">免登录（公开）</option>
-                    <option value="USERS">指定用户</option>
+                    <option value="USERS">指定用户/用户组</option>
                   </select>
                   <span>有效期</span>
-                  <select value={String(shareState.expiresDays)} onChange={(e) => setShareState({ ...shareState, expiresDays: Number(e.target.value) })} className="h-8 rounded border bg-background px-2 text-sm">
-                    <option value="0">永久有效</option>
-                    <option value="1">1 天</option>
-                    <option value="7">7 天</option>
-                    <option value="30">30 天</option>
-                    <option value="90">90 天</option>
-                    <option value="365">365 天</option>
-                  </select>
+                  <div className="space-y-1.5">
+                    <select value={String(shareState.expiresDays)} onChange={(e) => setShareState({ ...shareState, expiresDays: Number(e.target.value), customExpiry: "" })} className="h-8 w-full rounded border bg-background px-2 text-sm">
+                      <option value="0">永久有效</option>
+                      <option value="1">1 天</option>
+                      <option value="7">7 天</option>
+                      <option value="30">30 天</option>
+                      <option value="90">90 天</option>
+                      <option value="365">365 天</option>
+                      <option value="-1">自定义时刻…</option>
+                    </select>
+                    {(shareState.expiresDays === -1 || shareState.customExpiry) && (
+                      <div className="flex items-center gap-1.5">
+                        <Input
+                          type="datetime-local"
+                          value={shareState.customExpiry}
+                          onChange={(e) => setShareState({ ...shareState, customExpiry: e.target.value })}
+                          className="h-8 text-xs"
+                          min={new Date(Date.now() + 60_000).toISOString().slice(0, 16)}
+                        />
+                        {shareState.customExpiry && (
+                          <Button variant="ghost" size="sm" className="h-8 px-2" onClick={() => setShareState({ ...shareState, customExpiry: "", expiresDays: 7 })} title="改回预设">
+                            <X className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </div>
                   <span>下载上限</span>
                   <Input type="number" min={0} value={shareState.maxDownloads} onChange={(e) => setShareState({ ...shareState, maxDownloads: Number(e.target.value) })} placeholder="0=不限次" className="h-8" />
                   <span>下载限速</span>
                   <Input type="number" min={0} value={shareState.downloadKBps} onChange={(e) => setShareState({ ...shareState, downloadKBps: Number(e.target.value) })} placeholder="0=不限速（KB/s）" className="h-8" />
                   <span>备注</span>
-                  <Input value={shareState.note} onChange={(e) => setShareState({ ...shareState, note: e.target.value })} placeholder="可选" className="h-8" />
+                  <Input value={shareState.note} onChange={(e) => setShareState({ ...shareState, note: e.target.value })} placeholder="可选（接收人可见）" className="h-8" />
                 </div>
+                {/* r31：USERS 模式双多选（用户 + 用户组，均可搜索） */}
+                {shareState.accessMode === "USERS" && (
+                  <div className="space-y-2.5 rounded-lg border bg-muted/30 p-3">
+                    <p className="text-xs text-muted-foreground">授权名单：用户与用户组可混合多选（搜索定位 · 组员全部可访问）</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="w-14 shrink-0 text-xs font-medium">用户</span>
+                      <MultiSelectPopover
+                        options={shareTargets.users.map((u) => ({ id: u.id, label: u.displayName ? `${u.displayName}（${u.username}）` : u.username }))}
+                        selected={shareState.allowedUserIds}
+                        onChange={(next) => setShareState({ ...shareState, allowedUserIds: next })}
+                        placeholder={"选择用户（" + shareTargets.users.length + "）"}
+                        searchPlaceholder="搜索用户名/昵称…"
+                        width={280}
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="w-14 shrink-0 text-xs font-medium">用户组</span>
+                      <MultiSelectPopover
+                        options={shareTargets.groups.map((g) => ({ id: g.id, label: g.name, sub: `${g.memberCount} 人` }))}
+                        selected={shareState.allowedGroupIds}
+                        onChange={(next) => setShareState({ ...shareState, allowedGroupIds: next })}
+                        placeholder={"选择用户组（" + shareTargets.groups.length + "）"}
+                        searchPlaceholder="搜索组名…"
+                        width={280}
+                      />
+                    </div>
+                    {(shareState.allowedUserIds.length > 0 || shareState.allowedGroupIds.length > 0) && (
+                      <p className="text-[11px] text-teal-600">已授权 {shareState.allowedUserIds.length} 位用户 + {shareState.allowedGroupIds.length} 个用户组</p>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             <DialogFooter>
@@ -758,7 +1100,7 @@ export function FileExplorerPanel({ initialDomain, domains }: {
         </Dialog>
       )}
 
-      {/* ====== 我的分享列表 ====== */}
+      {/* ====== 我的分享列表（r31：复制预览页链接 + 打开 + 延期） ====== */}
       {shareListOpen && (
         <Dialog open onOpenChange={setShareListOpen}>
           <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
@@ -772,16 +1114,27 @@ export function FileExplorerPanel({ initialDomain, domains }: {
               <tbody>
                 {shareLinks.map((l) => (
                   <tr key={l.token} className={`border-b ${l.revokedAt ? "opacity-50" : ""}`}>
-                    <td className="p-2 truncate max-w-0" title={l.fileName}>{l.fileName}</td>
-                    <td className="p-2">{l.accessMode === "PUBLIC" ? "免登录" : l.accessMode === "USERS" ? "指定用户" : "需登录"}</td>
-                    <td className="p-2">{l.revokedAt ? "已撤销" : l.expiresAt ? new Date(l.expiresAt).toLocaleDateString("zh-CN") : "永久"}</td>
+                    <td className="p-2 truncate max-w-0" title={l.fileName}>
+                      {l.isDir && <Folder className="mr-1 inline h-3 w-3 text-amber-500" />}
+                      {l.fileName}
+                    </td>
+                    <td className="p-2">{l.accessMode === "PUBLIC" ? "免登录" : l.accessMode === "USERS" ? "指定名单" : "需登录"}</td>
+                    <td className="p-2">{l.revokedAt ? "已撤销" : l.expiresAt ? new Date(l.expiresAt).toLocaleString("zh-CN") : "永久"}</td>
                     <td className="p-2">{l.viewCount}/{l.downloadCount}</td>
                     <td className="p-2 text-right">
                       <div className="flex justify-end gap-1">
                         <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={() => {
-                          void navigator.clipboard.writeText(`${location.origin}/api/files/share/${l.token}`)
-                          toast.success("已复制")
+                          void navigator.clipboard.writeText(`${location.origin}/share/${l.token}`)
+                          toast.success("预览页链接已复制")
                         }}>复制</Button>
+                        <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={() => window.open(`/share/${l.token}`, "_blank")}>
+                          <Eye className="h-3 w-3 mr-0.5" />打开
+                        </Button>
+                        {!l.revokedAt && (
+                          <Button variant="ghost" size="sm" className="h-6 text-xs text-teal-600" onClick={() => { setExtendTarget(l); setExtendValue("") }} title="自定义新到期时间（可永久）">
+                            延期
+                          </Button>
+                        )}
                         {!l.revokedAt && (
                           <Button variant="ghost" size="sm" className="h-6 text-xs text-red-500" onClick={async () => {
                             const res = await revokeShareLinkAction({ token: l.token })
@@ -795,6 +1148,40 @@ export function FileExplorerPanel({ initialDomain, domains }: {
                 {shareLinks.length === 0 && <tr><td colSpan={5} className="p-6 text-center text-muted-foreground">暂无分享</td></tr>}
               </tbody>
             </table>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {/* ====== r31：分享延期弹窗 ====== */}
+      {extendTarget && (
+        <Dialog open onOpenChange={(v) => { if (!v) setExtendTarget(null) }}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader><DialogTitle className="flex items-center gap-2"><Clock className="h-4 w-4" />延期「{extendTarget.fileName}」</DialogTitle></DialogHeader>
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                当前：{extendTarget.expiresAt ? new Date(extendTarget.expiresAt).toLocaleString("zh-CN") : "永久有效"}
+              </p>
+              <Input
+                type="datetime-local"
+                value={extendValue}
+                onChange={(e) => setExtendValue(e.target.value)}
+                min={new Date(Date.now() + 60_000).toISOString().slice(0, 16)}
+              />
+              <Button size="sm" variant="outline" className="w-full" onClick={async () => {
+                const res = await extendShareLinkAction({ token: extendTarget.token, expiresAt: null })
+                if (res.code === 0) { toast.success("已改为永久有效"); setExtendTarget(null); void loadShareLinks() }
+                else toast.error(res.msg)
+              }}>设为永久有效</Button>
+            </div>
+            <DialogFooter>
+              <Button size="sm" disabled={!extendValue} onClick={async () => {
+                const t = new Date(extendValue).getTime()
+                if (!Number.isFinite(t) || t <= Date.now() + 60_000) { toast.error("新到期时间必须晚于当前时间至少 1 分钟"); return }
+                const res = await extendShareLinkAction({ token: extendTarget.token, expiresAt: new Date(t).toISOString() })
+                if (res.code === 0) { toast.success(`已延期至 ${new Date(t).toLocaleString("zh-CN")}`); setExtendTarget(null); void loadShareLinks() }
+                else toast.error(res.msg)
+              }}>确认延期</Button>
+            </DialogFooter>
           </DialogContent>
         </Dialog>
       )}

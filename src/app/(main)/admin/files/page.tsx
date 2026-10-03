@@ -22,6 +22,10 @@ export default async function AdminFilesPage({
   const sp = await searchParams
   const q = parseListQuery(sp)
   const f = q.filters
+  // r31：深链定位（用户资料直达 /admin/files?domain=STORAGE&path=home/<userId>）
+  const deepDomain = (sp.domain as string | undefined) || ""
+  const deepPath = (sp.path as string | undefined) || ""
+  const initialDomain = deepDomain === "ROOT_FS" || deepDomain === "STORAGE" || deepDomain === "HOME" ? deepDomain : "STORAGE"
 
   // ---- 筛选：category / 用户 / 关键词 ----
   const where: Record<string, unknown> = { deletedAt: null }
@@ -124,7 +128,8 @@ export default async function AdminFilesPage({
           </p>
         </div>
         <FileExplorerPanel
-          initialDomain="STORAGE"
+          initialDomain={initialDomain as "ROOT_FS" | "STORAGE" | "HOME"}
+          initialPath={deepPath || undefined}
           domains={[
             { key: "ROOT_FS", label: "容器全盘", icon: <Server className="h-3.5 w-3.5" /> },
             { key: "STORAGE", label: "平台存储", icon: <HardDrive className="h-3.5 w-3.5" /> },

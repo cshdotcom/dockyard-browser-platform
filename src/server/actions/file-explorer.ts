@@ -470,13 +470,15 @@ export async function dirSizeAction(input: unknown): Promise<ActionResult<{ size
   })
 }
 
-// ---- 11. 分享链接 ----
+// ---- 11. 分享链接（r31 增强：用户+用户组双多选 / 自定义到期时间） ----
 const shareSchema = z.object({
   domain: z.enum(["STORAGE", "HOME"]).default("HOME"), // 分享仅限 STORAGE/HOME（ROOT_FS 全盘文件禁止外链）
   path: z.string().max(1024),
   accessMode: z.enum(["PUBLIC", "LOGIN", "USERS"]).default("LOGIN"),
-  allowedUserIds: z.array(z.string().max(64)).max(50).optional(),
-  expiresDays: z.number().int().min(0).max(3650).default(7), // 0=永久
+  allowedUserIds: z.array(z.string().max(64)).max(100).optional(),
+  allowedGroupIds: z.array(z.string().max(64)).max(100).optional(), // r31：用户组名单（组员均可访问）
+  expiresDays: z.number().int().min(0).max(3650).default(7), // 0=永久（与 expiresAt 二选一）
+  expiresAt: z.string().datetime().optional(), // r31：自定义到期时刻（ISO；优先于 expiresDays）
   maxViews: z.number().int().min(0).max(1000000).optional(), // 0/undefined=不限
   maxDownloads: z.number().int().min(0).max(1000000).optional(),
   downloadKBps: z.number().int().min(0).max(1024 * 1024).optional(),
@@ -492,18 +494,46 @@ export async function createShareLinkAction(input: unknown): Promise<ActionResul
     const { abs, ok } = resolveDomainPath(roots, p.domain, p.path)
     if (!ok) return biz403("非法路径")
     const st = await fsp.stat(abs).catch(() => null)
-    if (!st || !st.isDirectory()) { /* 允许目录分享（zip 动态打包在路由层做） */ }
     if (!st) return biz403("文件不存在")
 
+    // r31：USERS 模式名单校验（用户/组存在性 + 去重）
+    if (p.accessMode === "USERS") {
+      const uids = [...new Set(p.allowedUserIds || [])]
+      const gids = [...new Set(p.allowedGroupIds || [])]
+      if (uids.length === 0 && gids.length === 0) return biz403("USERS 模式需至少选择一位用户或一个用户组")
+      if (uids.length > 0) {
+        const found = await db.user.count({ where: { id: { in: uids }, deletedAt: null } })
+        if (found !== uids.length) return biz403("存在无效用户（可能已删除）")
+      }
+      if (gids.length > 0) {
+        const foundG = await db.group.count({ where: { id: { in: gids }, deletedAt: null } })
+        if (foundG !== gids.length) return biz403("存在无效用户组")
+      }
+    }
+
+    // 到期时间：自定义时刻优先；其次天数；0=永久
+    let expiresAt: Date | null = null
+    if (p.expiresAt) {
+      const t = new Date(p.expiresAt).getTime()
+      if (!Number.isFinite(t)) return biz403("自定义到期时间格式非法")
+      if (t <= Date.now() + 60_000) return biz403("到期时间必须晚于当前时间至少 1 分钟")
+      expiresAt = new Date(t)
+    } else if (p.expiresDays > 0) {
+      expiresAt = new Date(Date.now() + p.expiresDays * 86400_000)
+    }
+
     const token = randomBytes(24).toString("hex")
-    const expiresAt = p.expiresDays > 0 ? new Date(Date.now() + p.expiresDays * 86400_000) : null
+    const sizeBytes = st.isDirectory() ? await dirSize(abs).catch(() => 0) : st.size
     await db.fileShareLink.create({
       data: {
         token, domain: p.domain, filePath: p.path,
-        fileName: path.basename(abs), sizeBytes: st.size,
+        fileName: path.basename(abs), sizeBytes,
+        isDir: st.isDirectory(),
         ownerUserId: ctx.userId,
         accessMode: p.accessMode,
-        allowedUsers: p.accessMode === "USERS" ? { userIds: p.allowedUserIds || [] } : undefined,
+        allowedUsers: p.accessMode === "USERS"
+          ? { userIds: [...new Set(p.allowedUserIds || [])], groupIds: [...new Set(p.allowedGroupIds || [])] }
+          : undefined,
         expiresAt,
         maxViews: p.maxViews && p.maxViews > 0 ? p.maxViews : null,
         maxDownloads: p.maxDownloads && p.maxDownloads > 0 ? p.maxDownloads : null,
@@ -514,14 +544,84 @@ export async function createShareLinkAction(input: unknown): Promise<ActionResul
     void writeAudit({
       operatorUserId: ctx.userId, operatorName: ctx.username,
       operationType: "FILE_SHARE_CREATE", resourceType: "FILE", resourceName: path.basename(abs), severity: "WARN",
-      after: { token: token.slice(0, 8) + "…", accessMode: p.accessMode, expiresDays: p.expiresDays },
+      after: {
+        token: token.slice(0, 8) + "…", accessMode: p.accessMode,
+        targetUsers: (p.allowedUserIds || []).length, targetGroups: (p.allowedGroupIds || []).length,
+        isDir: st.isDirectory(), expiresAt: expiresAt?.toISOString() || "永久",
+      },
     }).catch(() => null)
     return { token, url: `/share/${token}`, expiresAt: expiresAt?.toISOString() || null }
   })
 }
 
+// ---- r31：分享目标选项（用户 + 用户组；供双多选面板） ----
+export async function listShareTargetOptionsAction(input: unknown): Promise<ActionResult<{
+  users: Array<{ id: string; username: string; displayName: string | null }>
+  groups: Array<{ id: string; name: string; memberCount: number }>
+}>> {
+  return actionHandler(async () => {
+    await requireAuth()
+    const p = zodValidate(z.object({ keyword: z.string().max(64).optional() }), input)
+    const kw = p.keyword?.trim()
+    const [users, groups] = await Promise.all([
+      db.user.findMany({
+        where: {
+          deletedAt: null, enabled: true,
+          ...(kw ? { OR: [{ username: { contains: kw } }, { displayName: { contains: kw } }] } : {}),
+        },
+        select: { id: true, username: true, displayName: true },
+        orderBy: { username: "asc" },
+        take: 200,
+      }),
+      db.group.findMany({
+        where: { deletedAt: null, ...(kw ? { name: { contains: kw } } : {}) },
+        select: { id: true, name: true },
+        orderBy: { name: "asc" },
+        take: 100,
+      }).catch(() => [] as Array<{ id: string; name: string }>),
+    ])
+    const memberCounts = await db.groupUser.groupBy({ by: ["groupId"], _count: { id: true } }).catch(() => [])
+    const countByG = new Map<string, number>(memberCounts.map((m) => [m.groupId, m._count.id] as [string, number]))
+    return {
+      users,
+      groups: groups.map((g) => ({ id: g.id, name: g.name, memberCount: countByG.get(g.id) || 0 })),
+    }
+  })
+}
+
+// ---- r31：分享延期（自定义新到期时刻；所有者/管理员） ----
+const extendSchema = z.object({
+  token: z.string().length(48),
+  expiresAt: z.string().datetime().nullable(), // null=永久
+})
+
+export async function extendShareLinkAction(input: unknown): Promise<ActionResult<{ expiresAt: string | null }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const p = zodValidate(extendSchema, input)
+    const isAdmin = ctx.role === "ADMIN" || ctx.role === "SUPER_ADMIN"
+    const row = await db.fileShareLink.findFirst({ where: { token: p.token, ...(isAdmin ? {} : { ownerUserId: ctx.userId }) } })
+    if (!row) return biz403("分享不存在或无权操作")
+    if (row.revokedAt) return biz403("分享已被撤销，无法延期")
+    let expiresAt: Date | null = null
+    if (p.expiresAt) {
+      const t = new Date(p.expiresAt).getTime()
+      if (!Number.isFinite(t) || t <= Date.now() + 60_000) return biz403("新到期时间必须晚于当前时间至少 1 分钟")
+      expiresAt = new Date(t)
+    }
+    await db.fileShareLink.update({ where: { id: row.id }, data: { expiresAt } })
+    void writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "FILE_SHARE_EXTEND", resourceType: "FILE", resourceName: row.fileName, severity: "WARN",
+      before: { expiresAt: row.expiresAt?.toISOString() || "永久" },
+      after: { token: p.token.slice(0, 8) + "…", expiresAt: expiresAt?.toISOString() || "永久" },
+    }).catch(() => null)
+    return { expiresAt: expiresAt?.toISOString() || null }
+  })
+}
+
 export async function listMyShareLinksAction(): Promise<ActionResult<Array<{
-  token: string; fileName: string; accessMode: string; expiresAt: string | null
+  token: string; fileName: string; isDir: boolean; accessMode: string; expiresAt: string | null
   viewCount: number; downloadCount: number; revokedAt: string | null; createdAt: string; url: string
 }>>> {
   return actionHandler(async () => {
@@ -532,7 +632,7 @@ export async function listMyShareLinksAction(): Promise<ActionResult<Array<{
       take: 100,
     })
     return rows.map((r) => ({
-      token: r.token, fileName: r.fileName, accessMode: r.accessMode,
+      token: r.token, fileName: r.fileName, isDir: r.isDir, accessMode: r.accessMode,
       expiresAt: r.expiresAt?.toISOString() || null,
       viewCount: r.viewCount, downloadCount: r.downloadCount,
       revokedAt: r.revokedAt?.toISOString() || null,

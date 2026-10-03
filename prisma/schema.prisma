@@ -1117,9 +1117,10 @@ model FileShareLink {
   filePath       String    // 域内相对路径
   fileName       String
   sizeBytes      Int       @default(0)
+  isDir          Boolean   @default(false) // r31：文件夹分享（预览页目录浏览/zip 打包）
   ownerUserId    String
-  accessMode     String    @default("LOGIN") // PUBLIC(免登录) | LOGIN(需登录) | USERS(指定用户)
-  allowedUsers   Json?     // userIds 名单（USERS 模式）
+  accessMode     String    @default("LOGIN") // PUBLIC(免登录) | LOGIN(需登录) | USERS(指定用户/组)
+  allowedUsers   Json?     // { userIds: [], groupIds: [] } 名单（USERS 模式）
   expiresAt      DateTime? // null = 永久有效
   maxViews       Int?      // null = 不限查看次数
   maxDownloads   Int?      // null = 不限下载次数

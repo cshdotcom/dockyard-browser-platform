@@ -60,6 +60,7 @@ const PAGE_ENTRIES: SearchableFunction[] = [
   { id: "m-browsing", title: "浏览数据管理", desc: "全站浏览历史 / 书签明文库：筛选 / 搜索 / 导出 / 批量", href: "/admin/browsing", group: "管理后台", keywords: ["浏览历史", "历史", "书签", "明文", "访问记录", "用户浏览", "上网行为"], roles: ADMIN_ROLES },
   { id: "m-worknodes", title: "Worker 节点", desc: "Master/Worker 分布式：节点注册 / 心跳监控 / 驱逐", href: "/admin/worknodes", group: "平台运维", keywords: ["worker", "节点", "分布式", "集群", "心跳", "注册", "驱逐", "region"], roles: ADMIN_ROLES },
   { id: "m-feature-flags", title: "功能开关", desc: "全平台功能型开关总览：一键启停 / 版本快照 / 审计", href: "/admin/feature-flags", group: "管理后台", keywords: ["功能开关", "开关", "feature", "flag", "启停", "禁用功能", "功能治理"], roles: ADMIN_ROLES },
+  { id: "m-permissions", title: "权限中心", desc: "30 项权限锁三级分配矩阵（全局/用户组/用户）+ 沙箱级策略入口", href: "/admin/permissions", group: "管理后台", keywords: ["权限中心", "权限锁", "permission", "锁死", "禁止创建", "禁止导出", "权限分配", "权限矩阵", "block"], roles: ADMIN_ROLES },
   { id: "m-workspaces", title: "工作区管控", desc: "全部用户沙箱：运维操作 / 共享管控 / 冻结封存", href: "/admin/workspaces", group: "管理后台", keywords: ["沙箱管理", "工作区管控", "全部工作区", "admin workspace", "冻结", "封存"], roles: ADMIN_ROLES },
 
   // 平台运维

@@ -38,7 +38,7 @@ async function sendAlertEmail(params: { title: string; level: AlertLevel; conten
 
     const { sendMail, alertEmailTemplate } = await import("./email")
     const subject = `[${params.level}] ${params.title}`
-    const html = alertEmailTemplate(params.level, params.title, params.content)
+    const html = await alertEmailTemplate(params.level, params.title, params.content)
     // 逐个发送（失败不影响其他收件人；sendMail 内部自带模拟模式降级）
     for (const to of recipients.slice(0, 20)) {
       await sendMail(to, subject, html, params.content).catch(() => {})

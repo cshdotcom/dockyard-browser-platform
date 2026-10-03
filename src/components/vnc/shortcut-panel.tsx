@@ -17,6 +17,7 @@ import { toast } from "sonner"
 import {
   BUILTIN_SHORTCUTS, SHORTCUT_CATEGORIES, keyEventToCombo, KS_CTRL, KS_ALT, KS_SHIFT, KS_SUPER,
   MODIFIER_CAPS, MAIN_CAPS, NUMBER_CAPS, FUNCTION_CAPS, ARROW_CAPS, NAV_CAPS, PAGING_CAPS, PUNCT_CAPS,
+  SHIFT_SYMBOL_CAPS, EXTENDED_CAPS,
 } from "@/lib/vnc-shortcuts"
 import { getMyShortcutsAction, saveMyShortcutsAction, type CustomShortcut } from "@/server/actions/vnc-shortcuts"
 
@@ -60,7 +61,7 @@ export function ShortcutPanel({ sendKey, disabled }: { sendKey: KeySender; disab
   const [recording, setRecording] = useState(false)
   const [draftKeys, setDraftKeys] = useState<number[]>([])
   const [draftTitle, setDraftTitle] = useState("")
-  const [subKeyboard, setSubKeyboard] = useState<"alpha" | "numbers" | "fn" | "arrows" | "nav" | "punct">("alpha")
+  const [subKeyboard, setSubKeyboard] = useState<"alpha" | "numbers" | "fn" | "arrows" | "nav" | "punct" | "symbols" | "ext">("alpha")
   const [dirty, setDirty] = useState(false)
 
   useEffect(() => {
@@ -199,19 +200,21 @@ export function ShortcutPanel({ sendKey, disabled }: { sendKey: KeySender; disab
                 ))}
               </div>
               <div className="flex gap-1 flex-wrap">
-                {(["alpha", "numbers", "fn", "arrows", "nav", "punct"] as const).map((k) => (
+                {(["alpha", "numbers", "symbols", "fn", "arrows", "nav", "punct", "ext"] as const).map((k) => (
                   <button key={k} onClick={() => setSubKeyboard(k)}
                     className={`px-1.5 h-6 rounded text-[10px] border ${subKeyboard === k ? "bg-muted font-medium" : "bg-background"}`}>
-                    {{ alpha: "字母", numbers: "数字", fn: "F键", arrows: "方向", nav: "导航", punct: "符号" }[k]}
+                    {{ alpha: "字母", numbers: "数字", symbols: "上档符号", fn: "F键", arrows: "方向", nav: "导航", punct: "符号", ext: "扩展键" }[k]}
                   </button>
                 ))}
               </div>
               <div className="flex flex-wrap gap-1 max-h-28 overflow-y-auto">
-                {(subKeyboard === "alpha" ? MAIN_CAPS.filter((c) => c.keysym >= 0x61)
+                {(subKeyboard === "alpha" ? MAIN_CAPS
                   : subKeyboard === "numbers" ? NUMBER_CAPS
+                  : subKeyboard === "symbols" ? SHIFT_SYMBOL_CAPS
                   : subKeyboard === "fn" ? FUNCTION_CAPS
                   : subKeyboard === "arrows" ? ARROW_CAPS
                   : subKeyboard === "nav" ? [...NAV_CAPS, ...PAGING_CAPS]
+                  : subKeyboard === "ext" ? EXTENDED_CAPS
                   : PUNCT_CAPS).map((c, i) => (
                   <button key={`${c.label}-${i}`} onClick={() => appendMain(c.keysym)}
                     className="px-2 h-7 min-w-7 rounded text-xs border bg-background hover:bg-muted">

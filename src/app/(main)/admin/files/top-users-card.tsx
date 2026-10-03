@@ -1,8 +1,10 @@
 "use client"
 
 // 用户磁盘占用 Top10 卡片（fileMeta groupBy userId sum size）
+// r31：点击用户 → 跳转文件管理该用户专属空间（统一“归属点击”直达语义）
 
 import { HardDrive } from "lucide-react"
+import { useRouter } from "next/navigation"
 import { fmtBytesClient } from "./fmt"
 
 export interface UserDiskRow {
@@ -14,6 +16,7 @@ export interface UserDiskRow {
 }
 
 export function TopUsersCard({ rows, quotaMb }: { rows: UserDiskRow[]; quotaMb: number }) {
+  const router = useRouter()
   const max = Math.max(...rows.map((r) => r.totalSize), 1)
   return (
     <div className="rounded-lg border bg-card p-4 space-y-3">
@@ -31,11 +34,16 @@ export function TopUsersCard({ rows, quotaMb }: { rows: UserDiskRow[]; quotaMb: 
           {rows.map((r, idx) => (
             <div key={r.userId} className="space-y-1">
               <div className="flex items-center justify-between text-sm">
-                <span className="truncate">
+                <button
+                  type="button"
+                  className="truncate hover:text-teal-600"
+                  title={`点击查看 ${r.username} 的专属文件空间`}
+                  onClick={() => router.push(`/admin/files?domain=STORAGE&path=${encodeURIComponent(`home/${r.userId}`)}`)}
+                >
                   <span className="text-muted-foreground text-xs tabular-nums mr-1.5">{idx + 1}.</span>
                   {r.username}
                   <span className="ml-1.5 text-xs text-muted-foreground">{r.fileCount} 个文件</span>
-                </span>
+                </button>
                 <span className="tabular-nums text-xs font-medium">{r.totalSizeText}</span>
               </div>
               <div className="h-1.5 rounded-full bg-muted overflow-hidden">
