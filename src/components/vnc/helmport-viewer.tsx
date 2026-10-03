@@ -21,6 +21,7 @@ import {
   Languages, Timer, GripVertical, Send, PanelRightClose, PanelRightOpen, Lock, ChevronsUp,
   Crosshair } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { MonitorBanner } from "@/components/vnc/monitor-banner"
 import { ImeSwitcher } from "./ime-switcher"
 import { ShortcutPanel } from "./shortcut-panel"
 import { Badge } from "@/components/ui/badge"
@@ -858,6 +859,9 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
 
   return (
     <div className="space-y-3">
+      {/* r29-b：知情模式监控横幅（静默特权对用户不可见；红点+一键切断） */}
+      <MonitorBanner workspaceId={workspace.id} />
+
       {/* ===== 顶部亮色状态栏（企业级浅色主题） ===== */}
       <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
         <div className="flex flex-wrap items-center gap-2">

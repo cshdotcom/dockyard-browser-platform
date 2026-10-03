@@ -1193,6 +1193,10 @@ model WorkNode {
   // 调度容量
   maxSandboxes     Int       @default(20)
   storageUsedMb    Int       @default(0)
+  // r29-d：资源告警阈值节点级覆盖（null=继承全局 worknode.* 配置）
+  cpuThresholdPct  Int?
+  memThresholdPct  Int?
+  diskThresholdPct Int?
   evictedAt        DateTime?
   evictReason      String?
   createdByUserId  String?
@@ -1531,4 +1535,114 @@ model CrxGrayTask {
 
   @@index([status])
   @@index([createdAt])
+}
+
+// ============================================================
+// r29-b：硬件远程监视授权（双模式）
+// ============================================================
+
+model MonitorGrant {
+  id              String    @id @default(cuid())
+  workspaceId     String
+  userId          String?
+  channel         String
+  mode            String
+  reason          String?
+  grantedByUserId String
+  grantedByName   String
+  active          Boolean   @default(true)
+  cutOffBy        String?
+  startedAt       DateTime  @default(now())
+  endedAt         DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([workspaceId, active])
+  @@index([active, mode])
+  @@index([userId, active])
+}
+
+// ============================================================
+// r29-e：虚拟媒体投递（云盘音视频定点秒级投递 + 图片恒定帧虚拟摄像头）
+// ============================================================
+
+model MediaCast {
+  id                 String    @id @default(cuid())
+  workspaceId        String
+  userId             String?
+  fileName           String
+  mediaKind          String // video | audio
+  seekSec            Int       @default(0) // 定点秒
+  storagePath        String? // 沙箱内投递文件路径（重置即清理）
+  castPid            Int? // ffplay 进程（存活巡检自动收口）
+  status             String    @default("PLAYING") // PLAYING | STOPPED
+  stopReason         String? // RESET | REPLACE | EXITED
+  deliveredByUserId  String?
+  deliveredByName    String?
+  startedAt          DateTime  @default(now())
+  stoppedAt          DateTime?
+
+  @@index([workspaceId, status])
+  @@index([status])
+}
+
+// ============================================================
+// r29-f：分布式文件存储（9 大条件）
+//   1. 沙箱绑定强制落地（最高优先级：绑定沙箱的节点）
+//   2. 上传 ≥10MB 直沉 Worker；小文件主控中转（24h TTL 后台下沉）
+//   3. 共享协作文件下沉被访问端
+//   4. 冷热分层（默认 30 天未访问 → COLD）
+//   5. 资源水位调度（默认 20% 安全水位，超额节点不接新落盘）
+//   6. 多副本 1-3（跨节点分布）
+//   7. 副本修复（节点失联 LOST → 计划重建）
+//   8. 跨节点迁移跟随（沙箱迁移 → 文件随迁）
+//   9. 中转队列超时强制下沉
+// ============================================================
+
+model FileObject {
+  id            String    @id @default(cuid())
+  fileKey       String    @unique // <sha256前16>-<安全化文件名>
+  name          String
+  sizeBytes     Int       @default(0)
+  mimeType      String?
+  sha256        String?
+  // 归属语义（路由键）
+  bindType      String    @default("GENERAL") // SANDBOX | USER | SHARE | GENERAL
+  bindId        String?
+  // 分层与副本
+  tier          String    @default("HOT") // HOT | COLD
+  replicas      Int       @default(1)
+  // 上传通道与中转
+  uploadChannel String    @default("MASTER_RELAY") // MASTER_RELAY | DIRECT_WORKER
+  relayExpiresAt DateTime? // 中转 TTL（24h；到期强制下沉）
+  relayed       Boolean   @default(false)
+  lastAccessAt  DateTime  @default(now())
+  accessNode    String? // 最近访问节点（共享下沉判定）
+  createdById   String?
+  createdByName String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  placements    FilePlacement[]
+
+  @@index([bindType, bindId])
+  @@index([tier, lastAccessAt])
+  @@index([relayExpiresAt])
+}
+
+model FilePlacement {
+  id        String   @id @default(cuid())
+  fileId    String
+  file      FileObject @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  nodeUuid  String // 落地节点（MASTER=主控；wn-xxx=Worker）
+  role      String   @default("PRIMARY") // PRIMARY | REPLICA
+  status    String   @default("ACTIVE") // ACTIVE | SYNCING | LOST | MIGRATING
+  sizeBytes Int      @default(0)
+  syncJobId String? // 下沉/同步任务（中转 24h / 副本修复）
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@index([fileId])
+  @@index([nodeUuid, status])
+  @@unique([fileId, nodeUuid])
 }

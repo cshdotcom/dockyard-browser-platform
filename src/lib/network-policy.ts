@@ -226,8 +226,11 @@ export interface ChromiumPolicyOptions {
   filePolicy?: import("./file-policy").FilePolicy | null // 文件访问限制策略（四层合并后；缺省按系统默认：下载/上传允许、file:// 禁）
   extraBaselineBlock?: string[] | null // 单容器内嵌基线（deny-wins：跨沙箱 CDP/RFB 段 + 平台回环端口；不可被任何作用域豁免）
   // r27：模板级 Chromium 企业策略目录注入（已过 validateExtraPolicies 校验）
-  // 合并顺序：此处先注入 → 文件/CRX/代理/WebRTC 安全层后注入 → 安全层永不被模板覆盖
+  // 合并顺序：此处先注入 → 硬件/文件/CRX/代理/WebRTC 安全层后注入 → 安全层永不被模板覆盖
   extraManagedPolicy?: Record<string, unknown> | null
+  // r29-a：17 项硬件权限四级链解析后的 Chromium 原生策略键（DefaultCameraSetting/WebUSBBlocked 等）
+  // 安全层级高于模板（管理员硬件管控优先；沙箱>用户>组>全局）
+  hardwareManagedPolicy?: Record<string, number> | null
 }
 
 export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<string, unknown> {
@@ -304,6 +307,12 @@ export function buildChromiumManagedPolicy(opts: ChromiumPolicyOptions): Record<
   if (opts.extraManagedPolicy) {
     for (const [k, v] of Object.entries(opts.extraManagedPolicy)) {
       if (SECURITY_OWNED_POLICY_KEYS.has(k)) continue // 双保险：目录层已校验拒收
+      managed[k] = v
+    }
+  }
+  // —— r29-a：17 项硬件权限注入（四级链管控层；可覆写模板同名键，硬件管控优先）——
+  if (opts.hardwareManagedPolicy) {
+    for (const [k, v] of Object.entries(opts.hardwareManagedPolicy)) {
       managed[k] = v
     }
   }

@@ -98,12 +98,26 @@ export function validateHardwarePolicy(v: unknown): { ok: boolean; errors: strin
 // ---- 四级链解析（沙箱 > 用户 > 组（继承链） > 全局默认） ----
 import { db } from "@/lib/db"
 
-export async function resolveHardwarePolicy(userId: string, workspaceId?: string): Promise<{ policy: Record<string, HardwarePermState>; source: "SANDBOX" | "USER" | "GROUP" | "GLOBAL" }> {
+export interface ResolvedHardware {
+  policy: Record<string, HardwarePermState>
+  source: "SANDBOX" | "USER" | "GROUP" | "GLOBAL"
+  /** 任一层级显式设置过的权限项（平台通道回退判定用：未显式 → 沿用旧版全局开关语义） */
+  explicit: Record<string, boolean>
+}
+
+/** 稀疏显式标记合并（层级链上出现过即置位） */
+function mergeExplicit(acc: Record<string, boolean>, sparse: HardwarePermMap): void {
+  for (const k of Object.keys(sparse)) acc[k] = true
+}
+
+export async function resolveHardwarePolicy(userId: string, workspaceId?: string): Promise<ResolvedHardware> {
   const { getConfig } = await import("@/lib/config")
   const defaultsStr = await getConfig("hardware.defaults", "{}")
   let defaults: HardwarePermMap = {}
   try { defaults = JSON.parse(String(defaultsStr || "{}")) as HardwarePermMap } catch { defaults = {} }
 
+  const explicit: Record<string, boolean> = {}
+  mergeExplicit(explicit, defaults)
   let policy = mergeSparse({}, defaults)
   let source: "SANDBOX" | "USER" | "GROUP" | "GLOBAL" = "GLOBAL"
 
@@ -117,6 +131,7 @@ export async function resolveHardwarePolicy(userId: string, workspaceId?: string
       if (!g) break
       if (g.hardwarePolicy && Object.keys(g.hardwarePolicy as object).length > 0) {
         policy = mergeSparse(policy, g.hardwarePolicy as HardwarePermMap)
+        mergeExplicit(explicit, g.hardwarePolicy as HardwarePermMap)
         source = "GROUP"
         break
       }
@@ -129,6 +144,7 @@ export async function resolveHardwarePolicy(userId: string, workspaceId?: string
   const user = await db.user.findUnique({ where: { id: userId }, select: { hardwarePolicy: true } })
   if (user?.hardwarePolicy && Object.keys(user.hardwarePolicy as object).length > 0) {
     policy = mergeSparse(policy, user.hardwarePolicy as HardwarePermMap)
+    mergeExplicit(explicit, user.hardwarePolicy as HardwarePermMap)
     source = "USER"
   }
 
@@ -137,11 +153,27 @@ export async function resolveHardwarePolicy(userId: string, workspaceId?: string
     const ws = await db.browserWorkspace.findUnique({ where: { id: workspaceId }, select: { hardwareOverride: true } })
     if (ws?.hardwareOverride && Object.keys(ws.hardwareOverride as object).length > 0) {
       policy = mergeSparse(policy, ws.hardwareOverride as HardwarePermMap)
+      mergeExplicit(explicit, ws.hardwareOverride as HardwarePermMap)
       source = "SANDBOX"
     }
   }
 
-  return { policy, source }
+  return { policy, source, explicit }
+}
+
+/**
+ * VNC 剪贴板透传解析（r29-a：硬件权限接管旧版全局开关）
+ * 语义：剪贴板读/写任一层级显式设置 → 硬件策略生效（读或写启用即透传）；
+ *       全链未显式 → 回退 workspace.clipboardVncSync 旧语义（升级零破坏）。
+ */
+export async function resolveClipboardSync(userId: string, workspaceId?: string): Promise<{ enabled: boolean; source: string }> {
+  const { policy, explicit } = await resolveHardwarePolicy(userId, workspaceId)
+  if (explicit.clipboardRead || explicit.clipboardWrite) {
+    const on = !!(policy.clipboardRead?.enabled || policy.clipboardWrite?.enabled)
+    return { enabled: on, source: explicit.clipboardWrite && !explicit.clipboardRead ? "clipboardWrite" : explicit.clipboardRead && !explicit.clipboardWrite ? "clipboardRead" : "hardware" }
+  }
+  const { getConfigBool } = await import("@/lib/config")
+  return { enabled: await getConfigBool("workspace.clipboardVncSync", true), source: "legacy-config" }
 }
 
 /** 生成 Chromium Managed Preferences 片段（仅有原生键的项；enabled=true=allowValue，false=blockValue） */

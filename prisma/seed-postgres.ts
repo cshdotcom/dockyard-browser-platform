@@ -19,7 +19,7 @@ async function main() {
   for (const [key, def] of Object.entries(CONFIG_DEFAULTS)) {
     await db.systemConfig.upsert({
       where: { key },
-      update: {},
+      update: { category: def.category, valueType: def.type }, // r29：分类/类型幂等修正（value 不覆盖运维改值）
       create: {
         key,
         valueJson: JSON.stringify(def.value),
@@ -138,6 +138,9 @@ async function main() {
     { code: "recording_scan", name: "VNC录像分段扫描（新段入库/活跃段收尾/死沙箱自动终结）", cron: "*/2 * * * *", timeout: 120 },
     { code: "recording_retention", name: "VNC录像治理（保留期到期+用户配额超额最旧优先归档）", cron: "0 4 * * *", timeout: 300 },
     { code: "browsing_collect", name: "浏览历史/书签采集（CDP轮询+Profile对账；沙箱隔离级）", cron: "*/2 * * * *", timeout: 120 },
+    { code: "worknode_monitor", name: "Worker 节点资源监控与失联迁移（10s心跳×3未达→OFFLINE+迁移计划；CPU/内存/磁盘水位告警）", cron: "* * * * *", timeout: 60 },
+    { code: "media_cast_reap", name: "媒体投递巡检（ffplay 进程死亡自动收口 STOPPED）", cron: "*/2 * * * *", timeout: 60 },
+    { code: "dfs_maintenance", name: "分布式文件存储维护（中转超时下沉+副本修复+冷热分层+迁移随迁）", cron: "*/10 * * * *", timeout: 60 },
   ]
   for (const t of tasks) {
     await db.scheduleTask.upsert({

@@ -15,6 +15,7 @@ import { rememberPolicyFileHash } from "./crx-lifecycle"
 import { resolveAccessPolicies } from "./domain-policy"
 import { buildCrxManagedPolicy, resolveWorkspaceCrxPolicy } from "./crx-policy"
 import { exitGuardManagedPolicy, validateExtraPolicies } from "./chromium-policies"
+import { resolveHardwarePolicy, hardwareManagedPolicies } from "./hardware-perms"
 import { getConfig } from "./config"
 import { ENV, externalAvailable } from "./env"
 import { decrypt } from "./crypto"
@@ -73,6 +74,10 @@ export async function refreshWorkspacePolicyFile(workspaceId: string): Promise<b
   }
   const exitGuard = ((hardening.exitGuard as string) || await getConfig<string>("workspace.exitGuardDefault", "fullscreen"))
 
+  // r29-a：17 项硬件权限四级链解析 → Chromium 原生策略键注入（刷新不丢失）
+  const hw = await resolveHardwarePolicy(ws.userId, ws.id).catch(() => null)
+  const hwManaged = hw ? hardwareManagedPolicies(hw.policy) : null
+
   const path = await writeNetworkPolicyFile(`ws-${profileKey}`, {
     policy: bundle.network,
     gatewayIp,
@@ -82,6 +87,7 @@ export async function refreshWorkspacePolicyFile(workspaceId: string): Promise<b
     filePolicy: bundle.file,
     crxManagedPolicy: crxManaged,
     extraBaselineBlock: baseline,
+    hardwareManagedPolicy: hwManaged,
     extraManagedPolicy: { ...(extraManaged || null), ...exitGuardManagedPolicy(exitGuard) },
   }).catch(() => null)
   // r26：防篡改哈希登记（后续 policy_tamper_check 周期对账）

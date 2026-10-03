@@ -8,6 +8,7 @@
 import { createServer } from "http"
 import { execFile } from "child_process"
 import { readFileSync } from "fs"
+import { handleFileCommand } from "./file-commands"
 
 const MASTER_API_URL = process.env.MASTER_API_URL || ""
 const WORKER_NODE_UUID = process.env.WORKER_NODE_UUID || ""
@@ -107,7 +108,12 @@ async function heartbeat() {
 }
 
 async function executeCommand(cmd: string, payload: unknown): Promise<void> {
-  console.log(`[worker] 执行主控指令：${cmd}`, payload ?? "")
+  console.log(`[worker] 执行主控指令：${cmd}`)
+  if (cmd.startsWith("file.")) {
+    const r = await handleFileCommand(cmd, payload)
+    console.log(`[worker] 文件指令结果：${cmd} → ${r.ok ? "OK" : `FAIL ${r.error}`}`)
+    return
+  }
   switch (cmd) {
     case "ping":
       console.log("[worker] pong")

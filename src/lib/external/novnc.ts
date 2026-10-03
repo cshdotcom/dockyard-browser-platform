@@ -89,6 +89,8 @@ export interface NovncProvisionParams {
   recording?: { enabled: boolean; fps: number; segmentSec: number; maxSec: number } // 策略四级链解析结果（业务层传入）
   exitGuard?: "normal" | "fullscreen" | "kiosk" // 防退出档位（模板 > 全局默认）
   extraManagedPolicy?: Record<string, unknown> | null // 模板策略项目录注入（安全层优先，详见 network-policy 合并顺序）
+  // —— r29-a：17 项硬件权限四级链解析后的 Chromium 原生策略键（安全层优先于模板） ——
+  hardwareManagedPolicy?: Record<string, number> | null
 }
 
 export async function createNovncSession(params: NovncProvisionParams): Promise<NovncSession> {
@@ -139,6 +141,8 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       endpointPolicy: params.endpointPolicy || null,
       crxManagedPolicy: crxManaged,
       filePolicy: params.filePolicy || null,
+      // r29-a：硬件权限四级链（高于模板；管理员硬件管控优先）
+      hardwareManagedPolicy: params.hardwareManagedPolicy || null,
       // r27：模板级 Chromium 策略项（安全层后注入 → 网络/CRX/代理锁定永不裨覆盖）
       // + 防退出档位附加策略（全档位附加账号/无痕逃逸路径封堵）
       extraManagedPolicy: { ...(params.extraManagedPolicy || null), ...exitGuardManagedPolicy(params.exitGuard) },
@@ -240,7 +244,7 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       : null
     const policyFile =
       params.userId && params.profileKey
-        ? await writeNetworkPolicyFile(`ws-${params.profileKey}`, { policy, gatewayIp, proxyUrl: params.proxyUrl || null, domainPolicy: params.domainPolicy || null, endpointPolicy: params.endpointPolicy || null, crxManagedPolicy: crxManaged, filePolicy: params.filePolicy || null, extraManagedPolicy: { ...(params.extraManagedPolicy || null), ...exitGuardManagedPolicy(params.exitGuard) } }).catch(() => null)
+        ? await writeNetworkPolicyFile(`ws-${params.profileKey}`, { policy, gatewayIp, proxyUrl: params.proxyUrl || null, domainPolicy: params.domainPolicy || null, endpointPolicy: params.endpointPolicy || null, crxManagedPolicy: crxManaged, filePolicy: params.filePolicy || null, hardwareManagedPolicy: params.hardwareManagedPolicy || null, extraManagedPolicy: { ...(params.extraManagedPolicy || null), ...exitGuardManagedPolicy(params.exitGuard) } }).catch(() => null)
         : null
     const spec: BrowserHardeningSpec = {
       image: ENV.browserImage,

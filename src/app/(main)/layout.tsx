@@ -5,9 +5,11 @@ import { getConfigBool, getConfig } from "@/lib/config"
 import { AppShell, type MenuGroup } from "@/components/layout/app-shell"
 import {
   LayoutDashboard, Globe, FileCode2, KeyRound, ShieldCheck, Megaphone,
-  Users, FolderTree, ScrollText, Settings2, Timer, FolderOpen, DatabaseBackup,
+  Users, FolderTree, ScrollText, Settings2, Timer, FolderOpen, DatabaseBackup, Database,
   Server, Network, Recycle, ShieldAlert, MessageSquareCode, SlidersHorizontal, Puzzle, ShieldBan,
-  Video, ToggleLeft, History } from "lucide-react"
+  Video, ToggleLeft, History ,
+  Monitor,
+} from "lucide-react"
 
 // 主应用布局（RSC）：深度会话校验 + 强制2FA策略拦截 + 权限菜单过滤
 export default async function MainLayout({ children }: { children: React.ReactNode }) {
@@ -67,6 +69,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         { key: "a-recordings", label: "录像管理", href: "/admin/recordings", icon: <Video className="h-4 w-4" /> },
         { key: "a-browsing", label: "浏览数据管理", href: "/admin/browsing", icon: <History className="h-4 w-4" /> },
         { key: "a-workspaces", label: "工作区管控", href: "/admin/workspaces", icon: <Globe className="h-4 w-4" /> },
+        { key: "a-monitor", label: "实时监控中心", href: "/admin/monitor", icon: <Monitor className="h-4 w-4" /> },
         { key: "a-feature-flags", label: "功能开关", href: "/admin/feature-flags", icon: <ToggleLeft className="h-4 w-4" /> },
       ],
     },
@@ -80,6 +83,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         { key: "a-config", label: "系统配置", href: "/admin/config", icon: <Settings2 className="h-4 w-4" /> },
         { key: "a-tasks", label: "定时任务", href: "/admin/tasks", icon: <Timer className="h-4 w-4" /> },
         { key: "a-files", label: "文件存储", href: "/admin/files", icon: <FolderOpen className="h-4 w-4" /> },
+        { key: "a-dfs", label: "分布式存储", href: "/admin/dfs", icon: <Database className="h-4 w-4" /> },
         { key: "a-backups", label: "备份恢复", href: "/admin/backups", icon: <DatabaseBackup className="h-4 w-4" /> },
       ],
     },

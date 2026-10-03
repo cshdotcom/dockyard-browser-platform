@@ -1,5 +1,5 @@
 // ============================================================
-// 自研浏览器会话引擎（原 Steel-Browser HTTP 适配层已移除——平台自研）
+// 自研浏览器会话引擎（Dockyard 原生；历史第三方适配层已全部移除）
 //
 // 会话形态（r13/r14 架构，全部自研编排）：
 //   1. 外部分离部署（EXTERNAL_BROWSER_URL 已配置）：
@@ -40,10 +40,6 @@ export interface BrowserSessionHandle {
   debuggerUrl?: string
   simulated: boolean
 }
-
-// 兼容别名（历史调用方类型名）
-export type CreateSteelSessionParams = CreateBrowserSessionParams
-export type SteelSession = BrowserSessionHandle
 
 const g = globalThis as unknown as {
   __dySimBrowserSessions?: Map<string, { createdAt: number; lastActive: number; params: CreateBrowserSessionParams; crashed: boolean }>

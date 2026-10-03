@@ -25,6 +25,7 @@ import { getConfigBool, getConfig, getConfigNumber } from "@/lib/config"
 import { assertShareAllowed } from "@/lib/share-policy"
 import { resolveIdlePolicyForUser, isAdminRole, fmtIdleBrief } from "@/lib/idle-policy"
 import { resolveRecordingPolicy, recordingTuning, registerWorkspaceRecording, type RecordingPolicy, type RecordingTuning } from "@/lib/recording"
+import { resolveHardwarePolicy, hardwareManagedPolicies, resolveClipboardSync } from "@/lib/hardware-perms"
 import { validateExtraPolicies } from "@/lib/chromium-policies"
 
 // ============================================================
@@ -292,6 +293,10 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
       const rec = await resolveRecordingBundle(ctx.userId)
       const tplPol = await resolveTemplatePolicies(p.templateId)
       const exitGuard = await resolveExitGuard(tplPol.exitGuardConfig)
+      // r29-a：17 项硬件权限四级链（创建链路一次解析 → Managed Preferences 注入 + 硬化快照）
+      const hw = await resolveHardwarePolicy(ctx.userId).catch(() => null)
+      const hwManaged = hw ? hardwareManagedPolicies(hw.policy) : null
+      const clipboardSync = await resolveClipboardSync(ctx.userId)
       const novnc = await createNovncSession({
         proxyUrl: proxyInfo.proxyUrl,
         resolution: p.resolution,
@@ -308,7 +313,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         // 沙箱专属 Linux 用户（dyu-<uuid8>-<uname6>）——创建流程预生成 wsUuid 与 ws.create 同值
         imeEngine: (templateConfig.imeEngine as string) || null,
         kbLayout: (templateConfig.kbLayout as string) || null,
-        clipboardEnabled: await getConfigBool("workspace.clipboardVncSync", true),
+        clipboardEnabled: clipboardSync.enabled,
         workspaceUuid: wsUuid,
         ownerUsername: ctx.username,
         domainPolicy: domPolicy,
@@ -318,6 +323,8 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         recording: rec.policy.enabled ? { enabled: true, ...rec.tuning, maxSec: rec.tuning.maxMinutes > 0 ? rec.tuning.maxMinutes * 60 : 0 } : undefined,
         exitGuard,
         extraManagedPolicy: tplPol.policyJson,
+        // r29-a：硬件权限策略键（四级链；安全层高于模板）
+        hardwareManagedPolicy: hwManaged,
       })
       const hardening = novnc.hardening || browserHardeningSummary({
         image: ENV.browserImage, cpuLimit: (templateConfig.cpuLimit as number) || 1, memLimitMb: (templateConfig.memLimitMb as number) || 1024,
@@ -432,6 +439,10 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
       const rec = await resolveRecordingBundle(ws.userId, ws.id)
       const tplPol = await resolveTemplatePolicies(ws.templateId)
       const exitGuard = await resolveExitGuard(tplPol.exitGuardConfig)
+      // r29-a：硬件权限四级链（含沙箱级覆盖，重建链路同步刷新）
+      const hwRe = await resolveHardwarePolicy(ws.userId, ws.id).catch(() => null)
+      const hwReManaged = hwRe ? hardwareManagedPolicies(hwRe.policy) : null
+      const clipboardSyncRe = await resolveClipboardSync(ws.userId, ws.id)
       let novnc
       try {
         novnc = await createNovncSession({
@@ -446,16 +457,18 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
           domainPolicy: domPolicy,
           endpointPolicy: endPolicy,
           filePolicy,
-          // r24-c/d/e：沙箱输入法/布局偏好随重建应用；剪贴板透传全局开关；沙箱专属用户身份
+          // r24-c/d/e：沙箱输入法/布局偏好随重建应用；剪贴板透传受硬件权限/全局开关管控；沙箱专属用户身份
           imeEngine: ws.imeEngine,
           kbLayout: ws.kbLayout,
-          clipboardEnabled: await getConfigBool("workspace.clipboardVncSync", true),
+          clipboardEnabled: clipboardSyncRe.enabled,
           workspaceUuid: ws.uuid,
           ownerUsername: (await db.user.findUnique({ where: { id: ws.userId }, select: { username: true } }))?.username || "u",
           // r27：录像 + 防退出 + 模板策略项
           recording: rec.policy.enabled ? { enabled: true, ...rec.tuning, maxSec: rec.tuning.maxMinutes > 0 ? rec.tuning.maxMinutes * 60 : 0 } : undefined,
           exitGuard,
           extraManagedPolicy: tplPol.policyJson,
+          // r29-a：硬件权限策略键（含沙箱级覆盖）
+          hardwareManagedPolicy: hwReManaged,
         })
       } catch (e) {
         // r25-d：启动失败不再静默回 STOPPED —— 落 ERROR 状态 + 失败原因持久化到 hardeningJson
@@ -562,6 +575,7 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
       if (ws.novncSessionId) await destroyNovncSession(ws.novncSessionId, ws.containerRef).catch(() => {})
       const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
       const profileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || `p-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
+      const switchedHardware = await resolveHardwarePolicy(ws.userId, ws.id).catch(() => null)
       const switchedPolicy = await resolveNetworkPolicy(ws.userId, ws.id)
       const [switchedDomain, switchedEndpoint, switchedFile] = await Promise.all([
         resolveDomainPolicyForUser(ws.userId, ws.id),
@@ -584,9 +598,11 @@ export async function switchProxyAction(input: unknown): Promise<ActionResult> {
         // r24-c/d/e：沙箱输入法/布局偏好随重建应用；剪贴板透传全局开关；沙箱专属用户身份
         imeEngine: ws.imeEngine,
         kbLayout: ws.kbLayout,
-        clipboardEnabled: await getConfigBool("workspace.clipboardVncSync", true),
+        clipboardEnabled: (await resolveClipboardSync(ws.userId, ws.id)).enabled,
         workspaceUuid: ws.uuid,
         ownerUsername: (await db.user.findUnique({ where: { id: ws.userId }, select: { username: true } }))?.username || "u",
+        // r29-a：硬件权限策略键（代理切换重建链路同步注入）
+        hardwareManagedPolicy: switchedHardware ? hardwareManagedPolicies(switchedHardware.policy) : null,
       })
       await db.browserWorkspace.update({
         where: { id },

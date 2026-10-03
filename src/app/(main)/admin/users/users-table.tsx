@@ -4,6 +4,8 @@
 
 import * as React from "react"
 import { PlaybackPolicyDialog } from "@/components/recordings/playback-policy-dialog"
+import { HardwarePermsDialog } from "@/components/hardware/hardware-perms-dialog"
+import { Cpu } from "lucide-react"
 import { RetentionPolicyDialog } from "@/components/recycle/retention-policy-dialog"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
@@ -143,6 +145,7 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
   // r23-d：用户级 API-Key 策略（四级链覆盖）
   const [tokenPolicyUser, setTokenPolicyUser] = React.useState<AdminUserRow | null>(null)
   const [pbPolicyUser, setPbPolicyUser] = React.useState<AdminUserRow | null>(null)
+  const [hwPolicyUser, setHwPolicyUser] = React.useState<AdminUserRow | null>(null)
   const [retentionTarget, setRetentionTarget] = React.useState<AdminUserRow | null>(null)
 
   const [importOpen, setImportOpen] = React.useState(false)
@@ -526,6 +529,9 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
         >
           <KeyRound className="mr-1.5 h-4 w-4 text-amber-500" /> API-Key 策略（创建/数量/限流）
         </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setHwPolicyUser(row)}>
+          <Cpu className="mr-1.5 h-4 w-4 text-indigo-600" /> 硬件权限（17 项四级链）
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={() => setPbPolicyUser(row)}>
           <Video className="mr-1.5 h-4 w-4 text-teal-600" /> 回放安全策略（水印/导出）
         </DropdownMenuItem>
@@ -701,6 +707,16 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
             scope="user"
             targetId={pbPolicyUser.id}
             targetName={pbPolicyUser.username}
+          />
+        )}
+
+        {hwPolicyUser && (
+          <HardwarePermsDialog
+            open={!!hwPolicyUser}
+            onOpenChange={(v) => !v && setHwPolicyUser(null)}
+            scope="user"
+            targetId={hwPolicyUser.id}
+            targetName={hwPolicyUser.username}
           />
         )}
 

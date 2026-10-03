@@ -44,7 +44,7 @@ export function extractDomain(url: string): string | null {
 }
 
 // ---- CDP /json/list 页面枚举 ----
-interface CdpPageInfo { targetId?: string; url?: string; title?: string; type?: string }
+interface CdpPageInfo { targetId?: string; id?: string; url?: string; title?: string; type?: string; webSocketDebuggerUrl?: string }
 
 export async function listWorkspacePages(cdpUrl: string): Promise<CdpPageInfo[] | null> {
   try {

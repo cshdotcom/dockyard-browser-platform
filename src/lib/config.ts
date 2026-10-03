@@ -74,7 +74,28 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "vnc.playbackWatermark": { value: "on", category: "GENERAL", type: "string", description: "回放水印默认档：force 强制水印(不可关) | on 默认开(可临时关) | off 关闭" },
   "vnc.playbackAllowExport": { value: false, category: "GENERAL", type: "boolean", description: "回放导出/下载默认策略（false=仅在线回放；用户/组/沙箱可覆盖）" },
   // —— r29：17 项浏览器硬件权限全局默认（稀疏 JSON；四级链：沙箱>用户>组>全局）——
-  "hardware.defaults": { value: "{}", category: "GENERAL", type: "string", description: "硬件权限默认档 JSON（如 {\"camera\":{\"enabled\":true,\"audit\":true}}；17 项：camera/microphone/location/screenShare/clipboardRead/clipboardWrite/notifications/bluetooth/usb/serial/accelerometer/gyroscope/magnetometer/deviceOrientation/deviceMotion/midi/hid）" },
+  "hardware.defaults": { value: "{}", category: "HARDWARE", type: "string", description: "硬件权限默认档 JSON（如 {\"camera\":{\"enabled\":true,\"audit\":true}}；17 项：camera/microphone/location/screenShare/clipboardRead/clipboardWrite/notifications/bluetooth/usb/serial/accelerometer/gyroscope/magnetometer/deviceOrientation/deviceMotion/midi/hid）" },
+
+  "worknode.cpuThresholdPct": { value: "85", category: "ALERT", type: "number", description: "Worker 节点 CPU 使用率告警阈值（%；节点级可覆盖）" },
+
+
+  "dfs.directUploadThresholdMb": { value: "10", category: "STORAGE", type: "number", description: "分布式存储：直沉 Worker 上传阈值（MB；小于阈值走主控中转 24h）" },
+
+
+  "dfs.relayTtlHours": { value: "24", category: "STORAGE", type: "number", description: "分布式存储：主控中转 TTL（小时；到期强制下沉）" },
+
+
+  "dfs.coldTierDays": { value: "30", category: "STORAGE", type: "number", description: "分布式存储：冷分层阈值（天未访问 → COLD 归档）" },
+
+
+  "dfs.safeWatermarkPct": { value: "20", category: "STORAGE", type: "number", description: "分布式存储：资源安全水位（% 磁盘余量下限；超额节点不接新落盘）" },
+
+
+  "dfs.defaultReplicas": { value: "1", category: "STORAGE", type: "number", description: "分布式存储：默认副本数（1-3；跨节点分布）" },
+
+  "worknode.memThresholdPct": { value: "85", category: "ALERT", type: "number", description: "Worker 节点内存使用率告警阈值（%；节点级可覆盖）" },
+
+  "worknode.diskThresholdPct": { value: "90", category: "ALERT", type: "number", description: "Worker 节点磁盘使用率告警阈值（%；≥95 升级 CRITICAL）" },
   "vnc.recordingManualStop": { value: false, category: "GENERAL", type: "boolean", description: "允许用户在沙箱停止前手动结束自己的录像（false=仅管理员可操作）" },
   "workspace.exitGuardDefault": { value: "fullscreen", category: "GENERAL", type: "string", description: "浏览器防退出默认档位（normal=现状/fullscreen=全屏守卫/kiosk=信息亭最强档；模板可按沙箱覆盖）" },
   "smtp.enabled": { value: false, category: "MAIL", type: "boolean", description: "邮件服务启用（关闭=控制台模拟模式）" },

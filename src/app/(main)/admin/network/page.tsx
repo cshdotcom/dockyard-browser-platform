@@ -28,7 +28,7 @@ export default async function AdminNetworkPage({
   const sp = await searchParams
   const q = parseListQuery(sp)
   const f = q.filters
-  // 兼容历史 tab=steel 链接（Steel 声明移除后统一映射到 browser 页签）
+  // 兼容历史旧链接 tab=steel → 统一映射到 browser 页签（平台全自研）
   const rawTab = f.tab === "steel" ? "browser" : f.tab
   const tab = (TABS.find((t) => t.key === rawTab)?.key || "proxy") as "proxy" | "browser" | "host"
 

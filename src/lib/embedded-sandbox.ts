@@ -478,6 +478,7 @@ export interface EmbeddedSandboxSpec {
   ownerUsername?: string | null // r24-e：所有者用户名（沙箱专属 Linux 用户命名）
   // —— r27 ——
   exitGuard?: "normal" | "fullscreen" | "kiosk" // 防退出档位（模板/全局默认解析）
+  fakeCamImage?: string | null // r29-e：虚拟摄像头恒定帧图片（沙箱内绝对路径；null=关闭）
   recording?: { enabled: boolean; fps: number; segmentSec: number; maxSec: number } // 会话录像（策略四级链命中后由业务层解析传入）
 }
 
@@ -781,8 +782,16 @@ fi
 # DY_CHROME_NOSANDBOX=1 -> fallback (auto-set once by outer supervisor on sandbox startup failure).
 SANDBOX_FLAG=""
 if [ "\${DY_CHROME_NOSANDBOX:-0}" = "1" ]; then SANDBOX_FLAG="--no-sandbox"; fi
+# __DY_FAKE_CAM_BEGIN__
+# r29-e: 虚拟摄像头（恒定帧注入）—— DY_FAKE_CAM_IMAGE 指向图片时启用
+FAKE_CAM_FLAGS=""
+if [ -n "\${DY_FAKE_CAM_IMAGE:-}" ] && [ -f "\${DY_FAKE_CAM_IMAGE}" ]; then
+  FAKE_CAM_FLAGS="--use-fake-device-for-media-stream --use-file-for-fake-video-capture=\${DY_FAKE_CAM_IMAGE}"
+fi
+# __DY_FAKE_CAM_END__
 ${nprocExec} "${bins.chrome}" \\
   --user-data-dir="\${DY_PROFILE_DIR}" \\
+  \${FAKE_CAM_FLAGS} \\
   \${SANDBOX_FLAG} --disable-gpu --no-first-run \\
   --disable-session-crashed-bubble --hide-crash-restore-bubble \\
   --restore-last-session ${resolutionArgs(resolution).join(" ")} ${guard.args} \\
@@ -838,6 +847,8 @@ ${nprocExec} "${bins.chrome}" \\
       // r27：录像下发（进程树内 ffmpeg 分段落盘）+ 防退出档位
       ...(recordEnv as Record<string, string>),
       DY_EXIT_GUARD: spec.exitGuard || "normal",
+      // r29-e：虚拟摄像头恒定帧（重建/重启链路保持生效）
+      ...(spec.fakeCamImage ? { DY_FAKE_CAM_IMAGE: spec.fakeCamImage } : {}),
     },
     detached: true, // 脱离平台进程组：平台重启不牵连沙箱（state.json 重新收养）
     stdio: ["ignore", fs.openSync(join(logDir, "supervisor.log"), "a"), fs.openSync(join(logDir, "supervisor.log"), "a")],

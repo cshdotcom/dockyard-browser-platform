@@ -716,6 +716,27 @@ export const TASKS: Record<string, (log: (m: string) => void, params?: unknown) 
     return { itemsProcessed: r.historyInserted + r.bookmarkUpserted, summary: `采集 ${r.workspaces} 个运行沙箱：历史新 ${r.historyInserted}/合并 ${r.historyMerged}，书签同步 ${r.bookmarkUpserted} 条（移除 ${r.bookmarkRemoved}）` }
   },
 
+  // 28. r29-d：Worker 节点资源监控 + 失联自动迁移（10s 心跳 3 次未达 → OFFLINE + 迁移计划）
+  async worknode_monitor(log) {
+    const { runWorknodeMonitor } = await import("@/lib/worknode-monitor")
+    const r = await runWorknodeMonitor(log)
+    return { itemsProcessed: r.checked, summary: `监控 ${r.checked} 个节点：失联标记 ${r.offlineMarked}（迁移 ${r.migrationPlanned}）、恢复 ${r.recovered}、水位告警 ${r.thresholdAlerts}` }
+  },
+
+  // 30. r29-f：分布式文件存储维护（中转超时下沉 + 副本修复 + 冷热分层 + 失联随迁）
+  async dfs_maintenance(log) {
+    const { runDfsMaintenance } = await import("@/lib/distributed-file-store")
+    const r = await runDfsMaintenance()
+    return { itemsProcessed: r.relayExpired + r.lostMarked + r.tiered, summary: `中转下沉 ${r.relayExpired}、副本失联 ${r.lostMarked}（重建 ${r.repairsPlanned}）、冷分层 ${r.tiered}` }
+  },
+
+  // 29. r29-e：媒体投递进程巡检（ffplay 死亡自动收口 STOPPED）
+  async media_cast_reap(log) {
+    const { reapDeadMediaCasts } = await import("@/lib/media-cast")
+    const r = await reapDeadMediaCasts()
+    return { itemsProcessed: r.reaped, summary: `投递巡检：${r.reaped} 个已结束投递自动收口` }
+  },
+
   // ---- r24-a：参数化自定义执行体（执行内容完全放开；paramsJson 携带参数）----
   // 注：custom_shell 顶层调用由 runTask 直连（携带任务自身 timeoutSec）；
   // 此注册表项用于类型清单展示 + 任务链步骤内调用（步骤超时兜底 300s）

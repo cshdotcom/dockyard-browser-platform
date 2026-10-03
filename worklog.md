@@ -997,3 +997,25 @@ Work Log:
 Stage Summary:
 - r28 七大块全部交付并真实测试：文件管理器（三域/编辑器/预览/压缩解压密码/搜索/限速/分享链接/批量/分页）、书签历史（采集引擎+双端页面+导出）、noVNC 快捷键（40+自定义双通道录入+沉浸模式）、回放安全（四级水印/导出策略/防抓取/北京时间/变速）、CDP 外网网关（票据桥+容器地址零暴露）、回收站保留期四级链、Chromium 原生沙箱默认启用+自动回退
 - 57 项冒烟断言 + 浏览器 E2E（文件全链路+分享权限矩阵+采集任务）全部通过；QA 数据清理归零
+
+---
+Task ID: 29
+Agent: main
+Task: r29 — Master/Worker 双包架构落地（新架构文档主体，打印机部分跳过）：17项硬件权限四级链 + 双模式监控 + 实时监控中心 + 资源失联迁移 + 虚拟媒体投递 + 分布式文件存储9条件 + 行为时间轴
+
+Work Log:
+- 【前置】上一提交 029d2da（r29 基础）amend 规范提交信息；smoke-r29-worknode 16/16 复验通过
+- 【r29-a 17项硬件权限落地】resolveHardwarePolicy 扩展 explicit 显式集 + resolveClipboardSync 双语义（硬件接管/旧版 workspace.clipboardVncSync 回退，升级零破坏）；ChromiumPolicyOptions.hardwareManagedPolicy 注入链（buildChromiumManagedPolicy 硬件层可覆写模板同名键，安全层高于模板）；refreshWorkspacePolicyFile/创建链路（workspaces.ts 三启动点+代理切换重建）全链路注入；hardware-policy-core.ts（校验+静默仅超管+四 scope 落库+受影响沙箱即时刷新重启+审计 HARDWARE_POLICY_SET）；HardwarePermsDialog 四 scope 复用编辑器（分组卡片+四开关+稀疏触碰语义+静默列仅超管）；用户/组/工作区行菜单挂载 + config HARDWARE 专属页签（深链 ?tab=HARDWARE；种子 category 幂等修正）；沙箱详情页 HardwareStatusPanel（17 项徽章+静默特权计数+剪贴板透传来源）；冒烟 31/31
+- 【r29-b 双模式监控】MonitorGrant 模型（channel camera/microphone/screenShare；mode CONSENT/SILENT）；静默特权仅超管+理由必填（取证留痕）+DANGER 审计 MONITOR_SILENT_GRANT；用户端 myMonitorStatus 仅返回 CONSENT（静默永不返回）；cutOffMonitorAction 一键切断（仅 CONSENT 可切；审计 MONITOR_USER_CUTOFF）；monitor-banner.tsx 用户 VNC 横幅（红点脉冲+通道明示+授权管理员名+一键切断，30s 轮询）
+- 【r29-c 实时监控中心 /admin/monitor】cdp-control.ts WS CDP 控制通道（Node24/Bun 原生 WebSocket 单命令拨号）：Page.captureScreenshot 快照（JPEG 10s 缓存）/ Page.navigate 强制跳转全目标 / Target.close HTTP 关标签 / Runtime.evaluate 消息推送（页面内浮层横幅 30s 自消+脉冲红点，无 alert 阻塞）/ Input.dispatch* 远程键鼠注入（常用键映射表）；控制租约互斥（30s TTL acquire/heartbeat/release/持有者可见性——同沙箱同时仅一管理员可注入）；16 宫格监控中心（CDP 快照轮巡 5-60s 可调/宫格 4-16/浮动水印 15s 漂移防截屏溯源/知情红点+静默角标/接管者徽章/每格操作条：观看/截图/键鼠/跳转/消息/中断/监控授权）；/json/list targetId 字段修复（id 而非 targetId）；冒烟 24/24（真实 Chromium CDP 端到端：快照/跳转/注入/关标签/浮层注入）
+- 【r29-d 资源监控+失联迁移】worknode-monitor.ts（10s 心跳×3 次未达→OFFLINE+CRITICAL 告警+WORKNODE_OFFLINE 审计；CPU/内存/磁盘水位告警——节点级阈值覆盖>全局 worknode.* 配置，磁盘≥95 升级 CRITICAL；恢复→ONLINE+审计）；planNodeMigration 失联自动迁移（绑定沙箱 browserNodeId 解绑+hardeningJson.migratedFromNodeUuid 溯源+provisioned:pending+WORKSPACE_MIGRATION_PLANNED 审计）；worknode_monitor 任务（每分钟）双种子注册（30 项任务）；WorkNode 阈值三字段双 schema；raiseAlert 签名适配修复（content/category 误用根因）；冒烟 21/21
+- 【r29-e 虚拟媒体投递】media-cast.ts：音视频定点投递（云盘文件复制进沙箱 media-in/ → ffplay 投至沙箱独立 X 显示：视频 -fs 全屏 + -ss 秒级定点 + -autoexit + -an 无声卡安全；音频 -showmode 1 波形可视化 + SDL_AUDIODRIVER=dummy 无声卡持续播放）；投递重置（SIGTERM+文件清理+REPLACE 单投递语义）；MediaCast 模型（castPid 存活巡检 media_cast_reap 任务收口）；图片恒定帧虚拟摄像头（chrome-inner.sh __DY_FAKE_CAM__ 标记段重写注入 --use-fake-device-for-media-stream --use-file-for-fake-video-capture=硬编码路径；USR1 重启生效；spec.fakeCamImage 重建链路保持；rewriteFakeCamSection 纯函数幂等/未知脚本不动）；监控中心媒体投递对话框（云盘媒体清单+定点秒+投递/注入/重置）；冒烟 19/19（真实 Xvfb+ffplay 投屏+Chromium 接受恒定帧 flags）
+- 【r29-f 分布式文件存储 9 条件】FileObject/FilePlacement 模型（bindType SANDBOX/USER/SHARE/GENERAL；tier HOT/COLD；uploadChannel MASTER_RELAY/DIRECT_WORKER+relayExpiresAt TTL；placement role/status 唯一约束）；resolveFilePlacement 纯决策函数（①沙箱绑定强制落地最高优先级——超水位仍强制+告警，节点不可达 MASTER 兜底；②≥10MB 直沉 Worker/小文件主控中转；③共享下沉被访问端；⑤水位排除；⑥副本 1-3 钳制跨节点+无节点单副本降级）；registerFileUpload（fileKey sha256 前缀+决策落库+TTL）；runDfsMaintenance（⑨中转超时强制下沉+⑦失联节点 placement LOST+重建计划 SYNCING+告警+④冷热分层 runDfsTiering 30 天 COLD/访问回热）；migrateFilesForWorkspace（⑧沙箱迁移文件随迁 MIGRATING）；recordFileAccess 访问上报（共享下沉判定键）；planNodeMigration 钩子文件随迁；Worker 文件通道 file-commands.ts（file.put base64+sha256 完整性校验+fileKey 白名单穿越拒绝+status/delete）；dfs_maintenance 任务（*/10）+dfs.* 五配置键+种子；/admin/dfs 面板（统计卡/筛选/对象表落点徽章/立即维护）+导航+搜索；冒烟 32/32
+- 【r29-g 行为监控时间轴】behavior-timeline.ts lib（四源统一：浏览 BrowseHistoryEntry 停留时长+文件 FILE_* 审计+网络 HarRecord+系统审计事件；倒序合并+时间窗口 1h~7d+关键词过滤+四源计数）；工作区详情页「行为时间轴」页签（管理员；kind 四色分+悬停详情+与录像回放互补说明）；冒烟 8/8
+- 【r29-z 收尾】Steel 品牌清零（CreateSteelSessionParams/SteelSession 兼容别名删除；注释全自研表述——仅剩 tab=steel 路由兼容映射）；剪贴板进程级隔离机理证明冒烟 8/8（两沙箱独立 Xvfb 进程+独立 X11 socket=selection 存储物理隔离+x11vnc -nosel -noclipboard 策略链+回环基线三形态封禁跨沙箱 CDP/RFB）；dev 服务器被环境回收 → daemon-restart.py 守护化恢复
+- 【质量门】tsc 85=基线零新增（新文件零错误）；eslint 全部 54 个改动/新增文件 0 error 0 warning；bun run build 全绿 76 路由（新增 /admin/monitor+/admin/dfs）；冒烟合计 r29 全套 159 断言全过 + r28 回归 50 断言全过；浏览器 E2E（admin 登录→监控中心渲染/宫格控制条/水印→DFS 面板 9 条件统计→config HARDWARE 页签+全局默认档对话框 17 项四开关→用户行菜单硬件权限→对话框打开）5 张截图 download/qa-r29/
+- 【公告/Steel 检查】公告双端已有（announcements 用户页+admin 管理）；Steel 品牌残留清零（本节）
+
+Stage Summary:
+- 新架构文档主体全部落地（打印机部分按指令跳过）：Master/Worker 双包基础（前提交）+17 项硬件权限四级链（策略注入+管理 UI+审计）+双模式监控（知情横幅一键切断/静默特权仅超管强制审计）+实时监控中心（16 宫格轮巡+CDP 快照/跳转/关标签/消息/键鼠注入互斥+浮动水印）+资源监控与 10s×3 失联自动迁移+虚拟媒体投递（音视频定点秒级 ffplay 投屏+图片恒定帧虚拟摄像头）+分布式文件存储 9 大条件（绑定强制落地/10MB 直沉/中转 24h/协作下沉/冷热分层/水位调度/多副本/副本修复/迁移随迁）+行为监控时间轴四源统一
+- Worker 纯执行节点扩展文件通道（sha256 校验+穿越拒绝）；30 项定时任务；QA 数据清理归零；5 张浏览器截图取证

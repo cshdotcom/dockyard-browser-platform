@@ -21,6 +21,8 @@ import { BatchFailuresDialog } from "@/components/shared/batch-ui"
 import { GroupFormDialog } from "./group-form"
 import { GroupTokenPolicyDialog } from "../users/token-policy-dialog"
 import { PlaybackPolicyDialog } from "@/components/recordings/playback-policy-dialog"
+import { HardwarePermsDialog } from "@/components/hardware/hardware-perms-dialog"
+import { Cpu } from "lucide-react"
 import { RetentionPolicyDialog } from "@/components/recycle/retention-policy-dialog"
 import {
   MembersDialog, AdminsDialog, ProxiesDialog, LocksDialog, CopyGroupDialog, ImportGroupsDialog,
@@ -82,6 +84,7 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
   // r23-d：组级 API-Key 策略（成员默认基线）
   const [tokenPolicyGroup, setTokenPolicyGroup] = React.useState<AdminGroupNode | null>(null)
   const [pbPolicyGroup, setPbPolicyGroup] = React.useState<AdminGroupNode | null>(null)
+  const [hwPolicyGroup, setHwPolicyGroup] = React.useState<AdminGroupNode | null>(null)
   const [retentionGroup, setRetentionGroup] = React.useState<AdminGroupNode | null>(null)
   const [copyGroup, setCopyGroup] = React.useState<AdminGroupNode | null>(null)
   const [deleteGroup, setDeleteGroup] = React.useState<AdminGroupNode | null>(null)
@@ -312,6 +315,9 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
                 <DropdownMenuItem onClick={() => { setAdminsGroup(node) }}>组管理员</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setProxiesGroup(node) }}>代理绑定</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setLocksGroup(node) }}>权限锁</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setHwPolicyGroup(node) }}>
+                  <Cpu className="mr-1.5 h-4 w-4 text-indigo-600" /> 硬件权限基线（17 项）
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setPbPolicyGroup(node) }}>
                   <Video className="mr-1.5 h-4 w-4 text-teal-600" /> 回放安全策略（水印/导出）
                 </DropdownMenuItem>
@@ -493,6 +499,15 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
           targetId={retentionGroup.id}
           targetName={retentionGroup.name}
           initialDays={null}
+        />
+      )}
+      {hwPolicyGroup && (
+        <HardwarePermsDialog
+          open={!!hwPolicyGroup}
+          onOpenChange={(v) => !v && setHwPolicyGroup(null)}
+          scope="group"
+          targetId={hwPolicyGroup.id}
+          targetName={hwPolicyGroup.name}
         />
       )}
       {pbPolicyGroup && (

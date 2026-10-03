@@ -18,6 +18,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { HardwarePermsDialog } from "@/components/hardware/hardware-perms-dialog"
+import { Cpu } from "lucide-react"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { setConfigAction, rollbackConfigAction, setSmtpConfigAction, testSmtpAction } from "@/server/actions/config"
@@ -56,10 +58,11 @@ export interface SelfCheckData {
   reservedCount: number
 }
 
-const CATEGORY_ORDER = ["SECURITY", "SESSION", "STORAGE", "ALERT", "MAIL", "NETWORK", "UI", "GENERAL", "MCP"] as const
+const CATEGORY_ORDER = ["SECURITY", "HARDWARE", "SESSION", "STORAGE", "ALERT", "MAIL", "NETWORK", "UI", "GENERAL", "MCP"] as const
 
 const CATEGORY_LABEL: Record<string, string> = {
   SECURITY: "安全",
+  HARDWARE: "硬件权限",
   SESSION: "会话",
   STORAGE: "存储",
   ALERT: "告警",
@@ -72,6 +75,9 @@ const CATEGORY_LABEL: Record<string, string> = {
 
 // 长文本配置项用 Textarea（维护公告 / 登录页公告等）
 const LONG_TEXT_KEYS = new Set(["maintenance.message", "ui.loginAnnouncement"])
+
+// 硬件权限卡托管的键（专属卡片管理；17 项四级链的四级之一）
+const HARDWARE_CARD_KEYS = new Set(["hardware.defaults"])
 
 // 预警中心卡托管的键（不再重复渲染通用行）
 const ALERT_CARD_KEYS = new Set([
@@ -431,7 +437,8 @@ export function ConfigPanel({
             c === "MAIL" ? allList.filter((i) => !i.key.startsWith("smtp."))
               : c === "ALERT" ? allList.filter((i) => !ALERT_CARD_KEYS.has(i.key))
                 : c === "SECURITY" ? allList.filter((i) => !SECURITY_CARD_KEYS.has(i.key))
-                  : allList
+                  : c === "HARDWARE" ? allList.filter((i) => !HARDWARE_CARD_KEYS.has(i.key))
+                    : allList
           const dirtyInCategory = list.filter((i) => dirty.has(i.key))
           return (
             <TabsContent key={c} value={c} className="space-y-3 mt-4">
@@ -455,6 +462,26 @@ export function ConfigPanel({
               <div className="grid gap-3 grid-cols-1 lg:grid-cols-2">
                 {/* r25-a 深链聚焦：专属卡片托管的键（smtp.* / ALERT_CARD_KEYS / SECURITY_CARD_KEYS）
                     无通用行 → 卡片自身承接 ring 高亮 + 定位锚点（id 与行规则一致） */}
+                {c === "HARDWARE" && (
+                  <div
+                    id={focusKey === "hardware.defaults" ? `cfg-row-${encodeURIComponent("hardware.defaults")}` : undefined}
+                    className={cn("lg:col-span-2 rounded-xl border p-4 space-y-3", focusKey === "hardware.defaults" && "ring-2 ring-teal-500 ring-offset-1")}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Cpu className="h-4 w-4 text-indigo-600" />
+                        <div>
+                          <div className="text-sm font-medium">17 项硬件权限 · 全局默认档</div>
+                          <p className="text-xs text-muted-foreground">
+                            摄像头/麦克风/定位/屏幕共享/剪贴板读写/通知/蓝牙/USB/串口/加速度/陀螺仪/磁力计/方向/运动/MIDI/HID
+                            —— 每项独立开关（允许/审计/录制/静默）。四级链：沙箱 &gt; 用户 &gt; 用户组 &gt; 本默认档。
+                          </p>
+                        </div>
+                      </div>
+                      {canEdit && <HardwareDefaultsCard />}
+                    </div>
+                  </div>
+                )}
                 {c === "MAIL" && (
                   <div
                     id={focusKey?.startsWith("smtp.") ? `cfg-row-${encodeURIComponent(focusKey)}` : undefined}
@@ -1091,5 +1118,23 @@ function SelfCheckBlock({ data }: { data: SelfCheckData }) {
         </CollapsibleContent>
       </Collapsible>
     </div>
+  )
+}
+
+// r29-a：硬件权限全局默认档卡片（触发全局 scope 对话框；仅超级管理员可保存 —— action 内校验）
+function HardwareDefaultsCard() {
+  const [open, setOpen] = React.useState(false)
+  return (
+    <>
+      <Button size="sm" variant="secondary" onClick={() => setOpen(true)}>
+        <Cpu className="mr-1 h-3.5 w-3.5" /> 编辑默认档
+      </Button>
+      <HardwarePermsDialog
+        open={open}
+        onOpenChange={setOpen}
+        scope="global"
+        targetName="全局默认档"
+      />
+    </>
   )
 }
