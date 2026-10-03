@@ -14,17 +14,21 @@ import { writeAudit } from "@/lib/audit"
 import { zodValidate, zId } from "@/lib/validators"
 import { trackBehavior } from "@/lib/risk"
 import { bizError, ErrorCode } from "@/lib/errors"
+import { announcementGroupIds, announcementUserIds } from "@/lib/announcement-targets"
 
 const zAnnType = z.enum(["GLOBAL", "GROUP", "USER"])
 const zDisplayType = z.enum(["POPUP", "MARQUEE", "FORCE_VIEW"])
 
+// r30：范围多选 —— 用户组与用户均可多选（上限 100 防误选全库）
 const announcementSchema = z.object({
   id: zId.optional(),
   title: z.string().min(1, "标题必填").max(100),
   content: z.string().min(1, "内容必填").max(5000),
   type: zAnnType,
-  groupId: zId.optional().or(z.literal("").transform(() => undefined)),
-  userId: zId.optional().or(z.literal("").transform(() => undefined)),
+  groupId: zId.optional().or(z.literal("").transform(() => undefined)), // 兼容旧单选调用
+  userId: zId.optional().or(z.literal("").transform(() => undefined)), // 兼容旧单选调用
+  groupIds: z.array(zId).max(100).optional(), // r30：目标用户组多选
+  userIds: z.array(zId).max(100).optional(), // r30：目标用户多选（可与组混合）
   displayType: zDisplayType.optional(), // 兼容旧调用（单值）
   displayTypes: z.array(zDisplayType).max(3).optional(), // 多选展示方式（可与站内信叠加）
   notifyInbox: z.boolean().optional().default(false), // 站内信通道（可单独发送或与展示方式叠加）
@@ -59,30 +63,47 @@ function contentSummary(content: string, maxLen = 160): string {
 
 // ---- 站内信投递（幂等：notifiedAt 置位后永不重发） ----
 async function fanOutInboxNotices(
-  ann: { id: string; title: string; content: string; type: string; groupId: string | null; userId: string | null },
+  ann: {
+    id: string
+    title: string
+    content: string
+    type: string
+    groupId: string | null
+    userId: string | null
+    groupIdsJson: string | null
+    userIdsJson: string | null
+  },
 ): Promise<{ delivered: number; skipped: number }> {
-  // 目标用户解析：GLOBAL 全体 / GROUP 组成员 / USER 定向
-  let targetUserIds: string[] = []
-  if (ann.type === "USER" && ann.userId) {
-    const u = await db.user.findFirst({ where: { id: ann.userId, deletedAt: null }, select: { id: true } })
-    targetUserIds = u ? [u.id] : []
-  } else if (ann.type === "GROUP" && ann.groupId) {
-    // GroupUser 无 user 关系定义（纯外键表）：两步查询先取成员再过滤有效用户
-    const members = await db.groupUser.findMany({ where: { groupId: ann.groupId }, select: { userId: true } })
-    const valid = await db.user.findMany({
-      where: { id: { in: members.map((m) => m.userId) }, deletedAt: null, enabled: true, frozen: false },
-      select: { id: true },
-    })
-    targetUserIds = valid.map((v) => v.id)
-  } else {
+  // r30 目标用户解析：GLOBAL 全体 / 组多选成员并集 + 用户多选并集（混合范围合并去重）
+  let finalUserIds: string[] = []
+  if (ann.type === "GLOBAL") {
     const users = await db.user.findMany({
       where: { deletedAt: null, enabled: true, frozen: false },
       select: { id: true },
     })
-    targetUserIds = users.map((u) => u.id)
+    finalUserIds = users.map((u) => u.id)
+  } else {
+    const targetGroupIds = announcementGroupIds(ann)
+    const targetUserIds = announcementUserIds(ann)
+    // GroupUser 无 user 关系定义（纯外键表）：先取全部组成员再过滤有效用户
+    const memberSets = await Promise.all(
+      targetGroupIds.map((gid) =>
+        db.groupUser.findMany({ where: { groupId: gid }, select: { userId: true } }).then((ms) => ms.map((m) => m.userId)),
+      ),
+    )
+    const memberIds = Array.from(new Set(memberSets.flat()))
+    const [memberValid, directValid] = await Promise.all([
+      memberIds.length
+        ? db.user.findMany({ where: { id: { in: memberIds }, deletedAt: null, enabled: true, frozen: false }, select: { id: true } })
+        : Promise.resolve([] as { id: string }[]),
+      targetUserIds.length
+        ? db.user.findMany({ where: { id: { in: targetUserIds }, deletedAt: null, enabled: true, frozen: false }, select: { id: true } })
+        : Promise.resolve([] as { id: string }[]),
+    ])
+    finalUserIds = Array.from(new Set([...memberValid.map((v) => v.id), ...directValid.map((v) => v.id)]))
   }
-  if (targetUserIds.length === 0) return { delivered: 0, skipped: 0 }
-  if (targetUserIds.length > 5000) targetUserIds = targetUserIds.slice(0, 5000) // 防爆量
+  if (finalUserIds.length === 0) return { delivered: 0, skipped: 0 }
+  if (finalUserIds.length > 5000) finalUserIds = finalUserIds.slice(0, 5000) // 防爆量
 
   const summary = contentSummary(ann.content)
   const now = new Date()
@@ -93,8 +114,8 @@ async function fanOutInboxNotices(
     select: { userId: true },
   })
   const sentSet = new Set(existing.map((n) => n.userId))
-  const pending = targetUserIds.filter((id) => !sentSet.has(id))
-  if (pending.length === 0) return { delivered: 0, skipped: targetUserIds.length }
+  const pending = finalUserIds.filter((id) => !sentSet.has(id))
+  if (pending.length === 0) return { delivered: 0, skipped: finalUserIds.length }
 
   // 分批插入（SQLite 变量上限）
   const BATCH = 200
@@ -110,7 +131,7 @@ async function fanOutInboxNotices(
     await db.notice.createMany({ data: batch })
   }
   await db.announcement.update({ where: { id: ann.id }, data: { notifiedAt: now } }).catch(() => {})
-  return { delivered: pending.length, skipped: targetUserIds.length - pending.length }
+  return { delivered: pending.length, skipped: finalUserIds.length - pending.length }
 }
 
 export async function upsertAnnouncementAction(input: unknown): Promise<ActionResult<{ id: string; inboxDelivered?: number }>> {
@@ -119,19 +140,29 @@ export async function upsertAnnouncementAction(input: unknown): Promise<ActionRe
     const ctx = await requireAdmin()
     const p = zodValidate(announcementSchema, input)
 
-    // 范围校验：GROUP 必须选择组；USER 必须指定用户；GLOBAL 清空范围
-    if (p.type === "GROUP") {
-      if (!p.groupId) throw bizError(ErrorCode.PARAM_ERROR, "组范围公告必须选择目标用户组")
-      const group = await db.group.findFirst({ where: { id: p.groupId, deletedAt: null } })
-      if (!group) throw bizError(ErrorCode.NOT_FOUND, "目标用户组不存在或已删除")
+    // r30 范围多选校验：组与用户均可多选（旧单选字段 groupId/userId 兼容并入）
+    const targetGroupIds = Array.from(new Set([...(p.groupIds || []), ...(p.groupId ? [p.groupId] : [])]))
+    const targetUserIds = Array.from(new Set([...(p.userIds || []), ...(p.userId ? [p.userId] : [])]))
+    if (p.type === "GLOBAL" && (targetGroupIds.length > 0 || targetUserIds.length > 0)) {
+      throw bizError(ErrorCode.PARAM_ERROR, "全站公告不需要指定范围（请清空用户组/用户多选）")
     }
-    if (p.type === "USER") {
-      if (!p.userId) throw bizError(ErrorCode.PARAM_ERROR, "用户范围公告必须选择目标用户")
-      const user = await db.user.findFirst({ where: { id: p.userId, deletedAt: null } })
-      if (!user) throw bizError(ErrorCode.NOT_FOUND, "目标用户不存在或已删除")
+    if (p.type === "GROUP" && targetGroupIds.length === 0) {
+      throw bizError(ErrorCode.PARAM_ERROR, "用户组范围公告必须至少选择一个目标用户组")
     }
-    if (p.type === "GLOBAL" && (p.groupId || p.userId)) {
-      throw bizError(ErrorCode.PARAM_ERROR, "全站公告不需要指定范围")
+    if (p.type === "USER" && targetUserIds.length === 0) {
+      throw bizError(ErrorCode.PARAM_ERROR, "用户范围公告必须至少选择一位目标用户（可与用户组混合）")
+    }
+    if (targetGroupIds.length > 0) {
+      const groups = await db.group.findMany({ where: { id: { in: targetGroupIds }, deletedAt: null }, select: { id: true } })
+      if (groups.length !== targetGroupIds.length) {
+        throw bizError(ErrorCode.NOT_FOUND, "存在无效/已删除的目标用户组，请重新选择")
+      }
+    }
+    if (targetUserIds.length > 0) {
+      const users = await db.user.findMany({ where: { id: { in: targetUserIds }, deletedAt: null }, select: { id: true } })
+      if (users.length !== targetUserIds.length) {
+        throw bizError(ErrorCode.NOT_FOUND, "存在无效/已删除的目标用户，请重新选择")
+      }
     }
 
     // 发布通道合并：displayTypes（新多选）∪ displayType（旧单值兼容）
@@ -151,8 +182,11 @@ export async function upsertAnnouncementAction(input: unknown): Promise<ActionRe
       title: p.title,
       content: p.content,
       type: p.type,
-      groupId: p.type === "GROUP" ? p.groupId! : null,
-      userId: p.type === "USER" ? p.userId! : null,
+      // 兼容字段 = 数组首项（旧单选客户端按单值展示/查询在单目标场景行为不变）
+      groupId: p.type === "GROUP" || p.type === "USER" ? targetGroupIds[0] || null : null,
+      userId: p.type === "USER" ? targetUserIds[0] || null : null,
+      groupIdsJson: targetGroupIds.length > 0 ? JSON.stringify(targetGroupIds) : null,
+      userIdsJson: targetUserIds.length > 0 ? JSON.stringify(targetUserIds) : null,
       displayType: displayTypes[0] || "POPUP", // 主展示方式（列表/旧客户端兼容）
       displayTypes: JSON.stringify(displayTypes),
       notifyInbox: !!p.notifyInbox,
@@ -170,7 +204,7 @@ export async function upsertAnnouncementAction(input: unknown): Promise<ActionRe
       // 站内信投递：编辑时开启通道且未投递过 → 补发（幂等：notifiedAt 已置位则跳过）
       let inboxDelivered: number | undefined
       if (ann.notifyInbox && ann.enabled && !ann.notifiedAt) {
-        const r = await fanOutInboxNotices({ id: ann.id, title: ann.title, content: ann.content, type: ann.type, groupId: ann.groupId, userId: ann.userId })
+        const r = await fanOutInboxNotices({ id: ann.id, title: ann.title, content: ann.content, type: ann.type, groupId: ann.groupId, userId: ann.userId, groupIdsJson: ann.groupIdsJson, userIdsJson: ann.userIdsJson })
         inboxDelivered = r.delivered
       }
       await writeAudit({
@@ -180,8 +214,8 @@ export async function upsertAnnouncementAction(input: unknown): Promise<ActionRe
         resourceType: "ANNOUNCEMENT",
         resourceId: ann.id,
         resourceName: ann.title,
-        before: { title: before.title, content: before.content, type: before.type, groupId: before.groupId, userId: before.userId, displayType: before.displayType, displayTypes: before.displayTypes, notifyInbox: before.notifyInbox, startAt: before.startAt, endAt: before.endAt, persistAfterRead: before.persistAfterRead, allowDismiss: before.allowDismiss, enabled: before.enabled },
-        after: { title: p.title, content: p.content, type: p.type, groupId: data.groupId, userId: data.userId, displayType: data.displayType, displayTypes: data.displayTypes, notifyInbox: data.notifyInbox, startAt: data.startAt, endAt: data.endAt, persistAfterRead: data.persistAfterRead, allowDismiss: data.allowDismiss, enabled: p.enabled },
+        before: { title: before.title, content: before.content, type: before.type, groupId: before.groupId, userId: before.userId, groupIdsJson: before.groupIdsJson, userIdsJson: before.userIdsJson, displayType: before.displayType, displayTypes: before.displayTypes, notifyInbox: before.notifyInbox, startAt: before.startAt, endAt: before.endAt, persistAfterRead: before.persistAfterRead, allowDismiss: before.allowDismiss, enabled: before.enabled },
+        after: { title: p.title, content: p.content, type: p.type, groupId: data.groupId, userId: data.userId, groupIdsJson: data.groupIdsJson, userIdsJson: data.userIdsJson, targetGroups: targetGroupIds.length, targetUsers: targetUserIds.length, displayType: data.displayType, displayTypes: data.displayTypes, notifyInbox: data.notifyInbox, startAt: data.startAt, endAt: data.endAt, persistAfterRead: data.persistAfterRead, allowDismiss: data.allowDismiss, enabled: p.enabled },
       })
       return { id: ann.id, inboxDelivered }
     }
@@ -190,7 +224,7 @@ export async function upsertAnnouncementAction(input: unknown): Promise<ActionRe
     // 创建即启用 + 站内信通道 → 立即投递（草稿不投递，启用切换时也不补发，保持语义简单）
     let inboxDelivered: number | undefined
     if (ann.notifyInbox && ann.enabled) {
-      const r = await fanOutInboxNotices({ id: ann.id, title: ann.title, content: ann.content, type: ann.type, groupId: ann.groupId, userId: ann.userId })
+      const r = await fanOutInboxNotices({ id: ann.id, title: ann.title, content: ann.content, type: ann.type, groupId: ann.groupId, userId: ann.userId, groupIdsJson: ann.groupIdsJson, userIdsJson: ann.userIdsJson })
       inboxDelivered = r.delivered
     }
     await writeAudit({
@@ -200,7 +234,7 @@ export async function upsertAnnouncementAction(input: unknown): Promise<ActionRe
       resourceType: "ANNOUNCEMENT",
       resourceId: ann.id,
       resourceName: ann.title,
-      after: { title: p.title, content: p.content, type: p.type, groupId: data.groupId, userId: data.userId, displayType: data.displayType, displayTypes: data.displayTypes, notifyInbox: data.notifyInbox, startAt: data.startAt, endAt: data.endAt, persistAfterRead: data.persistAfterRead, allowDismiss: data.allowDismiss, enabled: p.enabled, inboxDelivered },
+      after: { title: p.title, content: p.content, type: p.type, groupId: data.groupId, userId: data.userId, groupIdsJson: data.groupIdsJson, userIdsJson: data.userIdsJson, targetGroups: targetGroupIds.length, targetUsers: targetUserIds.length, displayType: data.displayType, displayTypes: data.displayTypes, notifyInbox: data.notifyInbox, startAt: data.startAt, endAt: data.endAt, persistAfterRead: data.persistAfterRead, allowDismiss: data.allowDismiss, enabled: p.enabled, inboxDelivered },
     })
     await trackBehavior(ctx.userId, "CREATE").catch(() => {})
     return { id: ann.id, inboxDelivered }
@@ -221,7 +255,7 @@ export async function toggleAnnouncementAction(input: unknown): Promise<ActionRe
     // 草稿 → 启用 且带站内信通道且未投递过 → 补发（自然工作流：先存草稿审阅，再启用发布）
     let inboxDelivered: number | undefined
     if (p.enabled && ann.notifyInbox && !ann.notifiedAt) {
-      const r = await fanOutInboxNotices({ id: ann.id, title: ann.title, content: ann.content, type: ann.type, groupId: ann.groupId, userId: ann.userId })
+      const r = await fanOutInboxNotices({ id: ann.id, title: ann.title, content: ann.content, type: ann.type, groupId: ann.groupId, userId: ann.userId, groupIdsJson: ann.groupIdsJson, userIdsJson: ann.userIdsJson })
       inboxDelivered = r.delivered
     }
     await writeAudit({
@@ -267,6 +301,8 @@ export async function deleteAnnouncementAction(input: unknown): Promise<ActionRe
         type: ann.type,
         groupId: ann.groupId,
         userId: ann.userId,
+        groupIdsJson: ann.groupIdsJson,
+        userIdsJson: ann.userIdsJson,
         displayType: ann.displayType,
         displayTypes: ann.displayTypes,
         notifyInbox: ann.notifyInbox,

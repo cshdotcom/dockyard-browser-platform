@@ -1,5 +1,6 @@
 import { db } from "@/lib/db"
 import { requireAdmin } from "@/lib/permissions"
+import { announcementGroupIds, announcementUserIds } from "@/lib/announcement-targets"
 import { parseListQuery, pageSkipTake, safeOrderBy, fmtDate } from "@/lib/utils-server"
 import { StatCard } from "@/components/shared/confirm"
 import { AnnouncementsTable, type AnnouncementRow } from "./announcements-table"
@@ -36,18 +37,22 @@ export default async function AdminAnnouncementsPage({
     db.announcement.count({ where: { type: "GLOBAL" } }),
   ])
 
-  // 范围名称（组名 / 用户名）与创建人（内存 join）
-  const groupIds = [...new Set(rows.map((r) => r.groupId).filter((v): v is string => !!v))]
-  const userIds = [...new Set(rows.map((r) => r.userId).filter((v): v is string => !!v))]
+  // 范围名称（r30 多选：组数组 ∪ 兼容单值；用户数组 ∪ 兼容单值）与创建人（内存 join）
+  const groupIds = [...new Set(rows.flatMap((r) => announcementGroupIds(r)))]
+  const userIds = [...new Set(rows.flatMap((r) => announcementUserIds(r)))]
   const creatorIds = [...new Set(rows.map((r) => r.createdByUserId).filter((v): v is string => !!v))]
   const groups = groupIds.length ? await db.group.findMany({ where: { id: { in: groupIds }, deletedAt: null }, select: { id: true, name: true } }) : []
-  const users = userIds.length ? await db.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } }) : []
+  const users = userIds.length ? await db.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true, displayName: true } }) : []
   const creators = creatorIds.length ? await db.user.findMany({ where: { id: { in: creatorIds } }, select: { id: true, username: true } }) : []
   const groupMap = new Map<string, string>(groups.map((g): [string, string] => [g.id, g.name]))
   const userMap = new Map<string, string>(users.map((u): [string, string] => [u.id, u.username]))
   const creatorMap = new Map<string, string>(creators.map((c): [string, string] => [c.id, c.username]))
 
+  const displayName = (label: string, id: string) => label === id ? id : label
   const list: AnnouncementRow[] = rows.map((a) => {
+    // r30：范围多选解析（组/用户数组，兼容旧单值字段）
+    const rowGroupIds = announcementGroupIds(a)
+    const rowUserIds = announcementUserIds(a)
     // 多选发布通道解析（旧数据无 displayTypes → 回退单值）
     let displayTypes: string[] = []
     try {
@@ -63,6 +68,10 @@ export default async function AdminAnnouncementsPage({
       groupName: a.groupId ? groupMap.get(a.groupId) || a.groupId : null,
       userId: a.userId,
       targetUsername: a.userId ? userMap.get(a.userId) || a.userId : null,
+      groupIds: rowGroupIds,
+      groupNames: rowGroupIds.map((gid) => displayName(groupMap.get(gid) || gid, gid)),
+      userIds: rowUserIds,
+      targetUsernames: rowUserIds.map((uid) => displayName(userMap.get(uid) || uid, uid)),
       displayType: a.displayType,
       displayTypes,
       notifyInbox: !!a.notifyInbox,

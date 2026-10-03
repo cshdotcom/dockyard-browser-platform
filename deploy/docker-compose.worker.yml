@@ -1,0 +1,38 @@
+# ============================================================
+# Dockyard Worker —— 分布式部署执行节点（r30 / v1.8.0）
+# 配合主管理平台镜像使用（deploy/docker-compose.yml 或已有主控部署）
+#
+# 部署三步：
+#   1. 主控管理后台 →「工作节点」→ 注册节点（一次性展示 WORKER_NODE_UUID + WORKER_API_KEY）
+#   2. 将凭据填入下方环境变量 → docker compose -f docker-compose.worker.yml up -d
+#   3. 主控节点面板确认状态 ONLINE（10s 心跳自动上报 CPU/内存/磁盘/沙箱数）
+#
+# Worker 定位：纯净执行节点 —— 无数据库 / 无管理后台 / 无自主决策，
+# 100% 受主控指令驱动（心跳响应携带指令队列：文件分片 put/status/delete 等）
+# 驱逐语义：主控删除/失效本节点 → Worker 自动退出（exit 2/3），需重新注册换新凭据
+# ============================================================
+
+services:
+  dockyard-worker:
+    image: ghcr.io/cshdotcom/dockyard-browser-platform-worker:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile.worker
+    container_name: dockyard-worker
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      # ---- 三项必填（主控注册时一次性展示，缺失拒绝启动）----
+      MASTER_API_URL: "http://192.168.1.10:3000"     # 主管理平台地址（改为你主控的地址）
+      WORKER_NODE_UUID: "wn-xxxxxxxxxxxxxxxx"        # 注册时生成的节点 UUID
+      WORKER_API_KEY: "change-me-worker-api-key"     # 注册时一次性展示的 API Key
+      # ---- 可选 ----
+      # WORKER_HEARTBEAT_SEC: "10"                    # 心跳周期（默认 10s）
+      # WORKER_HEALTH_PORT: "3007"                    # 本机健康端口
+    volumes:
+      - worker-storage:/app/storage   # DFS 分片 / 沙箱 Profile / 录像分段（核心持久化卷）
+    # 健康检查已内置（Worker /health：节点 UUID/版本/心跳/是否被主控失效）
+    # Worker 需要直连主控所在网络（MASTER_API_URL 可达即可；无需对外暴露端口）
+
+volumes:
+  worker-storage:

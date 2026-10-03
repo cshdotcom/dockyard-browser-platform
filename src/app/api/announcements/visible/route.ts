@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { getAuthContext, userGroupIds } from "@/lib/permissions"
 import { apiHandler } from "@/lib/api"
+import { announcementTargetsUser } from "@/lib/announcement-targets"
 
 // ============================================================
 // 全局公告层 API（所有登录用户）：
@@ -33,19 +34,20 @@ export async function GET(req: NextRequest) {
     const now = new Date()
     const gids = await userGroupIds(ctx.userId)
 
-    // 可见目标 + 启用 + 时间窗（startAt 未到不展示；endAt 过期不展示）
-    const anns = await db.announcement.findMany({
+    // r30：范围多选 union 匹配 —— GLOBAL 全站 / 组多选（任一组命中）/ 用户多选（含混合范围）
+    // 先取时间窗内全部启用公告（公告量级小，内存 union 过滤最稳且兼容旧单值字段）
+    const candidates = await db.announcement.findMany({
       where: {
         enabled: true,
         AND: [
-          { OR: [{ type: "GLOBAL" }, { type: "GROUP", groupId: { in: gids } }, { type: "USER", userId: ctx.userId }] },
           { OR: [{ startAt: null }, { startAt: { lte: now } }] },
           { OR: [{ endAt: null }, { endAt: { gt: now } }] },
         ],
       },
       orderBy: { createdAt: "desc" },
-      take: 50,
+      take: 200,
     })
+    const anns = candidates.filter((a) => announcementTargetsUser(a, ctx.userId, gids)).slice(0, 50)
 
     const ids = anns.map((a) => a.id)
     const [reads, dismisses] = ids.length
@@ -102,12 +104,12 @@ export async function POST(req: NextRequest) {
     const ann = await db.announcement.findUnique({ where: { id } })
     if (!ann || !ann.enabled) return NextResponse.json({ code: 40401, msg: "公告不存在或已停用" })
 
-    // 可见性校验（防越权标记他人定向公告）
-    if (ann.type === "GROUP") {
+    // 可见性校验（防越权标记他人定向公告；r30 union 匹配覆盖组多选/用户多选/混合范围）
+    if (ann.type !== "GLOBAL") {
       const gids = await userGroupIds(ctx.userId)
-      if (!ann.groupId || !gids.includes(ann.groupId)) return NextResponse.json({ code: 40301, msg: "无权操作该公告" })
-    } else if (ann.type === "USER" && ann.userId !== ctx.userId) {
-      return NextResponse.json({ code: 40301, msg: "无权操作该公告" })
+      if (!announcementTargetsUser(ann, ctx.userId, gids)) {
+        return NextResponse.json({ code: 40301, msg: "无权操作该公告" })
+      }
     }
 
     if (action === "read") {

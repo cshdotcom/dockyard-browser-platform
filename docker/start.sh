@@ -11,13 +11,29 @@
 #   3. EXIT 兜底清理：任意退出路径（崩溃/信号/正常）都终止全部子进程，
 #      杜绝孤儿 vnc-bridge/ws-hub 占端口导致下一轮 EADDRINUSE
 #   4. 健康探测改用 wget（镜像内未装 curl，旧探测恒超时 60 秒）
+#
+# r30 启动可靠性硬化（用户实测"启动一直疯狂重启、日志从未显示启动成功"根因组）：
+#   5. SQLite db push 真实退出码（旧管道 `| tail` 掩盖失败 → 结构缺失静默带病运行）：
+#      输出落临时文件判真实退出码，失败重试 3 次 + 高亮错误 + 明确继续/终止语义
+#   6. PostgreSQL 不可达不再 exit 退出（旧：exit 1 → guard 5s 疯狂整轮自旋）：
+#      轮内无限重试 + 退避 + 倒计时日志，容器保持存活等待数据库恢复
+#   7. 服务日志轮转（20MB 阈值 cp+截断）：r29 起 30 项定时任务高频写日志，
+#      storage 卷被写满 → SQLite 写失败 → 服务崩溃 → 疯狂重启链的放大器
+#   8. boot-state 标记（starting/ready/crashed）+ 启动成功高亮横幅：
+#      healthcheck 依此判"启动宽限期"，docker logs 一眼可见启动是否成功
 # ============================================================
 set -e
 
 APP_DIR="/app"
 DB_PATH="/app/db/custom.db"
+BOOT_STATE_FILE="/app/storage/.boot-state"
+LOG_ROTATE_MB="${LOG_ROTATE_MB:-20}"
 
 log() { echo "[dockyard-start] $1"; }
+# 启动状态标记（healthcheck 读）：starting=启动中 / ready=全部就绪 / crashed=本轮崩溃
+set_boot_state() {
+  echo "$1 $(date +%s)" > "$BOOT_STATE_FILE" 2>/dev/null || true
+}
 
 # ---- 0. 子进程登记 + 信号钩子（必须在启动任何子进程之前装好）----
 # ALL_PIDS 登记全部后台子进程；term_handler 处理 docker stop；
@@ -56,6 +72,29 @@ for LF in /app/storage/server.log /app/storage/ws-hub.log /app/storage/vnc-bridg
   forward_log "$LF"
 done
 log "日志双通道已启用：server/ws-hub/vnc-bridge/gateway/cron 输出同步至 docker logs"
+
+# r30：本轮启动状态标记（healthcheck 依此区分「启动宽限期」与「真不健康」）
+set_boot_state "starting"
+
+# r30：服务日志轮转（后台守护，登记进 ALL_PIDS 随轮清理）
+# 语义：阈值 20MB（LOG_ROTATE_MB 可调）→ cp 当前文件为 .1 留档 + 原地截断；
+# 追加写进程（>> 重定向持 O_APPEND fd）与 tail -F（容忍截断自动续读）均不受影响。
+# 防的是：30 项定时任务 + 页面请求长期运行把 storage 卷写满 → SQLite 写失败 →
+# 服务崩溃 → guard 疯狂重启 —— 这是「启动一直疯狂」的磁盘层放大器。
+(
+  while :; do
+    sleep 120
+    for LF in /app/storage/server.log /app/storage/ws-hub.log /app/storage/vnc-bridge.log /app/storage/gateway.log; do
+      SZ=$(stat -c %s "$LF" 2>/dev/null || echo 0)
+      if [ "$SZ" -gt $((LOG_ROTATE_MB * 1024 * 1024)) ]; then
+        cp -f "$LF" "$LF.1" 2>/dev/null || true
+        : > "$LF" 2>/dev/null || true
+        echo "[dockyard-start] 日志轮转：$LF 超过 ${LOG_ROTATE_MB}MB（$(($SZ / 1024 / 1024))MB），已归档 .1 并截断"
+      fi
+    done
+  done
+) &
+ALL_PIDS="$ALL_PIDS $!"
 
 # ---- 1. 启动自检（端口 / 数据库 / 权限 / 目录完整性）----
 log "自检开始..."
@@ -167,26 +206,33 @@ if [ "$DB_MODE" = "postgres" ]; then
       ;;
   esac
   log "数据库形态：PostgreSQL → 启动自动初始化（结构推送 → 审计触发器 → 种子，全部幂等）"
+  # r30：PG 不可达不再 exit（旧：3 次失败 exit 1 → guard 5 秒后疯狂整轮自旋，
+  # 用户观察即「启动一直疯狂、日志一直没有启动成功」）。改为轮内无限重试 + 退避，
+  # 容器保持存活、boot-state=starting（healthcheck 宽限期内不判死），数据库恢复后
+  # 自动完成初始化并继续启动 —— 拉起外部数据库慢/网络抖动场景天然自愈。
   PG_PUSH_OK=0
   PG_ATTEMPT=0
-  PG_MAX=3
-  while [ $PG_ATTEMPT -lt $PG_MAX ]; do
+  PG_BACKOFF=5
+  until [ "$PG_PUSH_OK" = "1" ]; do
     PG_ATTEMPT=$((PG_ATTEMPT + 1))
-    log "PostgreSQL 结构推送（第 ${PG_ATTEMPT}/${PG_MAX} 次）：prisma db push --schema prisma/schema.postgres.prisma"
+    if [ $((PG_ATTEMPT % 10)) = "1" ]; then
+      log "PostgreSQL 结构推送（第 ${PG_ATTEMPT} 次）：prisma db push --schema prisma/schema.postgres.prisma"
+    fi
     # 输出落临时文件再回显（dash 管道退出码取尾命令，不能用于成败判定）
     if bunx prisma db push --schema prisma/schema.postgres.prisma --skip-generate --accept-data-loss >/tmp/pg-push.log 2>&1; then
       PG_PUSH_OK=1
       tail -3 /tmp/pg-push.log
+      log "PostgreSQL 结构推送成功（第 ${PG_ATTEMPT} 次尝试）"
       break
     fi
-    tail -5 /tmp/pg-push.log
-    log "警告：结构推送失败（数据库暂不可达或账号权限不足？10 秒后重试）"
-    sleep 10
+    if [ $((PG_ATTEMPT % 10)) = "1" ] || [ "$PG_ATTEMPT" = "3" ]; then
+      tail -5 /tmp/pg-push.log
+      log "等待 PostgreSQL 就绪：第 ${PG_ATTEMPT} 次失败（数据库暂不可达或账号权限不足？${PG_BACKOFF}s 后重试，无限等待直至恢复）"
+    fi
+    sleep "$PG_BACKOFF"
+    PG_BACKOFF=$((PG_BACKOFF * 2))
+    if [ "$PG_BACKOFF" -gt 60 ]; then PG_BACKOFF=60; fi
   done
-  if [ "$PG_PUSH_OK" != "1" ]; then
-    log "严重错误：PostgreSQL 自动初始化失败（${PG_MAX} 次尝试均失败）—— 请检查 DATABASE_URL 连通性与账号权限；容器将由守护进程稍后整轮重试"
-    exit 1
-  fi
   # 审计不可篡改触发器（幂等；失败不阻断启动 —— 可稍后手工执行 db/postgres/audit_triggers.sql）
   if bun prisma/postgres/apply-triggers.ts >/tmp/pg-triggers.log 2>&1; then
     tail -2 /tmp/pg-triggers.log
@@ -203,7 +249,34 @@ if [ "$DB_MODE" = "postgres" ]; then
 else
   # ---- SQLite 形态（默认，零外部依赖；行为与历史版本完全一致）----
   log "数据库形态：SQLite（默认）→ $DB_PATH"
-  bunx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -2 || log "警告：数据库结构推送失败（将沿用现有数据库）"
+  # r30：真实退出码判定（旧写法 `db push ... | tail -2 || log` 的退出码取自 tail，
+  # 恒为 0 —— 结构推送真实失败时被完全掩盖：种子失败、表缺失、运行时全链路带病，
+  # 且日志仅剩一句"警告"极易漏看）。现改为：输出落临时文件 → 判真实退出码 →
+  # 失败重试 3 次（升级旧卷时 ALTER/重建耗时或瞬时锁竞争天然自愈）→ 仍失败则
+  # 高亮错误块 + 附排查指引；旧卷已有结构时"沿用现有数据库"语义保持（失败不阻断，
+  # 升级场景存量表仍在，服务可用，缺失新表的功能页会报错并可见于日志）。
+  SQLITE_OK=0
+  SQLITE_ATTEMPT=0
+  while [ "$SQLITE_ATTEMPT" -lt 3 ]; do
+    SQLITE_ATTEMPT=$((SQLITE_ATTEMPT + 1))
+    if bunx prisma db push --skip-generate --accept-data-loss >/tmp/sqlite-push.log 2>&1; then
+      SQLITE_OK=1
+      tail -2 /tmp/sqlite-push.log
+      break
+    fi
+    tail -5 /tmp/sqlite-push.log
+    log "警告：SQLite 结构推送失败（第 ${SQLITE_ATTEMPT}/3 次，10 秒后重试 —— 瞬时锁竞争或卷 IO 抖动）"
+    sleep 10
+  done
+  if [ "$SQLITE_OK" != "1" ]; then
+    echo ""
+    echo "=============================================================="
+    log "严重错误：数据库结构推送 3 次均失败 —— SQLite 卷可能只读/损坏/磁盘满"
+    log "排查：df -h /app/storage /app/db（磁盘是否写满）；ls -l /app/db（属主/权限）"
+    log "处置：修复卷权限或释放磁盘后，容器将自动重试（guard 整轮自愈）"
+    echo "=============================================================="
+    # 不 exit：保留旧结构继续启动（升级兼容语义），错误已在 docker logs 高亮可见
+  fi
 fi
 
 # ---- 3. 种子数据（幂等：默认配置/超管账号/内置任务/内置策略模板）----
@@ -286,6 +359,38 @@ if [ $GATEWAY_WAIT -lt 60 ]; then
   log "统一网关就绪：端口 $GATEWAY_PORT（对外服务已全部开通）"
 else
   log "警告：网关健康探测超时（进程仍在运行，可能启动缓慢或异常，查看 storage/gateway.log）"
+fi
+
+# r30：主服务穿透探测（网关→Next 全链路验证，非仅网关自身存活）
+# 探测 /api/openapi/doc（公开轻量路由，与 healthcheck 同口径），最多等 40s
+APP_WAIT=0
+until wget -q -O /dev/null --timeout=3 "http://127.0.0.1:${GATEWAY_PORT}/api/openapi/doc" 2>/dev/null || [ $APP_WAIT -ge 40 ]; do
+  sleep 1; APP_WAIT=$((APP_WAIT + 1))
+done
+APP_OK=0
+if [ $APP_WAIT -lt 40 ]; then APP_OK=1; fi
+
+# r30：启动成功高亮横幅 + boot-state=ready
+# （用户诉求："日志一直没有启动成功" —— 此前成功仅一行普通日志、且极易被
+#   prisma 查询日志洪水冲走。现在：洪水已关 + 专属横幅块 + 状态文件三重可观测）
+if [ "$APP_OK" = "1" ]; then
+  set_boot_state "ready"
+  echo ""
+  echo "=============================================================="
+  echo "  DOCKYARD 启动成功（全部服务就绪）"
+  echo "  ----------------------------------------------------------"
+  echo "  网页端      : http://<主机IP>:${GATEWAY_PORT}"
+  echo "  数据库形态  : ${DB_MODE}$(if [ "$DB_MODE" != "postgres" ]; then echo "（$DB_PATH）"; fi)"
+  echo "  主服务      : 回环 127.0.0.1:${APP_INTERNAL_PORT}（经统一网关对外）"
+  echo "  VNC 桥      : 回环 ${VNC_BRIDGE_PORT}（gateway 模式，网页端嵌入）"
+  echo "  初始账号    : admin / \${ADMIN_PASSWORD:-Admin@2026}（首启播种，后台可改）"
+  echo "  排障        : docker logs <容器> 搜「DOCKYARD 启动成功」即本横幅"
+  echo "=============================================================="
+  log "启动成功：网关 ${GATEWAY_WAIT}s 就绪 + 主服务全链路探测通过（${APP_WAIT}s）"
+else
+  # 主服务穿透失败：网关在、Next 未响应 —— 保持 starting 状态并高亮告警（不判死，
+  # Next 冷启动/首次请求编译慢属正常；guard 在主进程真退出时才整轮重启）
+  log "警告：主服务全链路探测 40s 未通过（Next 仍在启动或异常；boot-state 保持 starting）"
 fi
 
 # 主等待：主服务退出（含崩溃）→ EXIT 钩子自动清理全部子进程 → guard 下一轮干净重启

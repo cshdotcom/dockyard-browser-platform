@@ -1324,9 +1324,11 @@ model Announcement {
   id             String   @id @default(cuid())
   title          String
   content        String
-  type           String   @default("GLOBAL") // GLOBAL | GROUP | USER
-  groupId        String?
-  userId         String?
+  type           String   @default("GLOBAL") // GLOBAL | GROUP | USER（范围多选时的主类型：仅组=GROUP / 含用户=USER / 空=GLOBAL）
+  groupId        String?  // 兼容字段：主组（= groupIds 首项；旧单选数据即此字段）
+  userId         String?  // 兼容字段：主用户（= userIds 首项；旧单选数据即此字段）
+  groupIdsJson   String?  // r30 范围多选：目标用户组 JSON 数组（如 ["gid1","gid2"]；空=未选组）
+  userIdsJson    String?  // r30 范围多选：目标用户 JSON 数组（可与 groupIdsJson 组合=组+用户混合范围）
   displayType    String   @default("POPUP") // POPUP | MARQUEE | FORCE_VIEW（主展示方式 = displayTypes 首项，兼容旧数据）
   displayTypes   String?  // 多选展示方式（JSON 数组，如 ["POPUP","MARQUEE"]；空数组=仅站内信）
   notifyInbox    Boolean  @default(false) // 站内信通道（发送到用户通知铃/站内信）

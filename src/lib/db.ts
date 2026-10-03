@@ -38,11 +38,24 @@ function createPrismaClient(): PrismaClient {
     const { PrismaClient: PostgresPrismaClient } = require("@prisma/client-postgres") as {
       PrismaClient: new (opts: { log: string[] }) => unknown
     }
-    return new PostgresPrismaClient({ log: ["query"] }) as unknown as PrismaClient
+    return new PostgresPrismaClient({ log: prismaLogLevels() }) as unknown as PrismaClient
   }
   return new PrismaClient({
-    log: ["query"],
+    log: prismaLogLevels(),
   })
+}
+
+// ============================================================
+// r30：查询日志水位治理 —— 生产默认只记 error/warn
+// 旧行为 log:["query"] 会把每条 SQL 全量打印（30 项定时任务 + 全部页面请求，
+// docker logs 与 storage/server.log 双通道疯狂刷屏；长期运行把数据卷写满，
+// SQLite 写失败 → 服务崩溃 → guard 疯狂整轮重启 —— 用户实测"启动一直疯狂、
+// 日志一直没有启动成功"的直接放大器）。
+// 需要逐条 SQL 排查时显式开启：环境变量 PRISMA_LOG_QUERY=1
+// （r23 慢查询观测 [slow-query] 不受影响，阈值来自 system_config.log.slowQueryMs）
+// ============================================================
+function prismaLogLevels(): ("query" | "error" | "warn")[] {
+  return process.env.PRISMA_LOG_QUERY === "1" ? ["query", "error", "warn"] : ["error", "warn"]
 }
 
 const baseClient = globalForPrisma.prisma ?? createPrismaClient()

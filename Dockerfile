@@ -216,7 +216,9 @@ EXPOSE 3000 9222
 # VNC 直连可选形态（VNC_BRIDGE_PUBLIC=port 时启动参数会绑定 0.0.0.0，需要时手动 -p 映射）
 # EXPOSE 3005
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+# r30：start-period 提至 150s + retries 5（升级旧卷时 db push/种子可超过 40s；
+# 启动宽限语义由 healthcheck.sh 内 boot-state 统一裁决，此处仅放宽 Docker 层窗口）
+HEALTHCHECK --interval=30s --timeout=5s --start-period=150s --retries=5 \
   CMD /app/docker/healthcheck.sh
 
 # 守护式入口：主进程崩溃自动整轮重启（崩溃原因输出 docker logs）；docker stop 优雅终止

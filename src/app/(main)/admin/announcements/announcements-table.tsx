@@ -7,7 +7,7 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { BellRing, Clock3, Eye, Loader2, Megaphone, Pencil, Plus, Power, PowerOff, Search, Trash2 } from "lucide-react"
+import { BellRing, Clock3, Eye, Loader2, Megaphone, Pencil, Plus, Power, PowerOff, Search, Trash2, User as UserIcon, Users, X } from "lucide-react"
 import { DataTable } from "@/components/shared/data-table"
 import { ConfirmDialog } from "@/components/shared/confirm"
 import { BatchBar, BatchFailuresDialog, BatchConfirmDialog, useBatch } from "@/components/shared/batch-ui"
@@ -31,11 +31,15 @@ export interface AnnouncementRow {
   id: string
   title: string
   content: string
-  type: string // GLOBAL | GROUP | USER
+  type: string // GLOBAL | GROUP | USER（多选范围的主类型：仅组=GROUP / 含用户=USER）
   groupId: string | null
   groupName: string | null
   userId: string | null
   targetUsername: string | null
+  groupIds?: string[] // r30：目标用户组多选（含兼容单值，去重全量）
+  groupNames?: string[] // 对应组名（与 groupIds 同序）
+  userIds?: string[] // r30：目标用户多选
+  targetUsernames?: string[] // 对应用户名（与 userIds 同序）
   displayType: string // 主展示方式（兼容字段）
   displayTypes: string[] // 多选发布通道（含 POPUP/MARQUEE/FORCE_VIEW）
   notifyInbox: boolean // 站内信通道
@@ -81,12 +85,14 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
   // ---- 批量操作（勾选 + 批量停用/启用 + 批量删除）----
   const btch = useBatch(rows, `${keyword || ""}|${JSON.stringify(filters)}`)
 
-  // 表单状态
+  // 表单状态（r30：范围=全站/指定范围；指定范围下用户组与用户双多选+搜索）
   const [fTitle, setFTitle] = React.useState("")
   const [fContent, setFContent] = React.useState("")
-  const [fType, setFType] = React.useState<"GLOBAL" | "GROUP" | "USER">("GLOBAL")
-  const [fGroupId, setFGroupId] = React.useState("")
-  const [fUserId, setFUserId] = React.useState("")
+  const [fType, setFType] = React.useState<"GLOBAL" | "TARGETED">("GLOBAL")
+  const [fGroupIds, setFGroupIds] = React.useState<string[]>([])
+  const [fUserIds, setFUserIds] = React.useState<string[]>([])
+  const [groupSearch, setGroupSearch] = React.useState("")
+  const [userSearch, setUserSearch] = React.useState("")
   const [fDisplays, setFDisplays] = React.useState<string[]>(["POPUP"]) // 多选展示方式
   const [fNotifyInbox, setFNotifyInbox] = React.useState(false) // 站内信通道
   const [fStartAt, setFStartAt] = React.useState("") // datetime-local
@@ -94,9 +100,6 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
   const [fPersist, setFPersist] = React.useState(false) // 已读后仍持续显示
   const [fAllowDismiss, setFAllowDismiss] = React.useState(true) // 允许今日不再提醒
   const [fEnabled, setFEnabled] = React.useState(true)
-  // 用户搜索器
-  const [userSearch, setUserSearch] = React.useState("")
-  const [pickedUser, setPickedUser] = React.useState<{ id: string; username: string } | null>(null)
 
   // datetime-local 显示用（分钟精度）
   const toLocalInput = (iso: string | null): string => {
@@ -125,8 +128,10 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
     setFTitle("")
     setFContent("")
     setFType("GLOBAL")
-    setFGroupId("")
-    setFUserId("")
+    setFGroupIds([])
+    setFUserIds([])
+    setGroupSearch("")
+    setUserSearch("")
     setFDisplays(["POPUP"])
     setFNotifyInbox(false)
     setFStartAt("")
@@ -134,8 +139,6 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
     setFPersist(false)
     setFAllowDismiss(true)
     setFEnabled(true)
-    setUserSearch("")
-    setPickedUser(null)
     setFormOpen(true)
   }
 
@@ -143,9 +146,12 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
     setEditing(row)
     setFTitle(row.title)
     setFContent(row.content)
-    setFType(row.type as "GLOBAL" | "GROUP" | "USER")
-    setFGroupId(row.groupId || "")
-    setFUserId(row.userId || "")
+    // 旧数据（单值）→ 数组；新数据直接回填多选
+    setFType(row.type === "GLOBAL" ? "GLOBAL" : "TARGETED")
+    setFGroupIds(Array.from(new Set([...(row.groupIds || []), ...(row.groupId ? [row.groupId] : [])])))
+    setFUserIds(Array.from(new Set([...(row.userIds || []), ...(row.userId ? [row.userId] : [])])))
+    setGroupSearch("")
+    setUserSearch("")
     setFDisplays(row.displayTypes?.length ? row.displayTypes : [row.displayType])
     setFNotifyInbox(!!row.notifyInbox)
     setFStartAt(toLocalInput(row.startAt))
@@ -153,9 +159,6 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
     setFPersist(!!row.persistAfterRead)
     setFAllowDismiss(row.allowDismiss !== false)
     setFEnabled(row.enabled)
-    const u = userOptions.find((x) => x.id === row.userId)
-    setPickedUser(u ? { id: u.id, username: u.username } : null)
-    setUserSearch("")
     setFormOpen(true)
   }
 
@@ -168,13 +171,14 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
       toast.error("公告内容必填")
       return
     }
-    if (fType === "GROUP" && !fGroupId) {
-      toast.error("请选择目标用户组")
-      return
-    }
-    if (fType === "USER" && !fUserId) {
-      toast.error("请搜索并选择目标用户")
-      return
+    // r30：范围派生 —— 指定范围下组/用户均可多选；两者都为空则提示
+    let annType: "GLOBAL" | "GROUP" | "USER" = "GLOBAL"
+    if (fType === "TARGETED") {
+      if (fGroupIds.length === 0 && fUserIds.length === 0) {
+        toast.error("指定范围至少选择一个用户组或一位用户（可搜索多选）")
+        return
+      }
+      annType = fUserIds.length > 0 ? "USER" : "GROUP"
     }
     if (fDisplays.length === 0 && !fNotifyInbox) {
       toast.error("至少选择一种发布通道：展示方式（弹窗/跑马灯/强制阅读）或站内信")
@@ -191,9 +195,9 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
         id: editing?.id,
         title: fTitle.trim(),
         content: fContent.trim(),
-        type: fType,
-        groupId: fType === "GROUP" ? fGroupId : undefined,
-        userId: fType === "USER" ? fUserId : undefined,
+        type: annType,
+        groupIds: annType === "GLOBAL" ? [] : fGroupIds,
+        userIds: annType === "GLOBAL" ? [] : fUserIds,
         displayTypes: fDisplays,
         notifyInbox: fNotifyInbox,
         startAt: fStartAt || undefined,
@@ -240,11 +244,21 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
     }
   }
 
+  // r30：双多选搜索过滤（字母序由服务端预排；关键词匹配用户名/昵称/组名）
   const filteredUsers = React.useMemo(() => {
     const kw = userSearch.trim().toLowerCase()
     if (!kw) return userOptions.slice(0, 8)
-    return userOptions.filter((u) => u.username.toLowerCase().includes(kw) || u.displayName.toLowerCase().includes(kw)).slice(0, 20)
+    return userOptions.filter((u) => u.username.toLowerCase().includes(kw) || u.displayName.toLowerCase().includes(kw)).slice(0, 50)
   }, [userSearch, userOptions])
+
+  const filteredGroups = React.useMemo(() => {
+    const kw = groupSearch.trim().toLowerCase()
+    if (!kw) return groupOptions.slice(0, 20)
+    return groupOptions.filter((g) => g.name.toLowerCase().includes(kw)).slice(0, 50)
+  }, [groupSearch, groupOptions])
+
+  const toggleId = (arr: string[], id: string, on: boolean) =>
+    on ? Array.from(new Set([...arr, id])) : arr.filter((x) => x !== id)
 
   return (
     <div className="space-y-3">
@@ -361,9 +375,26 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
             key: "scope",
             title: "范围",
             render: (r) => {
-              if (r.type === "GLOBAL") return <span className="text-sm text-muted-foreground">全站用户</span>
-              if (r.type === "GROUP") return <span className="text-sm">{r.groupName || r.groupId || "未知组"}</span>
-              return <span className="text-sm font-mono text-xs">{r.targetUsername || r.userId || "未知用户"}</span>
+              if (r.type === "GLOBAL" && !(r.groupIds?.length || r.userIds?.length)) {
+                return <span className="text-sm text-muted-foreground">全站用户</span>
+              }
+              // r30：多选范围摘要（多组/多用户缩略展示，悬停见全量）
+              const gids = r.groupIds?.length ? r.groupIds : r.groupId ? [r.groupId] : []
+              const uids = r.userIds?.length ? r.userIds : r.userId ? [r.userId] : []
+              const gNames = r.groupNames?.length ? r.groupNames : r.groupName ? [r.groupName] : []
+              const uNames = r.targetUsernames?.length ? r.targetUsernames : r.targetUsername ? [r.targetUsername] : []
+              const scopeText = [
+                gids.length > 0 ? (gids.length === 1 ? gNames[0] || gids[0] : `${gids.length} 个组`) : "",
+                uids.length > 0 ? (uids.length === 1 ? uNames[0] || uids[0] : `${uids.length} 位用户`) : "",
+              ].filter(Boolean).join(" + ")
+              const fullText = [...gNames, ...uNames].join("、") || scopeText
+              return (
+                <span className="text-sm" title={fullText}>
+                  <span className="text-sky-700 dark:text-sky-400">{gids.length > 0 ? (gids.length === 1 ? gNames[0] || gids[0] : `${gids.length} 个组`) : ""}</span>
+                  {gids.length > 0 && uids.length > 0 && <span className="mx-0.5">+</span>}
+                  <span className="text-teal-700 dark:text-teal-400 font-mono text-xs">{uids.length > 0 ? (uids.length === 1 ? uNames[0] || uids[0] : `${uids.length} 位用户`) : ""}</span>
+                </span>
+              )
             },
           },
           {
@@ -439,81 +470,104 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
               <Label>公告内容（Markdown / HTML）</Label>
               <AnnouncementEditor value={fContent} onChange={setFContent} rows={9} />
             </div>
-            <div className="space-y-1.5">
-              <Label>范围类型</Label>
-              <RadioGroup value={fType} onValueChange={(v) => setFType(v as "GLOBAL" | "GROUP" | "USER")} className="flex gap-4">
+            <div className="space-y-2">
+              <Label>发布范围（用户组与用户均可多选 + 搜索）</Label>
+              <RadioGroup value={fType} onValueChange={(v) => setFType(v as "GLOBAL" | "TARGETED")} className="flex gap-4">
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <RadioGroupItem value="GLOBAL" /> 全站（GLOBAL）
+                  <RadioGroupItem value="GLOBAL" /> 全站（所有登录用户）
                 </label>
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <RadioGroupItem value="GROUP" /> 用户组（GROUP）
-                </label>
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <RadioGroupItem value="USER" /> 定向用户（USER）
+                  <RadioGroupItem value="TARGETED" /> 指定范围（组+用户混合）
                 </label>
               </RadioGroup>
-            </div>
-            {fType === "GROUP" && (
-              <div className="space-y-1.5">
-                <Label>目标用户组</Label>
-                <Select value={fGroupId || "__none__"} onValueChange={(v) => setFGroupId(v === "__none__" ? "" : v)}>
-                  <SelectTrigger><SelectValue placeholder="选择用户组" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__none__">未选择</SelectItem>
-                    {groupOptions.map((g) => (
-                      <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-            {fType === "USER" && (
-              <div className="space-y-2">
-                <Label>目标用户（输入用户名搜索后选择）</Label>
-                <div className="flex gap-2">
-                  <Input
-                    value={userSearch}
-                    onChange={(e) => setUserSearch(e.target.value)}
-                    placeholder="输入用户名 / 昵称关键词"
-                    className="flex-1"
-                  />
-                  <Button variant="secondary" size="sm" aria-label="搜索用户">
-                    <Search className="h-4 w-4" />
-                  </Button>
-                </div>
-                {pickedUser && (
-                  <div className="flex items-center justify-between rounded-md border border-teal-200 bg-teal-50 dark:bg-teal-950/20 px-3 py-1.5 text-sm">
-                    <span>
-                      已选择：<span className="font-medium">{pickedUser.username}</span>
-                    </span>
-                    <Button variant="ghost" size="sm" onClick={() => { setPickedUser(null); setFUserId("") }} aria-label="取消选择">
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                )}
-                <ScrollArea className="h-32 rounded-md border">
-                  <div className="divide-y">
-                    {filteredUsers.map((u) => (
-                      <button
-                        key={u.id}
-                        type="button"
-                        className="flex w-full items-center justify-between px-3 py-1.5 text-sm hover:bg-muted text-left"
-                        onClick={() => {
-                          setPickedUser({ id: u.id, username: u.username })
-                          setFUserId(u.id)
-                        }}
-                      >
-                        <span>{u.username}</span>
-                        <span className="text-xs text-muted-foreground">{u.displayName || "-"}</span>
-                      </button>
-                    ))}
-                    {filteredUsers.length === 0 && (
-                      <p className="px-3 py-6 text-center text-xs text-muted-foreground">未找到匹配用户</p>
+              {fType === "TARGETED" && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                  {/* ---- 用户组多选 ---- */}
+                  <div className="space-y-1.5 rounded-md border p-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-xs font-medium flex items-center gap-1">
+                        <Users className="h-3.5 w-3.5 text-sky-600" /> 用户组
+                        {fGroupIds.length > 0 && <Badge className="bg-sky-600 hover:bg-sky-600 text-white text-[10px] px-1.5">已选 {fGroupIds.length}</Badge>}
+                      </Label>
+                      {fGroupIds.length > 0 && (
+                        <button type="button" className="text-[11px] text-muted-foreground hover:text-red-600" onClick={() => setFGroupIds([])}>
+                          清空
+                        </button>
+                      )}
+                    </div>
+                    <Input value={groupSearch} onChange={(e) => setGroupSearch(e.target.value)} placeholder="搜索用户组名称" className="h-8 text-xs" />
+                    <ScrollArea className="h-36 rounded-md border">
+                      <div className="divide-y">
+                        {filteredGroups.map((g) => {
+                          const on = fGroupIds.includes(g.id)
+                          return (
+                            <label key={g.id} className={cn("flex cursor-pointer items-center gap-2 px-2.5 py-1.5 text-sm", on ? "bg-sky-50/70 dark:bg-sky-950/20" : "hover:bg-muted/60")}>
+                              <Checkbox checked={on} onCheckedChange={(v) => setFGroupIds((prev) => toggleId(prev, g.id, v === true))} aria-label={`选择组 ${g.name}`} />
+                              <span className="min-w-0 flex-1 truncate">{g.name}</span>
+                              {on && <Badge variant="outline" className="text-[10px] text-sky-700 border-sky-300">✓</Badge>}
+                            </label>
+                          )
+                        })}
+                        {filteredGroups.length === 0 && <p className="px-3 py-4 text-center text-xs text-muted-foreground">未找到匹配用户组</p>}
+                      </div>
+                    </ScrollArea>
+                    {fGroupIds.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {fGroupIds.map((gid) => (
+                          <button key={gid} type="button" className="inline-flex items-center gap-1 rounded-full bg-sky-100 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-900 px-2 py-0.5 text-[11px] text-sky-800 dark:text-sky-300 hover:border-red-300 hover:text-red-700" onClick={() => setFGroupIds((prev) => prev.filter((x) => x !== gid))} title="点击移除">
+                            {groupOptions.find((g) => g.id === gid)?.name || gid}
+                            <X className="h-3 w-3" />
+                          </button>
+                        ))}
+                      </div>
                     )}
                   </div>
-                </ScrollArea>
-              </div>
-            )}
+                  {/* ---- 用户多选 ---- */}
+                  <div className="space-y-1.5 rounded-md border p-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-xs font-medium flex items-center gap-1">
+                        <UserIcon className="h-3.5 w-3.5 text-teal-600" /> 用户
+                        {fUserIds.length > 0 && <Badge className="bg-teal-600 hover:bg-teal-600 text-white text-[10px] px-1.5">已选 {fUserIds.length}</Badge>}
+                      </Label>
+                      {fUserIds.length > 0 && (
+                        <button type="button" className="text-[11px] text-muted-foreground hover:text-red-600" onClick={() => setFUserIds([])}>
+                          清空
+                        </button>
+                      )}
+                    </div>
+                    <Input value={userSearch} onChange={(e) => setUserSearch(e.target.value)} placeholder="搜索用户名 / 昵称" className="h-8 text-xs" />
+                    <ScrollArea className="h-36 rounded-md border">
+                      <div className="divide-y">
+                        {filteredUsers.map((u) => {
+                          const on = fUserIds.includes(u.id)
+                          return (
+                            <label key={u.id} className={cn("flex cursor-pointer items-center gap-2 px-2.5 py-1.5 text-sm", on ? "bg-teal-50/70 dark:bg-teal-950/20" : "hover:bg-muted/60")}>
+                              <Checkbox checked={on} onCheckedChange={(v) => setFUserIds((prev) => toggleId(prev, u.id, v === true))} aria-label={`选择用户 ${u.username}`} />
+                              <span className="min-w-0 flex-1 truncate font-mono text-xs">{u.username}</span>
+                              <span className="max-w-24 truncate text-[11px] text-muted-foreground">{u.displayName || "-"}</span>
+                            </label>
+                          )
+                        })}
+                        {filteredUsers.length === 0 && <p className="px-3 py-4 text-center text-xs text-muted-foreground">未找到匹配用户</p>}
+                      </div>
+                    </ScrollArea>
+                    {fUserIds.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {fUserIds.map((uid) => (
+                          <button key={uid} type="button" className="inline-flex items-center gap-1 rounded-full bg-teal-100 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-900 px-2 py-0.5 text-[11px] text-teal-800 dark:text-teal-300 hover:border-red-300 hover:text-red-700" onClick={() => setFUserIds((prev) => prev.filter((x) => x !== uid))} title="点击移除">
+                            {userOptions.find((u) => u.id === uid)?.username || uid}
+                            <X className="h-3 w-3" />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              {fType === "TARGETED" && fGroupIds.length === 0 && fUserIds.length === 0 && (
+                <p className="text-xs text-red-600">指定范围至少选择一个用户组或一位用户（两者可任意组合混合投放）</p>
+              )}
+            </div>
             <div className="space-y-1.5">
               <Label>发布通道（可多选组合；站内信可与其他通道叠加，也可单独发送）</Label>
               <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
@@ -689,11 +743,20 @@ export function AnnouncementsTable({ rows, total, page, pageSize, keyword, sortF
               <span className="text-muted-foreground">范围：</span>
               <span className="font-medium">
                 {detailTarget
-                  ? detailTarget.type === "GLOBAL"
+                  ? detailTarget.type === "GLOBAL" && !(detailTarget.groupIds?.length || detailTarget.userIds?.length)
                     ? "全站用户"
-                    : detailTarget.type === "GROUP"
-                      ? detailTarget.groupName || detailTarget.groupId || "未知组"
-                      : detailTarget.targetUsername || detailTarget.userId || "未知用户"
+                    : [
+                        detailTarget.groupNames?.length
+                          ? detailTarget.groupNames.length > 1
+                            ? `${detailTarget.groupNames.length} 个组（${detailTarget.groupNames.join("、")}）`
+                            : detailTarget.groupNames[0]
+                          : detailTarget.groupName || "",
+                        detailTarget.targetUsernames?.length
+                          ? detailTarget.targetUsernames.length > 1
+                            ? `${detailTarget.targetUsernames.length} 位用户（${detailTarget.targetUsernames.join("、")}）`
+                            : detailTarget.targetUsernames[0]
+                          : detailTarget.targetUsername || "",
+                      ].filter(Boolean).join(" + ") || "-"
                   : "-"}
               </span>
             </p>

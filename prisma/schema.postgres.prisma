@@ -58,8 +58,8 @@ model User {
   tokenPolicy            Json? // { allowCreate, maxPerUser, allowPermanent, maxLifetimeDays, rateLimitPerMin, allowedScopes }（null字段=继承）
   // —— r27：VNC 会话录像策略（用户级覆盖；null=继承用户组/全局默认）——
   vncRecording           Boolean?
-  // —— r28：回放安全策略（水印/导出；null=继承组/全局默认）——
-  vncPlayback            Json? // { watermark: "force"|"on"|"off", allowExport: bool }
+  // —— r28：回放安全策略（水印/导出；null=继承组/全局默认）{ watermark: "force"|"on"|"off", allowExport: bool }——
+  vncPlayback            Json?
   // —— r28：回收站保留期（天，null=继承组/全局默认；0=永久保留）——
   recycleRetentionDays   Int?
   // —— r28：文件传输限速（KB/s，null=继承组/全局；0=不限）——
@@ -216,11 +216,11 @@ model Group {
   idleTimeoutLocked          Boolean @default(false) // true=组内成员不可自行调整闲置超时（沙箱级仍可由管理员改）
   policy           Json? // 组级权限锁 / 生命周期默认策略
   // —— r23：API-Key 精确管控（组级基线；用户级 tokenPolicy 可覆盖，均未设置时用全局默认）——
-  tokenPolicy      Json? // { allowCreate, maxPerUser, allowPermanent, maxLifetimeDays, rateLimitPerMin, allowedScopes }
+  tokenPolicy      Json? // { allowCreate, maxPerUser, allowPermanent, maxLifetimeDays, rateLimitPerMin, allowedScopes }（null字段=继承）
   // —— r27：VNC 会话录像组级基线（null=继承全局默认）——
   vncRecording     Boolean?
-  // —— r28：回放安全组级基线（null=继承全局默认）——
-  vncPlayback      Json? // { watermark: "force"|"on"|"off", allowExport: bool }
+  // —— r28：回放安全组级基线 { watermark, allowExport }（null=继承全局默认）——
+  vncPlayback      Json?
   // —— r28：回收站保留期组级基线（天，null=继承全局默认；0=永久保留）——
   recycleRetentionDays Int?
   // —— r28：文件传输限速组级基线（KB/s，null=继承全局；0=不限）——
@@ -333,6 +333,7 @@ model ApiToken {
   scopes         Json?
   ipWhitelist    Json?
   qpsLimit       Float     @default(0) // 0 = 全局默认
+  rateLimitPerMin Int? // r23：每Key每分钟调用上限覆盖（null=继承策略链：用户/组/全局 mcp.perKeyPerMinute）
   expireAt       DateTime? // null = 永久
   enabled        Boolean   @default(true)
   lastCallAt     DateTime?
@@ -405,6 +406,13 @@ model ScheduleTask {
   lastExecuteAt    DateTime?
   lastResult       String?
   avgDurationMs    Int      @default(0)
+  // —— r23：自定时任务（管理员可创建/编辑/删除的自定义调度，基于内置任务类型注册表）——
+  isCustom         Boolean  @default(false) // true=自定义任务（code 形如 custom:<cuid>）
+  taskType         String?  // 执行的任务类型（TASKS 注册表键；内置任务=null 即用 code 本身）
+  paramsJson       String?  // 任务参数（预留，目前注册表任务无参数）
+  description      String?  // 自定义任务备注说明
+  createdByUserId  String?  // 创建人（自定义任务审计追溯）
+  nextRunAt        DateTime? // r23：按 cron 表达式计算的下次到期时间（到期调度器/接口据此触发）
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 }
@@ -423,6 +431,30 @@ model ScheduleTaskLog {
   outputJson  String?  // r24-a：参数化执行体完整输出（脚本 stdout / 响应体，上限 64KB）
 
   @@index([taskCode, startAt])
+  @@index([status])
+  @@index([startAt])
+}
+
+// —— r23：IP 自动封禁（登录/API-Key 连续失败计数 → 定时封禁；与手工 RiskListRule 黑名单互补）——
+model IpBanRecord {
+  id            String    @id @default(cuid())
+  ip            String
+  source        String    @default("LOGIN") // LOGIN | API_KEY | MANUAL
+  failCount     Int       @default(0) // 窗口内累计失败次数
+  firstFailAt   DateTime?
+  lastFailAt    DateTime?
+  bannedUntil   DateTime? // null=当前未封禁（仅计数）；非空=封禁生效中
+  reason        String?   // 封禁原因
+  note          String?   // 管理员备注（手动封禁/解封说明）
+  createdByUserId String? // 手动封禁操作人
+  unbannedByUserId String? // 手动解封操作人
+  unbannedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([ip])
+  @@index([bannedUntil])
+  @@index([lastFailAt])
 }
 
 model IdempotencyRecord {
@@ -611,17 +643,17 @@ model BrowserWorkspace {
   // —— r24-c：每沙箱输入法/键盘布局偏好（独立 X 显示内生效，跨沙箱互不影响）——
   imeEngine          String?  // 偏好输入法引擎（如 pinyin；空=跟随容器默认）
   kbLayout           String?  // 偏好键盘布局（如 us/cn/de/fr…；空=跟随默认）
+  // —— r27：VNC 会话录像沙箱级覆盖（"on"/"off"；null=继承 用户>组>全局 默认）——
+  recordingOverride  String?
+  // —— r28：回放安全沙箱级覆盖 { watermark: force|on|off, allowExport }（null=继承上层）——
+  vncPlayback Json?
+  // —— r29：17 项硬件权限沙箱级覆盖（稀疏 JSON；null=继承用户/组/全局）——
+  hardwareOverride Json?
   containerRef       String?  // 自托管硬隔离浏览器容器（name/id，防退出看门狗自愈目标）
   hardeningJson      Json?    // 隔离防护快照（只读根FS/CapDrop/noexec下载/独立Profile卷/防退出循环）
   networkPolicyJson  Json?    // 生效网络策略快照 { allowInternalNetwork, allowSecureLocationAccess, source, enforcedAt, domainMode, domainBlack, domainWhite, endpointBlack, endpointWhite }
   startedAt          DateTime? // 最近一次启动时间（运行时长计算基准；停止时冻结增量入 runtimeAccumSec）
   runtimeAccumSec    Int       @default(0) // 累计运行秒数（不含当前运行段）
-  // —— r27：沙箱级录像三态覆盖（on/off/inherit）——
-  recordingOverride  String? // on | off | null=inherit
-  // —— r28：回放安全沙箱级覆盖 { watermark: force|on|off, allowExport }（null=继承上层）——
-  vncPlayback        Json?
-  // —— r29：17 项硬件权限沙箱级覆盖（稀疏 JSON；null=继承用户/组/全局）——
-  hardwareOverride   Json?
   lastActiveAt       DateTime? // 最近活跃（VNC取票/CDP指令/脚本执行触发）
   createdByUserId    String?
   createdAt          DateTime  @default(now())
@@ -652,6 +684,23 @@ model BrowserTemplate {
 
   @@index([scope, deletedAt])
   @@index([userId])
+}
+
+
+// r26：模板版本快照（每次配置变更自动存档 → 差异对比 / 一键回滚）
+model BrowserTemplateVersion {
+  id             String   @id @default(cuid())
+  templateId     String
+  version        Int      // 对应 BrowserTemplate.version（快照时点）
+  configJson     String   // 该版本完整配置快照
+  changeNote     String?  // 变更说明（自动生成或人工备注）
+  changedFields  Json?    // 相对上一版本的变更字段清单（差异对比预计算）
+  createdByUserId String?
+  createdByName  String?
+  createdAt      DateTime @default(now())
+
+  @@unique([templateId, version])
+  @@index([templateId, createdAt])
 }
 
 model BrowserProfileSnapshot {
@@ -993,102 +1042,29 @@ model McpTaskItem {
 // 十、回收站 / 风控 / 公告 / 行为画像 / 自检
 // ============================================================
 
-model IpBanRecord {
+// ============================================================
+// r28：浏览历史 / 书签（沙箱隔离 + 用户隔离，采集引擎周期入库）
+// ============================================================
+
+model BrowseHistoryEntry {
   id            String    @id @default(cuid())
-  ip            String
-  source        String    @default("LOGIN") // LOGIN | API_KEY | MANUAL
-  failCount     Int       @default(0) // 窗口内累计失败次数
-  firstFailAt   DateTime?
-  lastFailAt    DateTime?
-  bannedUntil   DateTime? // null=当前未封禁（仅计数）；非空=封禁生效中
-  reason        String?   // 封禁原因
-  note          String?   // 管理员备注（手动封禁/解封说明）
-  createdByUserId String? // 手动封禁操作人
-  unbannedByUserId String? // 手动解封操作人
-  unbannedAt    DateTime?
+  workspaceId   String
+  workspaceUuid String?   // 冗余 uuid（沙箱克隆/重建后仍可溯源）
+  userId        String?
+  url           String
+  title         String?
+  domain        String?
+  visitAt       DateTime  @default(now())
+  dwellMs       Int       @default(0) // 停留时长（同 URL 连续访问合并累计）
+  incognitoHint Boolean   @default(false)
+  source        String    @default("CDP_POLL") // CDP_POLL | MANUAL
+  deletedAt     DateTime? // 用户本地删除标记（审计另有归档）
   createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
 
-  @@unique([ip])
-  @@index([bannedUntil])
-  @@index([lastFailAt])
-}
-
-model VncRecording {
-  id             String    @id @default(cuid())
-  workspaceId    String
-  workspaceUuid  String?   // 冗余（工作区删除后仍可溯源）
-  workspaceName  String    // 冗余同上（列表可读）
-  userId         String    // 归属用户（录像文件存其用户空间）
-  username       String?   // 冗余（用户删除后可读）
-  sessionId      String    // 录像会话组（= 沙箱进程树 id emb-*/dy-browser-*）
-  segmentIndex   Int       @default(0) // 组内分段序号（0 起）
-  status         String    @default("RECORDING") // RECORDING | COMPLETED | FAILED
-  trigger        String    @default("AUTO") // AUTO（策略自动开录）| MANUAL（管理员手动取证）
-  startedAt      DateTime  @default(now()) // 本段开始
-  endedAt        DateTime? // 本段结束（扫描/终结时回填）
-  durationSec    Int       @default(0)
-  sizeBytes      Int       @default(0)
-  storageKey     String?   // 相对 storage 根路径（recordings/<userId>/<sessionId>/seg-NNN.mp4）
-  resolution     String?
-  fps            Int       @default(12)
-  policySource   String?   // 录像策略命中层（SANDBOX|USER|GROUP|GLOBAL_DEFAULT）
-  note           String?
-  viewCount      Int       @default(0)
-  lastViewedAt   DateTime?
-  downloadCount  Int       @default(0)
-  lastDownloadAt DateTime?
-  metadata       Json?     // 溯源（模板/策略快照/浏览器版本等）
-  deletedAt      DateTime? // 软删 → 回收站
-  purgeAt        DateTime? // 物理清除计划时间（保留期到期）
-  restoredAt     DateTime?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-
-  @@unique([sessionId, segmentIndex]) // 幂等：补行/注册双通道不会产生重复分段行
-  @@index([userId, deletedAt])
-  @@index([workspaceId])
-  @@index([status, deletedAt])
-  @@index([deletedAt, purgeAt])
-  @@index([createdAt])
-}
-
-model BrowserTemplateVersion {
-  id             String   @id @default(cuid())
-  templateId     String
-  version        Int      // 对应 BrowserTemplate.version（快照时点）
-  configJson     String   // 该版本完整配置快照
-  changeNote     String?  // 变更说明（自动生成或人工备注）
-  changedFields  Json?    // 相对上一版本的变更字段清单（差异对比预计算）
-  createdByUserId String?
-  createdByName  String?
-  createdAt      DateTime @default(now())
-
-  @@unique([templateId, version])
-  @@index([templateId, createdAt])
-}
-
-model RecycleBin {
-  id                String    @id @default(cuid())
-  resourceType      String
-  resourceId        String
-  resourceName      String?
-  ownerUserId       String?
-  createdByUserId   String?
-  deletedByUserId   String?
-  deletedByType     String    @default("USER") // USER | ADMIN | SYSTEM
-  reason            String?
-  originalSnapshot  String // 完整原始记录快照，恢复用
-  locked            Boolean   @default(false) // 锁定保护
-  overrideMinutes   Int?      // r28：管理员单条覆盖保留期（分钟；null=策略链解析值）
-  recoverDeadline   DateTime? // 恢复时效限制
-  purgeAt           DateTime? // 物理清除时间
-  restoredAt        DateTime?
-  createdAt         DateTime  @default(now())
-
-  @@index([resourceType, resourceId])
-  @@index([ownerUserId])
-  @@index([purgeAt])
+  @@index([workspaceId, visitAt])
+  @@index([userId, visitAt])
+  @@index([domain])
+  @@index([url])
 }
 
 model BookmarkEntry {
@@ -1112,25 +1088,27 @@ model BookmarkEntry {
   @@index([workspaceId, removedAt])
 }
 
-model BrowseHistoryEntry {
-  id            String    @id @default(cuid())
-  workspaceId   String
-  workspaceUuid String?   // 冗余 uuid（沙箱克隆/重建后仍可溯源）
-  userId        String?
-  url           String
-  title         String?
-  domain        String?
-  visitAt       DateTime  @default(now())
-  dwellMs       Int       @default(0) // 停留时长（同 URL 连续访问合并累计）
-  incognitoHint Boolean   @default(false)
-  source        String    @default("CDP_POLL") // CDP_POLL | MANUAL
-  deletedAt     DateTime? // 用户本地删除标记（审计另有归档）
-  createdAt     DateTime  @default(now())
+model RecycleBin {
+  id                String    @id @default(cuid())
+  resourceType      String
+  resourceId        String
+  resourceName      String?
+  ownerUserId       String?
+  createdByUserId   String?
+  deletedByUserId   String?
+  deletedByType     String    @default("USER") // USER | ADMIN | SYSTEM
+  reason            String?
+  originalSnapshot  String // 完整原始记录快照，恢复用
+  locked            Boolean   @default(false) // 锁定保护
+  overrideMinutes   Int?      // r28：管理员单条覆盖保留期（分钟；null=策略链解析值）
+  recoverDeadline   DateTime? // 恢复时效限制
+  purgeAt           DateTime? // 物理清除时间
+  restoredAt        DateTime?
+  createdAt         DateTime  @default(now())
 
-  @@index([workspaceId, visitAt])
-  @@index([userId, visitAt])
-  @@index([domain])
-  @@index([url])
+  @@index([resourceType, resourceId])
+  @@index([ownerUserId])
+  @@index([purgeAt])
 }
 
 // ============================================================
@@ -1351,9 +1329,11 @@ model Announcement {
   id             String   @id @default(cuid())
   title          String
   content        String
-  type           String   @default("GLOBAL") // GLOBAL | GROUP | USER
-  groupId        String?
-  userId         String?
+  type           String   @default("GLOBAL") // GLOBAL | GROUP | USER（范围多选时的主类型：仅组=GROUP / 含用户=USER / 空=GLOBAL）
+  groupId        String?  // 兼容字段：主组（= groupIds 首项；旧单选数据即此字段）
+  userId         String?  // 兼容字段：主用户（= userIds 首项；旧单选数据即此字段）
+  groupIdsJson   String?  // r30 范围多选：目标用户组 JSON 数组（如 ["gid1","gid2"]；空=未选组）
+  userIdsJson    String?  // r30 范围多选：目标用户 JSON 数组（可与 groupIdsJson 组合=组+用户混合范围）
   displayType    String   @default("POPUP") // POPUP | MARQUEE | FORCE_VIEW（主展示方式 = displayTypes 首项，兼容旧数据）
   displayTypes   String?  // 多选展示方式（JSON 数组，如 ["POPUP","MARQUEE"]；空数组=仅站内信）
   notifyInbox    Boolean  @default(false) // 站内信通道（发送到用户通知铃/站内信）
@@ -1515,6 +1495,54 @@ model CrxInstallStatus {
 }
 
 // CRX 灰度下发任务（分批推送 + 一键回滚；回滚仅超级管理员）
+// ============================================================
+// r27：VNC 会话录像（企业级录屏审计）
+// 生命周期：沙箱启动（策略四级链命中）→ 沙箱进程树内 ffmpeg x11grab 分段
+// 落盘到用户空间 storage/recordings/<userId>/<sandboxId>/seg-NNN.mp4 →
+// 平台扫描任务发现分段并入库（RECORDING→COMPLETED）→ 后台/用户空间回放
+// （HTTP Range 流）→ 软删入回收站 → 恢复/物理清除；保留期与配额由
+// 定时任务自动执行。分组语义：sessionId = 沙箱进程树 id（一次"启动→停止"
+// = 一组录像会话，组内按 segmentIndex 分段，浏览器进程自愈重启不中断）。
+// ============================================================
+model VncRecording {
+  id             String    @id @default(cuid())
+  workspaceId    String
+  workspaceUuid  String?   // 冗余（工作区删除后仍可溯源）
+  workspaceName  String    // 冗余同上（列表可读）
+  userId         String    // 归属用户（录像文件存其用户空间）
+  username       String?   // 冗余（用户删除后可读）
+  sessionId      String    // 录像会话组（= 沙箱进程树 id emb-*/dy-browser-*）
+  segmentIndex   Int       @default(0) // 组内分段序号（0 起）
+  status         String    @default("RECORDING") // RECORDING | COMPLETED | FAILED
+  trigger        String    @default("AUTO") // AUTO（策略自动开录）| MANUAL（管理员手动取证）
+  startedAt      DateTime  @default(now()) // 本段开始
+  endedAt        DateTime? // 本段结束（扫描/终结时回填）
+  durationSec    Int       @default(0)
+  sizeBytes      Int       @default(0)
+  storageKey     String?   // 相对 storage 根路径（recordings/<userId>/<sessionId>/seg-NNN.mp4）
+  resolution     String?
+  fps            Int       @default(12)
+  policySource   String?   // 录像策略命中层（SANDBOX|USER|GROUP|GLOBAL_DEFAULT）
+  note           String?
+  viewCount      Int       @default(0)
+  lastViewedAt   DateTime?
+  downloadCount  Int       @default(0)
+  lastDownloadAt DateTime?
+  metadata       Json?     // 溯源（模板/策略快照/浏览器版本等）
+  deletedAt      DateTime? // 软删 → 回收站
+  purgeAt        DateTime? // 物理清除计划时间（保留期到期）
+  restoredAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([sessionId, segmentIndex]) // 幂等：补行/注册双通道不会产生重复分段行
+  @@index([userId, deletedAt])
+  @@index([workspaceId])
+  @@index([status, deletedAt])
+  @@index([deletedAt, purgeAt])
+  @@index([createdAt])
+}
+
 model CrxGrayTask {
   id              String    @id @default(cuid())
   name            String
@@ -1539,19 +1567,21 @@ model CrxGrayTask {
 
 // ============================================================
 // r29-b：硬件远程监视授权（双模式）
+//   CONSENT 知情模式 —— 用户 VNC 顶部横幅（红点+一键切断）
+//   SILENT  静默特权模式 —— 仅超管可授予；对用户完全无感知；强制审计
 // ============================================================
 
 model MonitorGrant {
   id              String    @id @default(cuid())
   workspaceId     String
-  userId          String?
-  channel         String
-  mode            String
-  reason          String?
+  userId          String? // 被监控用户（冗余，展示与筛选）
+  channel         String // camera | microphone | screenShare
+  mode            String // CONSENT | SILENT
+  reason          String? // 授权理由（SILENT 必填）
   grantedByUserId String
   grantedByName   String
   active          Boolean   @default(true)
-  cutOffBy        String?
+  cutOffBy        String? // USER_CUTOFF | ADMIN_REVOKE | SESSION_END
   startedAt       DateTime  @default(now())
   endedAt         DateTime?
   createdAt       DateTime  @default(now())

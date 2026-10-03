@@ -2,7 +2,7 @@ name: Build & Push Docker Image
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -30,7 +30,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      # ============================================================
+      # 镜像 1：主管理平台完整包（All-In-One：管理后台 + 嵌入式沙箱 + VNC + 网关）
+      # ============================================================
+      - name: Extract metadata (master platform image)
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -41,7 +44,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
+      - name: Build and push (master platform image)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -52,20 +55,60 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # ============================================================
+      # 镜像 2：Worker 分布式部署执行节点（v1.8.0 双包体系；-worker 后缀）
+      # 纯执行节点：无数据库/无后台/无自主决策；MASTER_API_URL+UUID+API_KEY 三凭据启动
+      # ============================================================
+      - name: Extract metadata (worker image)
+        id: meta-worker
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-worker
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push (worker image)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.worker
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-worker.outputs.tags }}
+          labels: ${{ steps.meta-worker.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Image summary
         run: |
-          echo "## 镜像构建完成（单容器全内置）🚀" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "镜像地址（含平台/浏览器/VNC/sing-box 全部组件）：" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "运行（一条命令，零外部服务）：" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "docker run -d --name dockyard --network host \\" >> $GITHUB_STEP_SUMMARY
-          echo "  -e PORT=3000 \\" >> $GITHUB_STEP_SUMMARY
-          echo "  -e AUTH_SECRET=change-me -e ENCRYPTION_KEY=change-me-32bytes \\" >> $GITHUB_STEP_SUMMARY
-          echo "  -v dockyard-data:/app/db -v dockyard-storage:/app/storage \\" >> $GITHUB_STEP_SUMMARY
-          echo "  ghcr.io/${{ github.repository }}:latest" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "## 双镜像构建完成（v1.8.0 起双包体系）🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUM
+          echo "### 镜像 1：主管理平台完整包（All-In-One）" >> $GITHUB_STEP_SUM
+          echo '```' >> $GITHUB_STEP_SUM
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUM
+          echo '```' >> $GITHUB_STEP_SUM
+          echo "运行（一条命令，零外部服务）：" >> $GITHUB_STEP_SUM
+          echo '```bash' >> $GITHUB_STEP_SUM
+          echo "docker run -d --name dockyard --network host \\" >> $GITHUB_STEP_SUM
+          echo "  -e PORT=3000 \\" >> $GITHUB_STEP_SUM
+          echo "  -e AUTH_SECRET=change-me -e ENCRYPTION_KEY=change-me-32bytes \\" >> $GITHUB_STEP_SUM
+          echo "  -v dockyard-data:/app/db -v dockyard-storage:/app/storage \\" >> $GITHUB_STEP_SUM
+          echo "  ghcr.io/${{ github.repository }}:latest" >> $GITHUB_STEP_SUM
+          echo '```' >> $GITHUB_STEP_SUM
+          echo "" >> $GITHUB_STEP_SUM
+          echo "### 镜像 2：Worker 分布式执行节点（-worker 后缀）" >> $GITHUB_STEP_SUM
+          echo '```' >> $GITHUB_STEP_SUM
+          echo "${{ steps.meta-worker.outputs.tags }}" >> $GITHUB_STEP_SUM
+          echo '```' >> $GITHUB_STEP_SUM
+          echo "运行（先在主控注册节点取凭据，三环境变量缺一拒绝启动）：" >> $GITHUB_STEP_SUM
+          echo '```bash' >> $GITHUB_STEP_SUM
+          echo "docker run -d --name dockyard-worker \\" >> $GITHUB_STEP_SUM
+          echo "  -e MASTER_API_URL=http://<主控地址>:3000 \\" >> $GITHUB_STEP_SUM
+          echo "  -e WORKER_NODE_UUID=wn-<注册生成> \\" >> $GITHUB_STEP_SUM
+          echo "  -e WORKER_API_KEY=<注册时一次性展示> \\" >> $GITHUB_STEP_SUM
+          echo "  -v worker-storage:/app/storage \\" >> $GITHUB_STEP_SUM
+          echo "  ghcr.io/${{ github.repository }}-worker:latest" >> $GITHUB_STEP_SUM
+          echo '```' >> $GITHUB_STEP_SUM

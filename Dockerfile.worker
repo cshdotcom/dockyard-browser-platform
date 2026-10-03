@@ -1,0 +1,140 @@
+# ============================================================
+# Dockyard Worker —— 分布式部署纯净执行节点镜像（r30 / v1.8.0）
+#
+# 与主管理平台镜像（Dockerfile，All-In-One 完整包）构成双包体系：
+#   · 主镜像  ：管理/调度/权限/策略/元数据中枢 + 嵌入式沙箱（单机全内置）
+#   · Worker  ：纯执行节点 —— 无数据库 / 无管理后台 / 无自主决策，
+#               100% 受主控指令驱动（10s 心跳 + 文件通道 + 沙箱执行运行时）
+#
+# 必需环境变量（三缺一拒绝启动，见 docker/worker-entrypoint.sh）：
+#   MASTER_API_URL / WORKER_NODE_UUID / WORKER_API_KEY
+#   （凭据由主控「工作节点」页注册时一次性生成展示）
+#
+# 运行时组件（与主镜像沙箱栈同标准）：
+#   chromium + Xvfb + x11vnc + ffmpeg（录像）+ fcitx5 输入法全家桶 +
+#   全语言字体（零乱码）+ util-linux（降权/命名空间）—— Worker 侧可跑
+#   与主容器同语义的沙箱进程树（docker/embedded/sandbox-launch.sh）
+# ============================================================
+
+FROM oven/bun:1.3
+WORKDIR /app
+ARG TARGETARCH
+
+# ---- 沙箱执行运行时（与主镜像同标准：chromium/Xvfb/x11vnc/ffmpeg/字体/输入法）----
+RUN apt-get update -o Acquire::Retries=5 \
+    && apt-get install -y --no-install-recommends \
+      chromium \
+      xvfb \
+      x11vnc \
+      ffmpeg \
+      xauth \
+      procps \
+      psmisc \
+      util-linux \
+      fonts-noto-cjk \
+      fonts-liberation \
+      fonts-noto-core \
+      fonts-noto-mono \
+      fonts-noto-extra \
+      fonts-noto-color-emoji \
+      fonts-unifont \
+      fontconfig \
+      openssl \
+      ca-certificates \
+      wget \
+      iproute2 \
+      fcitx5 \
+      fcitx5-chinese-addons \
+      fcitx5-table \
+      fcitx5-table-other \
+      fcitx5-frontend-gtk3 \
+      fcitx5-frontend-gtk4 \
+      fcitx5-frontend-qt5 \
+      fcitx5-config-qt \
+      x11-xkb-utils \
+      locales \
+      dbus-x11 \
+    && (apt-get install -y --no-install-recommends fcitx5-mozc \
+        || echo "[warn] fcitx5-mozc 不可用，跳过（日文输入以 fcitx5-table 日文码表兜底）") \
+    && (apt-get install -y --no-install-recommends fcitx5-hangul fcitx5-unikey fcitx5-thai fcitx5-arabic \
+        || echo "[warn] 部分语言输入法包不可用，跳过（以键盘布局兜底）") \
+    && (apt-get install -y --no-install-recommends fonts-thai-tlwg fonts-lao fonts-khmeros fonts-sil-padauk fonts-sil-abyssinica \
+        || echo "[warn] 部分区域字体包不可用，跳过（Noto core 已含对应文字体系）") \
+    && for loc in en_US.UTF-8 en_GB.UTF-8 zh_CN.UTF-8 zh_TW.UTF-8 zh_HK.UTF-8 ja_JP.UTF-8 ko_KR.UTF-8 \
+      de_DE.UTF-8 fr_FR.UTF-8 es_ES.UTF-8 es_MX.UTF-8 pt_BR.UTF-8 pt_PT.UTF-8 it_IT.UTF-8 \
+      nl_NL.UTF-8 sv_SE.UTF-8 da_DK.UTF-8 fi_FI.UTF-8 nb_NO.UTF-8 pl_PL.UTF-8 cs_CZ.UTF-8 \
+      hu_HU.UTF-8 ro_RO.UTF-8 el_GR.UTF-8 ru_RU.UTF-8 uk_UA.UTF-8 tr_TR.UTF-8 \
+      ar_SA.UTF-8 he_IL.UTF-8 fa_IR.UTF-8 hi_IN.UTF-8 th_TH.UTF-8 vi_VN.UTF-8 id_ID.UTF-8; do \
+        sed -i "/^# $loc /s/^# //" /etc/locale.gen 2>/dev/null || true; \
+        grep -q "^$loc " /etc/locale.gen 2>/dev/null || echo "$loc UTF-8" >> /etc/locale.gen; \
+      done \
+    && (locale-gen || echo "[warn] locale-gen 部分失败（不影响核心功能）") \
+    # fontconfig 全语言回退链（与主镜像一致：任意文字均有字形零乱码）
+    && printf '%s\n' \
+      '<?xml version="1.0"?>' \
+      '<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">' \
+      '<fontconfig>' \
+      '  <alias binding="strong"><family>sans-serif</family><prefer>' \
+      '    <family>Liberation Sans</family>' \
+      '    <family>Noto Sans</family>' \
+      '    <family>Noto Sans CJK SC</family>' \
+      '    <family>Noto Sans Arabic</family>' \
+      '    <family>Noto Sans Hebrew</family>' \
+      '    <family>Noto Sans Thai</family>' \
+      '    <family>Noto Sans Devanagari</family>' \
+      '    <family>Noto Color Emoji</family>' \
+      '    <family>Unifont</family>' \
+      '  </prefer></alias>' \
+      '  <alias binding="strong"><family>serif</family><prefer>' \
+      '    <family>Liberation Serif</family>' \
+      '    <family>Noto Serif CJK SC</family>' \
+      '    <family>Noto Color Emoji</family>' \
+      '    <family>Unifont</family>' \
+      '  </prefer></alias>' \
+      '  <alias binding="strong"><family>monospace</family><prefer>' \
+      '    <family>Liberation Mono</family>' \
+      '    <family>Noto Sans Mono CJK SC</family>' \
+      '    <family>Noto Color Emoji</family>' \
+      '    <family>Unifont</family>' \
+      '  </prefer></alias>' \
+      '  <alias binding="strong"><family>system-ui</family><prefer>' \
+      '    <family>Liberation Sans</family>' \
+      '    <family>Noto Sans</family>' \
+      '    <family>Noto Sans CJK SC</family>' \
+      '    <family>Noto Color Emoji</family>' \
+      '  </prefer></alias>' \
+      '</fontconfig>' > /etc/fonts/local.conf \
+    && fc-cache -f >/dev/null 2>&1 || true \
+    && rm -rf /var/lib/apt/lists/* \
+    # X socket 目录 + Chromium 托管策略挂载点（沙箱进程树 bind 用）
+    && mkdir -p /tmp/.X11-unix /etc/chromium/policies/managed \
+    && chmod 1777 /tmp/.X11-unix \
+    && echo "{}" > /etc/chromium/policies/managed/dockyard.json
+
+# ---- Worker 守护进程（心跳/文件通道/指令执行；零第三方依赖，bun 原生运行）----
+COPY mini-services/worker ./mini-services/worker
+# ---- 沙箱执行监督脚本（与主镜像同文件：Worker 侧进程树启动语义一致）----
+COPY docker/embedded/sandbox-launch.sh ./docker/embedded/sandbox-launch.sh
+COPY docker/worker-entrypoint.sh ./docker/worker-entrypoint.sh
+RUN chmod +x /app/docker/worker-entrypoint.sh /app/docker/embedded/sandbox-launch.sh \
+    && mkdir -p /app/storage/dfs /app/storage/sandboxes /app/storage/homes \
+      /app/storage/recordings /app/storage/system \
+    && echo "dockyard-worker" > /app/.app-marker
+
+ENV NODE_ENV=production \
+    WORKER_HEALTH_PORT=3007 \
+    WORKER_DFS_DIR=/app/storage/dfs \
+    WORKER_HEARTBEAT_SEC=10 \
+    TZ=Asia/Shanghai
+
+# 执行节点持久化卷：DFS 文件分片 / 沙箱 Profile / 录像分段
+VOLUME ["/app/storage"]
+
+# 健康检查：Worker 自带 /health（nodeUuid/版本/心跳状态/是否被主控失效）
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -q -O /dev/null --timeout=3 "http://127.0.0.1:${WORKER_HEALTH_PORT}/health" || exit 1
+
+EXPOSE 3007
+
+# 守护式入口：三环境变量校验 + 崩溃退避重启 + 驱逐识别（不再冲击主控）
+ENTRYPOINT ["/app/docker/worker-entrypoint.sh"]

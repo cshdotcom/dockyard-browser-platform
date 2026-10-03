@@ -1,5 +1,6 @@
 import { db } from "@/lib/db"
 import { requireAuth, userGroupIds } from "@/lib/permissions"
+import { announcementTargetsUser } from "@/lib/announcement-targets"
 import { fmtDate } from "@/lib/utils-server"
 import { Megaphone, Globe2, Users } from "lucide-react"
 import { StatCard } from "@/components/shared/confirm"
@@ -26,29 +27,22 @@ export default async function AnnouncementsPage({
   const focusId = typeof focusRaw === "string" && focusRaw ? focusRaw : Array.isArray(focusRaw) ? focusRaw[0] : undefined
 
   const now = new Date()
-  const base = {
-    enabled: true,
-    OR: [
-      { type: "GLOBAL" },
-      { type: "GROUP", groupId: { in: gids } },
-      { type: "USER", userId: ctx.userId },
-    ],
-  }
-  // 列表/弹窗/跑马灯仅展示时间窗内公告（startAt<=now 且未过期）；统计卡同样按时间窗
-  const timeWindow = {
-    AND: [
-      { OR: [{ startAt: null }, { startAt: { lte: now } }] },
-      { OR: [{ endAt: null }, { endAt: { gt: now } }] },
-    ],
-  }
-  const where = { ...base, ...timeWindow }
-
-  const [anns, globalCount, groupCount, userCount] = await Promise.all([
-    db.announcement.findMany({ where, orderBy: { createdAt: "desc" } }),
-    db.announcement.count({ where: { ...base, ...timeWindow, type: "GLOBAL" } }),
-    db.announcement.count({ where: { ...base, ...timeWindow, type: "GROUP", groupId: { in: gids } } }),
-    db.announcement.count({ where: { ...base, ...timeWindow, type: "USER", userId: ctx.userId } }),
-  ])
+  // r30：范围多选 union 匹配 —— 先取时间窗内全部启用公告（量级小），
+  // 内存匹配 GLOBAL / 组多选任一命中 / 用户多选命中（含组+用户混合范围）
+  const candidates = await db.announcement.findMany({
+    where: {
+      enabled: true,
+      AND: [
+        { OR: [{ startAt: null }, { startAt: { lte: now } }] },
+        { OR: [{ endAt: null }, { endAt: { gt: now } }] },
+      ],
+    },
+    orderBy: { createdAt: "desc" },
+  })
+  const anns = candidates.filter((a) => announcementTargetsUser(a, ctx.userId, gids))
+  const globalCount = anns.filter((a) => a.type === "GLOBAL").length
+  const groupCount = anns.filter((a) => a.type !== "GLOBAL" && a.type !== "USER").length
+  const userCount = anns.filter((a) => a.type === "USER").length
 
   const reads = anns.length
     ? await db.announcementRead.findMany({ where: { userId: ctx.userId, announcementId: { in: anns.map((a) => a.id) } } })
