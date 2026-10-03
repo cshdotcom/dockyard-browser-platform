@@ -1,8 +1,10 @@
 // r27 浏览器实测辅助：留下一份真实录像数据（不清理）供 UI 回放验证
 // 用后运行 cleanup：bunx tsx scripts/qa-r27-browser-cleanup.ts
+import { writeFileSync, chmodSync } from "fs"
+import { PrismaClient } from "@prisma/client"
+
 process.env.EMBEDDED_BROWSER_BIN = process.env.HOME + "/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome"
 process.env.EMBEDDED_X11VNC_BIN = "/tmp/dy-r27e-x11vnc-shim.sh"
-import { writeFileSync, chmodSync } from "fs"
 const SHIM = `#!/bin/sh
 prev=""; port=""
 for a in "$@"; do
@@ -31,7 +33,6 @@ while True:
 writeFileSync(process.env.EMBEDDED_X11VNC_BIN, SHIM)
 chmodSync(process.env.EMBEDDED_X11VNC_BIN, 0o755)
 
-const { PrismaClient } = require("@prisma/client")
 const db = new PrismaClient()
 
 async function main() {

@@ -64,7 +64,8 @@ async function main() {
   await db.groupUser.create({ data: { groupId: grp2.id, userId: user2.id } })
   p = await resolveRecordingPolicy(user2.id)
   const globalDefault = await db.systemConfig.findUnique({ where: { key: "vnc.recordingEnabled" } })
-  ok(p.source === "GLOBAL_DEFAULT" && p.enabled === (globalDefault?.value === true), "全局默认回退（source=GLOBAL_DEFAULT）", JSON.stringify(p))
+  const globalEnabled = globalDefault ? JSON.parse(globalDefault.valueJson) === true : false
+  ok(p.source === "GLOBAL_DEFAULT" && p.enabled === globalEnabled, "全局默认回退（source=GLOBAL_DEFAULT）", JSON.stringify(p))
 
   // 1.5 继承链向上（父组显式）
   const parentGrp = await db.group.create({ data: { name: "QA-R27-父组-" + Date.now(), vncRecording: true } })

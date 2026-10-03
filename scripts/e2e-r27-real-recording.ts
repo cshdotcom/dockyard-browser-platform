@@ -5,7 +5,8 @@
 // 运行：bunx tsx scripts/e2e-r27-real-recording.ts
 // ============================================================
 import { PrismaClient } from "@prisma/client"
-import { existsSync, statSync, readdirSync, rmSync } from "fs"
+import { existsSync, statSync, readdirSync, rmSync, readFileSync } from "fs"
+import { execSync } from "child_process"
 import { join } from "path"
 
 // 开发环境组件：chromium = playwright 发行版；x11vnc = python 监听垫片（与 r25d 冒烟同模式）
@@ -110,12 +111,12 @@ async function main() {
   if (!existsSync(segPath) || statSync(segPath).size <= 2000) {
     // 诊断：打印 ffmpeg 日志与沙箱日志尾部
     try {
-      const supLog2 = String(require("fs").readFileSync(join(storage, "sandboxes", sb.id, "logs", "ffmpeg.log")))
+      const supLog2 = String(readFileSync(join(storage, "sandboxes", sb.id, "logs", "ffmpeg.log")))
       console.log("   [diag] ffmpeg.log:", supLog2.slice(-400))
     } catch { console.log("   [diag] ffmpeg.log 不存在") }
     try {
-      console.log("   [diag] ffmpeg 进程:", String(require("child_process").execSync("ps aux | grep '[f]fmpeg' | head -2").toString()).slice(0, 500))
-      console.log("   [diag] X 进程:", String(require("child_process").execSync("ps aux | grep '[X]vfb' | head -2").toString()).slice(0, 300))
+      console.log("   [diag] ffmpeg 进程:", String(execSync("ps aux | grep '[f]fmpeg' | head -2").toString()).slice(0, 500))
+      console.log("   [diag] X 进程:", String(execSync("ps aux | grep '[X]vfb' | head -2").toString()).slice(0, 300))
     } catch { /* ignore */ }
   }
   const completedSegs = files.filter((f) => f.startsWith("seg-") && f !== "seg-000.mp4" ? statSync(join(recDir, f)).size > 2000 : false)
@@ -130,17 +131,17 @@ async function main() {
     policy: { allowInternalNetwork: false, allowSecureLocationAccess: false, source: "GLOBAL_DEFAULT", resolvedAt: new Date().toISOString() },
     extraManagedPolicy: { ...(exitGuardManagedPolicy("fullscreen") as Record<string, unknown>), MetricsReportingEnabled: false },
   })
-  const pfJson = pf ? JSON.parse(require("fs").readFileSync(pf, "utf8")) : {}
+  const pfJson = pf ? JSON.parse(readFileSync(pf, "utf8")) : {}
   ok(pfJson.BrowserSignin === 0 && pfJson.SyncDisabled === true && pfJson.IncognitoModeAvailability === 1 && pfJson.MetricsReportingEnabled === false, "托管策略文件真实落盘含防退出附加策略 + 模板策略项")
 
   // 内层脚本含 --start-fullscreen 参数
   const sandboxDir = join(storage, "sandboxes", sb.id)
   const innerPath = join(sandboxDir, "chrome-inner.sh")
-  const inner = existsSync(innerPath) ? String(require("fs").readFileSync(innerPath)) : ""
+  const inner = existsSync(innerPath) ? String(readFileSync(innerPath)) : ""
   ok(inner.includes("--start-fullscreen") && inner.includes("--noerrdialogs"), "chromium 启动参数含 fullscreen 守卫", inner.slice(0, 80))
 
   // supervisor 日志含录像启动行
-  const supLog = existsSync(join(sandboxDir, "logs", "supervisor.log")) ? String(require("fs").readFileSync(join(sandboxDir, "logs", "supervisor.log"))) : ""
+  const supLog = existsSync(join(sandboxDir, "logs", "supervisor.log")) ? String(readFileSync(join(sandboxDir, "logs", "supervisor.log"))) : ""
   ok(supLog.includes("VNC 录像已启动") || supLog.includes("录像已启动"), "监督日志确认 ffmpeg 已启动", supLog.split("\n").slice(-3).join(" | "))
 
   console.log("\n[3] 停止沙箱 → 终结 → 流媒体 API 验证")
@@ -169,7 +170,7 @@ async function main() {
   const r2 = await fetch(`${base}/api/recordings/stream/${recPick.id}?token=${encodeURIComponent(token)}`, {
     headers: { Range: "bytes=0-1023" },
   })
-  ok(r2.status === 206 && r2.headers.get("content-range")?.startsWith("bytes 0-1023/"), "Range 请求 206 分片", `${r2.status} ${r2.headers.get("content-range")}`)
+  ok(r2.status === 206 && (r2.headers.get("content-range") || "").startsWith("bytes 0-1023/"), "Range 请求 206 分片", `${r2.status} ${r2.headers.get("content-range")}`)
   ok((await r2.arrayBuffer()).byteLength === 1024, "分片长度精确 1024B")
 
   // 下载模式
