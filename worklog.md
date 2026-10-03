@@ -1019,3 +1019,21 @@ Work Log:
 Stage Summary:
 - 新架构文档主体全部落地（打印机部分按指令跳过）：Master/Worker 双包基础（前提交）+17 项硬件权限四级链（策略注入+管理 UI+审计）+双模式监控（知情横幅一键切断/静默特权仅超管强制审计）+实时监控中心（16 宫格轮巡+CDP 快照/跳转/关标签/消息/键鼠注入互斥+浮动水印）+资源监控与 10s×3 失联自动迁移+虚拟媒体投递（音视频定点秒级 ffplay 投屏+图片恒定帧虚拟摄像头）+分布式文件存储 9 大条件（绑定强制落地/10MB 直沉/中转 24h/协作下沉/冷热分层/水位调度/多副本/副本修复/迁移随迁）+行为监控时间轴四源统一
 - Worker 纯执行节点扩展文件通道（sha256 校验+穿越拒绝）；30 项定时任务；QA 数据清理归零；5 张浏览器截图取证
+
+---
+Task ID: 29-final
+Agent: main
+Task: r29 终态 — CI 全绿监督 + GHCR 发布确认 + QA 收尾
+
+Work Log:
+- 【提交链】e573b38（r29 基础：WorkNode 注册/心跳/驱逐 + Worker 纯净执行节点 + 17 项硬件权限策略链基础）→ cd917a3（r29 主体 54 文件：监控中心/双模式/媒体投递/分布式存储/行为时间轴等）
+- 【CI 终态】cd917a3：CI Lint ✅ success + Build & Push Docker Image ✅ success（prisma schema 变更层重建 ~13 分钟）；8538ab2（r28）双绿历史对照
+- 【GHCR 发布确认】Packages API：10:46:43Z 发布 main + latest 双 tag（含 r29 全部组件：监控中心/分布式存储/Worker 文件通道/ffmpeg ffplay 投递链）
+- 【QA 收尾】qa-r29-screenshots.zip（5 张 PNG 474KB）：监控中心宫格/DFS 面板 9 条件统计/config HARDWARE 全局默认档对话框（17 项四开关）/用户行菜单硬件权限对话框/Worker 节点页；QA 数据清理归零（工作区 0/用户 9 清/媒体投递 0/监控授权 0/文件对象 0/节点 0——崩溃跑遗留 17 工作区全清）
+- 【环境】dev 服务器中途被沙箱回收 → daemon-restart.py 守护化恢复（app 200）；三服务守护健康
+- 【种子修正】systemConfig upsert 的 update 分支补 category/valueType 幂等修正（HARDWARE 分类历史行修复；value 不覆盖运维改值）
+
+Stage Summary:
+- r29 全部交付并发布：Master/Worker 双包架构主体（17 项硬件权限四级链/双模式监控/实时监控中心 16 宫格+CDP 控制/资源失联自动迁移/虚拟媒体投递/分布式文件存储 9 大条件/行为时间轴/Worker 文件通道）；打印机部分按用户指令整体跳过
+- 质量证据：冒烟 8 套 159 断言全过（worknode 16 + hardware 31 + monitor 24 + worknode-monitor 21 + media-cast 19 + dfs 32 + timeline 8 + clipboard-isolation 8）+ r28 回归 50 断言 + 浏览器 E2E 5 链路 5 截图 + tsc 零新增 + eslint 0/0 + build 76 路由全绿 + CI 双绿 + GHCR 发布确认
+- CI 状态：cd917a3 CI Lint ✅ + Build & Push ✅；GHCR main/latest 双 tag 在位
