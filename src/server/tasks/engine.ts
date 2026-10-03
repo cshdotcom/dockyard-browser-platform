@@ -16,6 +16,7 @@ import { resolveDomainPolicyForUser } from "@/lib/domain-policy"
 import { resolveEndpointPolicyForUser } from "@/lib/endpoint-policy"
 import { activateDueScheduledDeployments } from "@/lib/policy-engine"
 import { crxInstallPoll, crxGrayRollout } from "./crx-engine"
+import { scanUnknownExtensions, checkPolicyTampering, scanSecurityBaseline } from "@/lib/crx-lifecycle"
 import { nextCronRun } from "@/lib/cron-next"
 import { runShellExecutor, runChainExecutor, runWebhookExecutor, CUSTOM_EXEC_TASK_TYPES } from "./custom-exec"
 
@@ -673,6 +674,24 @@ export const TASKS: Record<string, (log: (m: string) => void, params?: unknown) 
       n++
     }
     return { itemsProcessed: n, summary: `到期自动解冻${n}个冻结沙箱` }
+  },
+
+  // 22. r26：未知扩展扫描（真实容器 CDP 枚举 - 五级合并策略 → 未授权扩展 → DANGER 审计 + CRITICAL 告警）
+  async crx_unknown_scan(log) {
+    const r = await scanUnknownExtensions(log)
+    return { itemsProcessed: r.scanned, summary: `扫描 ${r.scanned} 个运行容器，发现 ${r.findings.length} 个未知扩展${r.findings.length > 0 ? "（已告警+审计）" : ""}` }
+  },
+
+  // 23. r26：策略文件防篡改校验（SHA-256 哈希对账；篡改 → DANGER 审计 + CRITICAL 告警）
+  async policy_tamper_check(log) {
+    const r = await checkPolicyTampering(log)
+    return { itemsProcessed: r.checked, summary: `对账 ${r.checked} 个策略文件${r.missing > 0 ? `（${r.missing} 个文件缺失属停止态正常）` : ""}，发现 ${r.tampered.length} 处篡改` }
+  },
+
+  // 24. r26：安全基线扫描（十维合规评分落 hardeningJson.baselineScore；低分告警）
+  async baseline_scan(log) {
+    const r = await scanSecurityBaseline(log)
+    return { itemsProcessed: r.scanned, summary: `扫描 ${r.scanned} 个活跃沙箱，平均基线分 ${r.averageScore ?? "-"}，低分 ${r.lowScore} 个${r.lowScore > 0 ? "（已告警）" : ""}` }
   },
 
   // ---- r24-a：参数化自定义执行体（执行内容完全放开；paramsJson 携带参数）----

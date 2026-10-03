@@ -12,6 +12,7 @@ import { requireAuth, requirePermission, requireWritableMode, userGroupIds, requ
 import { writeAudit } from "@/lib/audit"
 import { zodValidate, zId } from "@/lib/validators"
 import { moveToRecycle } from "@/lib/recycle"
+import { diffTemplateConfig, isCrxRelatedField, parseTemplateConfig, fmtTemplateVal, type TemplateVersionDiffItem } from "@/lib/template-diff"
 import { trackBehavior } from "@/lib/risk"
 import { bizError, ErrorCode } from "@/lib/errors"
 
@@ -103,6 +104,18 @@ export async function upsertTemplateAction(input: unknown): Promise<ActionResult
         where: { id: p.id },
         data: { ...data, version: before.version + 1 },
       })
+      // r26：版本快照自动存档（含与上一版本的字段级差异预计算）
+      const changedFields = diffTemplateConfig(before.configJson, data.configJson)
+      await db.browserTemplateVersion.upsert({
+        where: { templateId_version: { templateId: p.id, version: updated.version } },
+        create: {
+          templateId: p.id, version: updated.version, configJson: data.configJson,
+          changeNote: changedFields.length ? `变更字段：${changedFields.join("、")}` : "无配置字段变化（仅元数据更新）",
+          changedFields: changedFields as unknown as Prisma.InputJsonValue,
+          createdByUserId: ctx.userId, createdByName: ctx.username,
+        },
+        update: { configJson: data.configJson, changedFields: changedFields as unknown as Prisma.InputJsonValue },
+      }).catch(() => null) // 快照失败不阻断主链路
       await writeAudit({
         operatorUserId: ctx.userId,
         operatorName: ctx.username,
@@ -120,6 +133,14 @@ export async function upsertTemplateAction(input: unknown): Promise<ActionResult
     const created = await db.browserTemplate.create({
       data: { ...data, createdByUserId: ctx.userId },
     })
+    // r26：初始版本快照 v1
+    await db.browserTemplateVersion.create({
+      data: {
+        templateId: created.id, version: 1, configJson: data.configJson,
+        changeNote: "初始版本", changedFields: [],
+        createdByUserId: ctx.userId, createdByName: ctx.username,
+      },
+    }).catch(() => null)
     await writeAudit({
       operatorUserId: ctx.userId,
       operatorName: ctx.username,
@@ -297,5 +318,140 @@ export async function importTemplatesAction(input: unknown): Promise<ActionResul
     }
     await trackBehavior(ctx.userId, "CREATE").catch(() => {})
     return { created, skipped: skipped.length }
+  })
+}
+
+// ============================================================
+// r26：模板版本历史 / 差异对比（CRX 变更高亮）/ 版本回滚
+// （diffTemplateConfig 等纯函数位于 src/lib/template-diff.ts —— use server 文件禁止同步导出）
+// ============================================================
+
+export async function listTemplateVersionsAction(input: unknown): Promise<ActionResult<{
+  templateId: string
+  templateName: string
+  currentVersion: number
+  versions: Array<{ version: number; changeNote: string | null; changedFields: string[]; createdByName: string | null; createdAt: string }>
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { templateId } = zodValidate(z.object({ templateId: zId }), input)
+    const tpl = await assertTemplateVisible(ctx.userId, templateId)
+    const versions = await db.browserTemplateVersion.findMany({
+      where: { templateId },
+      orderBy: { version: "desc" },
+      take: 50,
+    })
+    return {
+      templateId: tpl.id,
+      templateName: tpl.name,
+      currentVersion: tpl.version,
+      versions: versions.map((v) => ({
+        version: v.version,
+        changeNote: v.changeNote,
+        changedFields: Array.isArray(v.changedFields) ? (v.changedFields as string[]) : [],
+        createdByName: v.createdByName,
+        createdAt: v.createdAt.toISOString(),
+      })),
+    }
+  })
+}
+
+export async function diffTemplateVersionsAction(input: unknown): Promise<ActionResult<{
+  templateId: string
+  fromVersion: number
+  toVersion: number
+  items: TemplateVersionDiffItem[]
+  crxChangeCount: number
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { templateId, fromVersion, toVersion } = zodValidate(z.object({
+      templateId: zId,
+      fromVersion: z.number().int().min(1),
+      toVersion: z.number().int().min(1),
+    }), input)
+    const tpl = await assertTemplateVisible(ctx.userId, templateId)
+    const [fromV, toV] = await Promise.all([
+      db.browserTemplateVersion.findUnique({ where: { templateId_version: { templateId, version: fromVersion } } }),
+      db.browserTemplateVersion.findUnique({ where: { templateId_version: { templateId, version: toVersion } } }),
+    ])
+    // 目标版本缺失时回退当前模板配置（对比最新态）
+    const fromCfg = fromV ? parseTemplateConfig(fromV.configJson) : parseTemplateConfig(tpl.configJson)
+    const toCfg = toV ? parseTemplateConfig(toV.configJson) : parseTemplateConfig(tpl.configJson)
+
+    const items: TemplateVersionDiffItem[] = []
+    const keys = new Set([...Object.keys(fromCfg), ...Object.keys(toCfg)])
+    for (const k of keys) {
+      const inFrom = k in fromCfg
+      const inTo = k in toCfg
+      if (inFrom && !inTo) items.push({ field: k, before: fmtTemplateVal(fromCfg[k]), after: "（已移除）", kind: "REMOVED", crxRelated: isCrxRelatedField(k) })
+      else if (!inFrom && inTo) items.push({ field: k, before: "（未设置）", after: fmtTemplateVal(toCfg[k]), kind: "ADDED", crxRelated: isCrxRelatedField(k) })
+      else if (JSON.stringify(fromCfg[k]) !== JSON.stringify(toCfg[k])) {
+        items.push({ field: k, before: fmtTemplateVal(fromCfg[k]), after: fmtTemplateVal(toCfg[k]), kind: "CHANGED", crxRelated: isCrxRelatedField(k) })
+      }
+    }
+    // variables 键级细分
+    const fromVars = (fromCfg.variables as Record<string, string> | null) || {}
+    const toVars = (toCfg.variables as Record<string, string> | null) || {}
+    const varKeys = new Set([...Object.keys(fromVars), ...Object.keys(toVars)])
+    for (const vk of varKeys) {
+      if (fromVars[vk] !== toVars[vk]) {
+        items.push({
+          field: `variables.${vk}`,
+          before: fromVars[vk] ?? "（未设置）",
+          after: toVars[vk] ?? "（已移除）",
+          kind: !(vk in fromVars) ? "ADDED" : !(vk in toVars) ? "REMOVED" : "CHANGED",
+          crxRelated: /crx|extension/i.test(vk),
+        })
+      }
+    }
+    return {
+      templateId,
+      fromVersion: fromV?.version ?? fromVersion,
+      toVersion: toV?.version ?? toVersion,
+      items,
+      crxChangeCount: items.filter((i) => i.crxRelated).length,
+    }
+  })
+}
+
+export async function rollbackTemplateVersionAction(input: unknown): Promise<ActionResult<{ version: number }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const { templateId, targetVersion } = zodValidate(z.object({
+      templateId: zId,
+      targetVersion: z.number().int().min(1),
+    }), input)
+    const tpl = await db.browserTemplate.findFirst({ where: { id: templateId, deletedAt: null } })
+    if (!tpl) throw bizError(ErrorCode.NOT_FOUND, "模板不存在或已删除")
+    const isOwner = tpl.userId === ctx.userId
+    const isAdmin = ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN"
+    if (!isOwner && !(isAdmin && tpl.scope === "GLOBAL")) throw bizError(ErrorCode.FORBIDDEN, "只能回滚自己创建的模板")
+    const snap = await db.browserTemplateVersion.findUnique({ where: { templateId_version: { templateId, version: targetVersion } } })
+    if (!snap) throw bizError(ErrorCode.NOT_FOUND, "目标版本快照不存在")
+
+    const newVersion = tpl.version + 1
+    const changedFields = diffTemplateConfig(tpl.configJson, snap.configJson)
+    await db.browserTemplate.update({ where: { id: templateId }, data: { configJson: snap.configJson, version: newVersion } })
+    await db.browserTemplateVersion.upsert({
+      where: { templateId_version: { templateId, version: newVersion } },
+      create: {
+        templateId, version: newVersion, configJson: snap.configJson,
+        changeNote: `回滚至 v${targetVersion}${changedFields.length ? `（恢复字段：${changedFields.join("、")}）` : "（无字段差异）"}`,
+        changedFields: changedFields as unknown as Prisma.InputJsonValue,
+        createdByUserId: ctx.userId, createdByName: ctx.username,
+      },
+      update: { configJson: snap.configJson },
+    })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "TEMPLATE_VERSION_ROLLBACK",
+      resourceType: "TEMPLATE", resourceId: templateId, resourceName: tpl.name,
+      ownerUserId: tpl.userId ?? ctx.userId,
+      before: { version: tpl.version, configJson: tpl.configJson },
+      after: { version: newVersion, restoredFromVersion: targetVersion, configJson: snap.configJson },
+      severity: "WARN",
+    })
+    return { version: newVersion }
   })
 }

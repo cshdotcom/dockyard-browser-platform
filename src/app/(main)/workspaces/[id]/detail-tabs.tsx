@@ -523,6 +523,34 @@ function IsolationPanel({ hardening, containerRef }: { hardening: Record<string,
         </CardDescription>
       </CardHeader>
       <CardContent>
+        {/* r26：安全基线评分（baseline_scan 任务周期计算落库） */}
+        {typeof h.baselineScore === "number" && (
+          <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border bg-gradient-to-r from-slate-50 to-slate-100/60 p-3">
+            <div className="flex items-baseline gap-1">
+              <span className={cn(
+                "text-3xl font-bold tabular-nums",
+                h.baselineScore >= 90 ? "text-emerald-600" : h.baselineScore >= 70 ? "text-amber-600" : "text-red-600",
+              )}>{h.baselineScore}</span>
+              <span className="text-sm text-muted-foreground">/ 100</span>
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-semibold">安全基线评分（十维）</div>
+              <div className="text-[11px] text-muted-foreground">
+                硬隔离/网络策略/文件策略/CRX 高危/Profile 隔离等十个维度加权
+                {h.baselineCheckedAt ? ` · 最近扫描 ${new Date(String(h.baselineCheckedAt)).toLocaleString("zh-CN")}` : ""}
+                {Array.isArray(h.baselineFailed) && (h.baselineFailed as string[]).length > 0
+                  ? ` · 未通过：${(h.baselineFailed as string[]).join("、")}`
+                  : " · 全部通过"}
+              </div>
+            </div>
+            <div className="h-2 w-32 overflow-hidden rounded-full bg-slate-200">
+              <div
+                className={cn("h-full rounded-full transition-all", h.baselineScore >= 90 ? "bg-emerald-500" : h.baselineScore >= 70 ? "bg-amber-500" : "bg-red-500")}
+                style={{ width: `${Math.min(100, Math.max(0, h.baselineScore))}%` }}
+              />
+            </div>
+          </div>
+        )}
         <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
           {items.map((it) => (
             <div key={it.title} className={cn("flex gap-2 rounded-lg border p-2.5", it.ok ? "border-emerald-500/25 bg-emerald-500/[0.06]" : "border-slate-200 bg-muted/30")}>

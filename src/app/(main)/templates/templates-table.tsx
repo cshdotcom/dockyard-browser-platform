@@ -6,7 +6,7 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Copy, Download, FileCode2, GitBranch, Loader2, Pencil, Plus, Trash2, Upload } from "lucide-react"
+import { Copy, Download, FileCode2, GitBranch, History, Loader2, Pencil, Plus, Trash2, Upload } from "lucide-react"
 import { DataTable } from "@/components/shared/data-table"
 import { ConfirmDialog } from "@/components/shared/confirm"
 import { Badge } from "@/components/ui/badge"
@@ -22,6 +22,7 @@ import {
   deleteTemplateAction,
   importTemplatesAction,
 } from "@/server/actions/templates"
+import { TemplateVersionHistoryDialog } from "./version-history-dialog"
 
 export interface TemplateConfig {
   ua: string
@@ -82,6 +83,7 @@ export function TemplatesTable({ rows, total, page, pageSize, keyword, sortField
   const [importText, setImportText] = React.useState("")
   const [importing, setImporting] = React.useState(false)
   const [submitting, setSubmitting] = React.useState(false)
+  const [historyTarget, setHistoryTarget] = React.useState<TemplateRow | null>(null)
 
   // 表单状态
   const [fName, setFName] = React.useState("")
@@ -354,6 +356,15 @@ export function TemplatesTable({ rows, total, page, pageSize, keyword, sortField
             >
               {busy === `copy-${row.id}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />}
             </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setHistoryTarget(row)}
+              title="版本历史与差异对比（CRX 变更高亮）"
+              disabled={busy !== ""}
+            >
+              <History className="h-4 w-4" />
+            </Button>
             <a
               href={`/api/export/template?id=${row.id}`}
               className="inline-flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -556,6 +567,14 @@ export function TemplatesTable({ rows, total, page, pageSize, keyword, sortField
         confirmText="确认删除"
         destructive
         onConfirm={doDelete}
+      />
+
+      {/* r26：版本历史弹窗（快照/差异对比/回滚） */}
+      <TemplateVersionHistoryDialog
+        open={!!historyTarget}
+        onOpenChange={(v) => !v && setHistoryTarget(null)}
+        template={historyTarget ? { id: historyTarget.id, name: historyTarget.name, version: historyTarget.version } : null}
+        canRollback={!!historyTarget && canEdit(historyTarget)}
       />
     </div>
   )

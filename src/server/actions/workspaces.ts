@@ -1241,3 +1241,125 @@ export async function restartBrowserProcessAction(input: unknown): Promise<Actio
     return result
   })
 }
+
+// ============================================================
+// r26：沙箱克隆（配置全量复制 + CRX 沙箱级策略同步 + 新实例 STOPPED）
+// 约束（需求文档「克隆 CRX 同步」）：SANDBOX 级单插件策略条目逐条复制；
+// 共享/链接/会话句柄/运行统计/Profile 快照引用不复制（新实例独立生命周期）。
+// ============================================================
+const cloneSchema = z.object({
+  sourceId: z.string().min(1).max(64),
+  name: z.string().min(1).max(80).optional(), // 缺省 = 源名 + " (副本)"
+})
+
+export async function cloneWorkspaceAction(input: unknown): Promise<ActionResult<{ id: string; uuid: string; name: string; copiedCrxEntries: number }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    await requireWritableMode()
+    const p = zodValidate(cloneSchema, input)
+
+    // 源工作区可见性：所有者 / ADMIN+ / 被共享 OPERATE
+    const src = await db.browserWorkspace.findFirst({
+      where: { id: p.sourceId, deletedAt: null, OR: [{ status: { not: "DESTROYED" } }] },
+    })
+    if (!src) throw new Error("源工作区不存在或已销毁")
+    let canClone = src.userId === ctx.userId || isAdminRole(ctx.role)
+    if (!canClone) {
+      const share = await db.workspaceShare.findFirst({
+        where: { workspaceId: src.id, targetUserId: ctx.userId, permission: "OPERATE", revokedAt: null },
+      })
+      canClone = !!share
+    }
+    if (!canClone) throw new Error("仅所有者、被共享操作权限用户或管理员可克隆该沙箱")
+
+    // 幂等 + 限速
+    const idem = await idempotencyCheck(ctx.userId, "clone_workspace", { sourceId: p.sourceId }, 8000)
+    if (idem.repeated) throw new Error("请勿重复提交，克隆正在进行中")
+    if (!rateLimit(`wsclone:${ctx.userId}`, 5, 60_000).allowed) throw new Error("克隆过于频繁，请稍后再试")
+
+    // 配额校验（克隆占用与创建同等配额）
+    const quota = await checkSessionQuota(ctx.userId, src.mode === "cdp_light" ? "sessions" : "novncSessions")
+    if (!quota.ok) throw new Error(quota.reason || "配额不足")
+
+    // 代理节点权限继承校验（克隆者必须对源代理节点仍有权限，否则清空代理）
+    let proxyNodeId = src.proxyNodeId
+    if (proxyNodeId) {
+      const node = await db.proxyNode.findFirst({
+        where: { id: proxyNodeId, deletedAt: null, OR: [{ type: "internal_singbox" }, { status: { not: "DISABLED" } }] },
+        select: { id: true, type: true, labels: true },
+      })
+      // 校验代理节点访问权限（与创建同语义：checkProxyAccess 逻辑简化为节点可用性 + 用户组白名单）
+      if (!node) proxyNodeId = null
+      else {
+        const gids = await userGroupIds(ctx.userId)
+        const labels = (node as unknown as { labels?: unknown }).labels
+        const nodeLabels = Array.isArray(labels) ? (labels as string[]) : []
+        const restricted = nodeLabels.filter((l) => l.startsWith("group:"))
+        if (restricted.length > 0 && ctx.role === "USER" && !restricted.some((l) => gids.includes(l.slice(6)))) {
+          proxyNodeId = null // 源代理节点对克隆者不可见 → 降级为无代理
+        }
+      }
+    }
+
+    const newName = p.name || `${src.name} (副本)`.slice(0, 80)
+
+    // 创建克隆行：会话相关字段全部留空（STOPPED 待启动）
+    const clone = await db.browserWorkspace.create({
+      data: {
+        name: newName,
+        mode: src.mode,
+        status: "STOPPED",
+        userId: ctx.userId, // 克隆归克隆者（管理员克隆=归管理员，便于审计区分）
+        groupId: src.groupId,
+        proxyNodeId,
+        templateId: src.templateId,
+        tags: src.tags ?? undefined,
+        ttlMinutes: 0, // 不复制 TTL（源可能已消耗大半）
+        idleTimeoutMinutes: src.idleTimeoutMinutes,
+        vncSessionMaxMinutes: src.vncSessionMaxMinutes,
+        shareDisabled: src.shareDisabled,
+        policyAllowInternalNetwork: src.policyAllowInternalNetwork,
+        policyAllowSecureLocationAccess: src.policyAllowSecureLocationAccess,
+        crxInheritEnabled: src.crxInheritEnabled,
+        crxBlocklistExempt: ctx.role === "SUPER_ADMIN" ? src.crxBlocklistExempt : false, // 黑名单豁免仅超管可复制
+        imeEngine: src.imeEngine,
+        kbLayout: src.kbLayout,
+        lifecycleRules: src.lifecycleRules ?? undefined,
+        createdByUserId: ctx.userId,
+        hardeningJson: src.hardeningJson
+          ? (JSON.parse(JSON.stringify({ ...(src.hardeningJson as Record<string, unknown>), clonedFrom: src.uuid, provisioned: "pending" })) as Prisma.InputJsonValue)
+          : undefined,
+      },
+    })
+
+    // CRX 沙箱级策略同步（「克隆 CRX 同步」约束）
+    const sandboxEntries = await db.crxPolicyEntry.findMany({
+      where: { scopeType: "SANDBOX", scopeId: p.sourceId, deletedAt: null },
+    })
+    let copied = 0
+    for (const e of sandboxEntries) {
+      await db.crxPolicyEntry.upsert({
+        where: { scopeType_scopeId_crxId: { scopeType: "SANDBOX", scopeId: clone.id, crxId: e.crxId } },
+        create: {
+          scopeType: "SANDBOX", scopeId: clone.id, crxId: e.crxId,
+          updateUrl: e.updateUrl, backupUpdateUrl: e.backupUpdateUrl, lockedVersion: e.lockedVersion,
+          allowIncognito: e.allowIncognito, allowUserDisable: e.allowUserDisable,
+          note: e.note ? `${e.note}（克隆自源沙箱）` : "克隆自源沙箱",
+          createdByUserId: ctx.userId, createdByName: ctx.username,
+        },
+        update: { deletedAt: null },
+      })
+      copied++
+    }
+
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "WORKSPACE_CLONE",
+      resourceType: "WORKSPACE", resourceId: clone.id, resourceName: clone.name,
+      before: { sourceId: src.id, sourceName: src.name, sourceUuid: src.uuid, sourceMode: src.mode },
+      after: { cloneId: clone.id, cloneName: clone.name, cloneUuid: clone.uuid, copiedCrxEntries: copied, proxyNodeId, status: "STOPPED" },
+      severity: "INFO",
+    })
+    return { id: clone.id, uuid: clone.uuid, name: clone.name, copiedCrxEntries: copied }
+  })
+}

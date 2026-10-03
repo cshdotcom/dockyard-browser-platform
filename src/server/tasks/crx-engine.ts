@@ -15,6 +15,7 @@ import { db } from "@/lib/db"
 import { raiseAlert } from "@/lib/alerts"
 import { writeAudit } from "@/lib/audit"
 import { resolveWorkspaceCrxPolicy, type MergedCrxEntry } from "@/lib/crx-policy"
+import { recordCrxLifecycleEvent, planLifecycleTransition, reportIncognitoEnabled } from "@/lib/crx-lifecycle"
 
 export interface TaskResultLike {
   itemsProcessed: number
@@ -59,9 +60,53 @@ async function detectInstalledExtensions(cdpUrl: string): Promise<Map<string, st
   }
 }
 
-// ---- 单插件状态推进（安装调度核心） ----
-async function advancePluginStatus(ws: { id: string; name: string; cdpUrl: string | null; containerRef: string | null; mode: string }, entry: MergedCrxEntry): Promise<string> {
+// ---- 单插件状态推进（安装调度核心；r26：状态迁移同步产生生命周期审计） ----
+async function advancePluginStatus(ws: { id: string; name: string; userId: string | null; cdpUrl: string | null; containerRef: string | null; mode: string }, entry: MergedCrxEntry): Promise<string> {
   const existing = await db.crxInstallStatus.findUnique({ where: { workspaceId_crxId: { workspaceId: ws.id, crxId: entry.crxId } } })
+  const libMeta = await db.crxPlugin.findUnique({ where: { crxId: entry.crxId }, select: { name: true } })
+
+  // 生命周期审计事件计算（基于迁移前后状态；幂等：同状态零事件）
+  const emitLifecycle = async (nextState: string, nextVersion: string | null) => {
+    const plan = planLifecycleTransition({
+      prevState: existing?.state ?? null,
+      prevVersion: existing?.currentVersion ?? null,
+      nextState, nextVersion,
+      allowIncognito: entry.allowIncognito,
+    })
+    if (plan.shouldAuditInstall) {
+      await recordCrxLifecycleEvent({
+        workspaceId: ws.id, workspaceName: ws.name, ownerUserId: ws.userId,
+        crxId: entry.crxId, crxName: libMeta?.name, kind: "INSTALLED",
+        fromVersion: plan.fromVersion, toVersion: plan.toVersion,
+        resolvedBy: entry.resolvedBy, sourceUsed: entry.updateUrl,
+      })
+    }
+    if (plan.shouldAuditVersionChange) {
+      await recordCrxLifecycleEvent({
+        workspaceId: ws.id, workspaceName: ws.name, ownerUserId: ws.userId,
+        crxId: entry.crxId, crxName: libMeta?.name, kind: "VERSION_CHANGE",
+        fromVersion: plan.fromVersion, toVersion: plan.toVersion,
+        resolvedBy: entry.resolvedBy, detail: "Chromium 检测到扩展实际运行版本与上次记录不一致（自动更新或源侧发版）",
+      })
+      if (entry.lockedVersion && plan.toVersion && plan.toVersion !== entry.lockedVersion) {
+        // 版本锁定下的漂移 → 加密告警（与 VERSION_MISMATCH 状态联动）
+      }
+    }
+    if (plan.shouldAuditRemove) {
+      await recordCrxLifecycleEvent({
+        workspaceId: ws.id, workspaceName: ws.name, ownerUserId: ws.userId,
+        crxId: entry.crxId, crxName: libMeta?.name, kind: "REMOVED",
+        fromVersion: plan.fromVersion, toVersion: null,
+        resolvedBy: entry.resolvedBy, detail: "策略链不再包含该扩展 → Chromium 依据托管策略卸载",
+      })
+    }
+    if (plan.shouldAuditIncognito) {
+      await reportIncognitoEnabled({
+        workspaceId: ws.id, workspaceName: ws.name, ownerUserId: ws.userId,
+        crxId: entry.crxId, crxName: libMeta?.name, resolvedBy: entry.resolvedBy,
+      })
+    }
+  }
 
   // 终态保护：INSTALLED / ALL_FAILED / POLICY_APPLIED（无容器演示态）不自动推进
   if (existing && ["INSTALLED", "ALL_FAILED", "POLICY_APPLIED"].includes(existing.state) && existing.state !== "VERSION_MISMATCH") {
@@ -93,6 +138,7 @@ async function advancePluginStatus(ws: { id: string; name: string; cdpUrl: strin
     if (ws.cdpUrl && ws.containerRef) {
       const installed = await detectInstalledExtensions(ws.cdpUrl)
       if (installed?.has(entry.crxId)) {
+        await emitLifecycle("INSTALLED", primary.version)
         await db.crxInstallStatus.upsert({
           where: { workspaceId_crxId: { workspaceId: ws.id, crxId: entry.crxId } },
           create: { workspaceId: ws.id, crxId: entry.crxId, state: "INSTALLED", currentVersion: primary.version, sourceUsed: entry.updateUrl, resolvedBy: entry.resolvedBy, lastCheckedAt: new Date(), attempts: attempts + 1 },
@@ -188,7 +234,7 @@ async function advancePluginStatus(ws: { id: string; name: string; cdpUrl: strin
 export async function crxInstallPoll(log: (m: string) => void): Promise<TaskResultLike> {
   const workspaces = await db.browserWorkspace.findMany({
     where: { status: { in: ["RUNNING", "IDLE"] }, deletedAt: null, mode: { in: ["cdp_light", "novnc_full"] } },
-    select: { id: true, name: true, cdpUrl: true, containerRef: true, mode: true },
+    select: { id: true, name: true, userId: true, cdpUrl: true, containerRef: true, mode: true },
     take: 200, // 单轮上限（控制耗时）
   })
   let processed = 0
@@ -219,9 +265,22 @@ export async function crxInstallPoll(log: (m: string) => void): Promise<TaskResu
           log(`插件状态推进异常（不影响其它插件）：${entry.crxId} ${e instanceof Error ? e.message : String(e)}`)
         }
       }
-      // 沙箱当前策略不再包含的插件状态 → 标记移除（软清理，保留历史）
+      // 沙箱当前策略不再包含的插件状态 → 标记移除（软清理，保留历史 + 生命周期审计）
+      const removedRows = await db.crxInstallStatus.findMany({
+        where: { workspaceId: ws.id, crxId: { notIn: policy.entries.map((e) => e.crxId) }, state: "INSTALLED" },
+        select: { crxId: true, currentVersion: true },
+      }).catch(() => [] as Array<{ crxId: string; currentVersion: string | null }>)
+      for (const r of removedRows) {
+        const libMeta = await db.crxPlugin.findUnique({ where: { crxId: r.crxId }, select: { name: true } }).catch(() => null)
+        await recordCrxLifecycleEvent({
+          workspaceId: ws.id, workspaceName: ws.name, ownerUserId: ws.userId,
+          crxId: r.crxId, crxName: libMeta?.name, kind: "REMOVED",
+          fromVersion: r.currentVersion, toVersion: null,
+          detail: "策略链不再包含该扩展 → 状态标记移除（Chromium 依据托管策略卸载）",
+        }).catch(() => null)
+      }
       await db.crxInstallStatus.updateMany({
-        where: { workspaceId: ws.id, crxId: { notIn: policy.entries.map((e) => e.crxId) }, state: { in: ["PENDING", "POLICY_APPLIED", "BACKUP_RETRY"] } },
+        where: { workspaceId: ws.id, crxId: { notIn: policy.entries.map((e) => e.crxId) }, state: { in: ["PENDING", "POLICY_APPLIED", "BACKUP_RETRY", "INSTALLED"] } },
         data: { state: "REMOVED", lastCheckedAt: new Date() },
       }).catch(() => { /* 非关键 */ })
     } catch (e) {

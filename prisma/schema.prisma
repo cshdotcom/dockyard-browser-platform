@@ -655,6 +655,23 @@ model BrowserTemplate {
   @@index([userId])
 }
 
+
+// r26：模板版本快照（每次配置变更自动存档 → 差异对比 / 一键回滚）
+model BrowserTemplateVersion {
+  id             String   @id @default(cuid())
+  templateId     String
+  version        Int      // 对应 BrowserTemplate.version（快照时点）
+  configJson     String   // 该版本完整配置快照
+  changeNote     String?  // 变更说明（自动生成或人工备注）
+  changedFields  Json?    // 相对上一版本的变更字段清单（差异对比预计算）
+  createdByUserId String?
+  createdByName  String?
+  createdAt      DateTime @default(now())
+
+  @@unique([templateId, version])
+  @@index([templateId, createdAt])
+}
+
 model BrowserProfileSnapshot {
   id             String   @id @default(cuid())
   name           String

@@ -132,6 +132,9 @@ async function main() {
     { code: "crx_install_poll", name: "CRX插件安装状态轮询（源探测+CDP检测+降级告警）", cron: "* * * * *", timeout: 180 },
     { code: "frozen_expire_check", name: "冻结沙箱到期自动解冻（离线封存恢复）", cron: "*/5 * * * *", timeout: 60 },
     { code: "crx_gray_rollout", name: "CRX灰度策略滚动下发", cron: "* * * * *", timeout: 120 },
+    { code: "crx_unknown_scan", name: "未知扩展扫描（CDP枚举-策略白名单→未授权扩展告警）", cron: "*/5 * * * *", timeout: 120 },
+    { code: "policy_tamper_check", name: "策略文件防篡改校验（SHA-256哈希对账）", cron: "*/5 * * * *", timeout: 120 },
+    { code: "baseline_scan", name: "安全基线扫描（十维合规评分+低分告警）", cron: "0 * * * *", timeout: 300 },
   ]
   for (const t of tasks) {
     await db.scheduleTask.upsert({

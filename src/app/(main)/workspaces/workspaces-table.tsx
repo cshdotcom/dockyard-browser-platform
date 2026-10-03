@@ -4,7 +4,7 @@ import * as React from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { Plus, Loader2, Globe, MonitorPlay, Share2, Wifi, Zap, StopCircle, Play, Trash2, Settings2, Download } from "lucide-react"
+import { Plus, Loader2, Globe, MonitorPlay, Share2, Wifi, Zap, StopCircle, Play, Trash2, Settings2, Download, CopyPlus } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -16,7 +16,7 @@ import { DataTable, StatusBadge, type Column } from "@/components/shared/data-ta
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import {
   createWorkspaceAction, stopWorkspaceAction, startWorkspaceAction, deleteWorkspaceAction,
-  switchProxyAction, exportWorkspaceConfigAction,
+  switchProxyAction, exportWorkspaceConfigAction, cloneWorkspaceAction,
 } from "@/server/actions/workspaces"
 import { WorkspaceShareDialog } from "./share-dialogs"
 import { cn } from "@/lib/utils"
@@ -115,6 +115,19 @@ export function WorkspacesTable(props: Props) {
     try {
       const res = await deleteWorkspaceAction({ id: row.id, reason: "" })
       if (res.code === 0) { toast.success("已移入回收站"); router.refresh() } else toast.error(res.msg)
+    } finally { setBusyId(null) }
+  }
+  // r26：克隆（配置 + CRX 沙箱级策略同步；新实例 STOPPED）
+  const clone = async (row: WorkspaceRow) => {
+    setBusyId(row.id)
+    try {
+      const name = window.prompt("新沙箱名称（留空使用默认「源名 (副本)」）", `${row.name} (副本)`.slice(0, 80))
+      if (name === null) return // 取消
+      const res = await cloneWorkspaceAction({ sourceId: row.id, name: name.trim() || undefined })
+      if (res.code === 0 && res.data) {
+        toast.success(`克隆完成「${res.data.name}」：同步 ${res.data.copiedCrxEntries} 条沙箱级插件策略，新实例已就绪（停止态，可随时启动）`)
+        router.refresh()
+      } else toast.error(res.msg)
     } finally { setBusyId(null) }
   }
 
@@ -220,6 +233,9 @@ export function WorkspacesTable(props: Props) {
       ) : null}
       <Button variant="ghost" size="icon" title="切换代理" onClick={() => setProxyTarget(r)}>
         <Wifi className="h-4 w-4" />
+      </Button>
+      <Button variant="ghost" size="icon" title="克隆（配置+CRX策略同步，新实例停止待启动）" disabled={busyId === r.id || r.status === "FROZEN" || r.status === "DESTROYED"} onClick={() => clone(r)}>
+        <CopyPlus className="h-4 w-4 text-teal-600" />
       </Button>
       <Button variant="ghost" size="icon" title="删除（入回收站）" onClick={() => setDeleteTarget(r)}>
         <Trash2 className="h-4 w-4 text-red-500" />

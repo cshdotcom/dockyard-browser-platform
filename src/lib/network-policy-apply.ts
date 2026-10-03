@@ -11,6 +11,7 @@
 
 import { db } from "./db"
 import { writeNetworkPolicyFile, sessionNetworkGateway, embeddedSandboxBaseline } from "./network-policy"
+import { rememberPolicyFileHash } from "./crx-lifecycle"
 import { resolveAccessPolicies } from "./domain-policy"
 import { buildCrxManagedPolicy, resolveWorkspaceCrxPolicy } from "./crx-policy"
 import { ENV, externalAvailable } from "./env"
@@ -64,6 +65,8 @@ export async function refreshWorkspacePolicyFile(workspaceId: string): Promise<b
     crxManagedPolicy: crxManaged,
     extraBaselineBlock: baseline,
   }).catch(() => null)
+  // r26：防篡改哈希登记（后续 policy_tamper_check 周期对账）
+  if (path) await rememberPolicyFileHash(workspaceId, path).catch(() => null)
   return !!path
 }
 
