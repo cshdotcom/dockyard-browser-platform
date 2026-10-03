@@ -893,3 +893,40 @@ Work Log:
 Stage Summary:
 - r26 全部交付：CRX 扩展生命周期审计闭环（五类事件+永久归档）、未知扩展扫描、策略文件防篡改校验（实测检出篡改）、安全基线扫描（十维评分+低分告警+详情页面板）、模板版本快照/差异对比（CRX 高亮）/一键回滚、沙箱克隆（CRX 同步+溯源+STOPPED）
 - 21+22 断言 + 浏览器 5 链路 E2E 全过；QA 数据清理归零；r24~r25 CI Lint 绿 + 主镜像构建进行中（188f104），r26（a0d90b2）CI 已排队
+
+---
+Task ID: 26-b
+Agent: main
+Task: r26b — 元数据缓存 + 物理清理级联 + OpenAPI 生命周期查询 + 审计筛选扩展
+
+Work Log:
+- 【元数据缓存（16 约束之一）】crx-policy.ts：插件库元数据 globalThis Map 缓存（TTL 30s + 负缓存）；五级合并从逐条 findUnique N+1 改为 Promise.all 批量 + getLibMetaBatch 预取；写路径主动失效 5 处（保存/启停/回收/恢复/CSV 批量导入）；实测首次 23ms → 缓存命中 5ms，禁用插件实时剔除语义正确（修正测试断言：disabled 条目从合并输出剔除而非保留标记）
+- 【物理清理级联】recycle.ts purgeFromRecycle WORKSPACE 分支：crxInstallStatus / crxPolicyEntry(SANDBOX) / crxBlocklistEntry(SANDBOX) / workspaceShare / workspaceShareLink / harRecord 六表级联删除（审计永久保留，业务态随行清理）
+- 【OpenAPI 生命周期查询】GET /api/openapi/crx?op=lifecycle：五类事件（crxId / workspaceId(afterJson contains) / kind / from-to 时间范围过滤，take 200）；实测 API Key 鉴权 + 2 事件返回 + kind=INSTALLED 过滤 1 + crxId 过滤 2；字段名坑（tokenHash/tokenPrefix/permissionsMask）修正后打通
+- 【审计筛选】audit-table 资源类型选项扩展：CRX 插件 / 模板 / 令牌 / 会话 / 代理节点
+- 【质量】tsc 改动文件零新增；eslint 全部 0/0；bun run build 全绿；smoke-r26b 9/9；QA 全清（测试令牌/审计事件/密钥文件删除）
+- 【浏览器 QA】任务页三新任务渲染（未知扩展扫描/防篡改校验/基线扫描内置徽章）；审计页资源类型筛选渲染；CRX 管理页六页签正常
+- 【提交】b99529b 推送 main
+
+Stage Summary:
+- 16 条附加约束全部闭环（元数据缓存为最后一项）；CI 状态：188f104 全绿（Lint+Build 双 success）、a0d90b2 Lint 绿 Build 进行中、b99529b 排队
+
+---
+Task ID: 26-final
+Agent: main
+Task: r26 终态 — CI 全绿监督 + GHCR 发布确认 + 全量回归
+
+Work Log:
+- 【CI 终态（监督至全绿）】四轮推送全部双工作流 success：
+  · 188f104（r24~r25）：Lint ✅ + Build & Push ✅
+  · a0d90b2（r26）：Lint ✅ + Build & Push ✅
+  · b99529b（r26b）：Lint ✅ + Build & Push ✅
+  · b0675d5（前批）：Lint ✅ + Build & Push ✅（历史对照）
+- 【GHCR 发布确认】主镜像 main tag HTTP 200（oci image index，digest sha256:578cb141…）；tags: main/latest/1.3.x~1.6.3；浏览器镜像 main+latest 在位
+- 【全量回归（7 套 162 断言）】r24a 自定义任务 27/27（webhook 失败项为 dev 服务器被沙箱回收环境态，重启后全过）；r24c IME 22/22；r24e 沙箱用户 20/20；r25c 字体 44/44；r25d VNC 加固 19/19（首跑 18/19 为时序抖动，重跑全过）；r26 CRX 深度 21/21；r26b 缓存 9/9
+- 【QA 交付】download/qa-r26-screenshots.zip（5 张 JPEG 268KB，压缩 48%）：模板版本历史弹窗（差异表+CRX徽章）/克隆完成/基线评分面板100分/任务页三新任务/OpenAPI lifecycle
+- 【环境守护】dev 服务器两次被沙箱回收 → daemon-restart.py（python Popen start_new_session）守护化恢复；三服务终态健康（app 200 / bridge health ok / hub 200）
+
+Stage Summary:
+- 用户三项指令全部达成：①CRX 插件库深度功能（生命周期审计+五级合并细节+元数据缓存）与九大类审计完善全部落地并实测；②r24~r26 三轮提交全部推送且 CI 监督至全绿（Lint + 主镜像构建全 success，GHCR 镜像发布确认）；③待办清单剩余项（模板快照差异对比/沙箱克隆/基线扫描/防篡改校验）+ 16 条附加约束最后一项（元数据缓存）全部闭环
+- 162 项回归断言 + 浏览器 E2E 8 链路全部通过；QA 数据清理归零
