@@ -14,6 +14,43 @@ export interface RecyclableResource {
   createdByUserId?: string | null
 }
 
+
+// ============================================================
+// r28：回收站保留期策略链（管理员可按 用户组 / 用户 / 单条 指定）
+// 优先级：单条 overrideDays > 用户 recycleRetentionDays > 用户组（继承链向上）
+//        > 全局 recycle.retentionDays（旧键 recycle.retentionMinutes 分钟兼容）
+// 语义：0=永久保留（不入清除队列）；null=继承上层
+// ============================================================
+export async function resolveRecycleRetentionMinutes(userId?: string | null): Promise<{ minutes: number; source: "USER" | "GROUP" | "GLOBAL" }> {
+  // 用户级
+  if (userId) {
+    const user = await db.user.findUnique({ where: { id: userId }, select: { recycleRetentionDays: true } })
+    if (user?.recycleRetentionDays != null) {
+      return { minutes: user.recycleRetentionDays * 1440, source: "USER" }
+    }
+    // 组级（含父组继承，首个命中）
+    const links = await db.groupUser.findMany({ where: { userId }, select: { groupId: true } })
+    for (const l of links) {
+      let gid: string | null = l.groupId
+      let depth = 0
+      while (gid && depth < 6) {
+        const g = await db.group.findUnique({ where: { id: gid }, select: { recycleRetentionDays: true, parentId: true } })
+        if (!g) break
+        if (g.recycleRetentionDays != null) {
+          return { minutes: g.recycleRetentionDays * 1440, source: "GROUP" }
+        }
+        gid = g.parentId
+        depth++
+      }
+    }
+  }
+  // 全局（新键天；旧键分钟向后兼容）
+  const days = await getConfigNumber("recycle.retentionDays", 0)
+  if (days > 0) return { minutes: days * 1440, source: "GLOBAL" }
+  const legacyMinutes = await getConfigNumber("recycle.retentionMinutes", 10080)
+  return { minutes: legacyMinutes, source: "GLOBAL" }
+}
+
 // 软删除入回收站（保留 originalSnapshot 用于100%无损恢复）
 export async function moveToRecycle(params: RecyclableResource & {
   deletedByUserId?: string | null
@@ -47,7 +84,9 @@ export async function moveToRecycle(params: RecyclableResource & {
     }
   }
 
-  const retentionMinutes = await getConfigNumber("recycle.retentionMinutes", 10080)
+  // r28：保留期策略链（组>用户>全局；ownerUserId 优先、无主资源用删除者）
+  const retention = await resolveRecycleRetentionMinutes(params.ownerUserId ?? params.deletedByUserId)
+  const retentionMinutes = retention.minutes
   const recoverWindowHours = await getConfigNumber("recycle.recoverWindowHours", 0)
 
   const entry = await db.recycleBin.create({

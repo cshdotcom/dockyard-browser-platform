@@ -3,8 +3,9 @@
 // 我的录像面板（r27 用户空间）：工作区分组 + 回放播放器 + 下载
 // 用户仅可查看/回放/下载（不可删除 —— 审计完整性；删除与回收站归管理后台）
 
-import { useState, useTransition } from "react"
-import { playbackRecordingAction, type RecordingRow } from "@/server/actions/recordings"
+import { useState, useTransition, useRef } from "react"
+import { playbackRecordingAction, type RecordingRow, type PlaybackTicketInfo } from "@/server/actions/recordings"
+import { WatermarkOverlay, PlaybackSpeedBar } from "@/components/recordings/watermark-overlay"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
@@ -21,6 +22,8 @@ export function MyRecordingsPanel({ rows, keyword, quotaPct }: { rows: Recording
   const [pending, startTransition] = useTransition()
   const [playRow, setPlayRow] = useState<RecordingRow | null>(null)
   const [playUrl, setPlayUrl] = useState<string | null>(null)
+  const [playTicket, setPlayTicket] = useState<PlaybackTicketInfo | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
   const [dlUrl, setDlUrl] = useState<string | null>(null)
 
   const openPlayback = (r: RecordingRow) => {
@@ -29,6 +32,7 @@ export function MyRecordingsPanel({ rows, keyword, quotaPct }: { rows: Recording
         const res = await playbackRecordingAction({ id: r.id })
         if (res.code !== 0 || !res.data) throw new Error(res.msg || "回放票据签发失败")
         setPlayUrl(res.data.streamUrl)
+        setPlayTicket(res.data)
         setDlUrl(res.data.downloadUrl)
         setPlayRow(r)
       } catch (e) {
@@ -90,6 +94,7 @@ export function MyRecordingsPanel({ rows, keyword, quotaPct }: { rows: Recording
               try {
                 const res = await playbackRecordingAction({ id: r.id })
                 if (res.code !== 0 || !res.data) throw new Error(res.msg || "下载失败")
+                if (!res.data.downloadUrl) throw new Error("管理员已禁止导出该录像（仅允许在线回放）")
                 window.open(res.data.downloadUrl, "_blank")
               } catch (e) {
                 toast.error(e instanceof Error ? e.message : "下载失败")
@@ -140,8 +145,21 @@ export function MyRecordingsPanel({ rows, keyword, quotaPct }: { rows: Recording
               {playRow && fmtBytes(playRow.sizeBytes)}
             </DialogDescription>
           </DialogHeader>
-          <div className="rounded-lg overflow-hidden bg-black">
-            <video key={playUrl || "none"} src={playUrl || undefined} controls autoPlay className="w-full max-h-[60vh]" preload="metadata" />
+          <div className="relative rounded-lg overflow-hidden bg-black">
+            <video key={playUrl || "none"} ref={videoRef} src={playUrl || undefined} controls autoPlay className="w-full max-h-[60vh]" preload="metadata" controlsList="nodownload" disablePictureInPicture />
+            {playTicket && (
+              <WatermarkOverlay
+                mode={playTicket.watermark}
+                viewerName={playTicket.viewerName}
+                workspaceName={playTicket.workspaceName}
+                serverNow={playTicket.serverNow}
+                serverTz={playTicket.serverTz}
+              />
+            )}
+          </div>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <PlaybackSpeedBar videoRef={videoRef} />
+            {playTicket && !playTicket.allowExport && <span className="text-xs text-muted-foreground">该录像仅允许在线回放（禁止导出）</span>}
           </div>
           <DialogFooter className="sm:justify-between">
             <p className="text-xs text-muted-foreground">回放已审计留痕</p>

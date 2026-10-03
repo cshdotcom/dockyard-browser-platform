@@ -3,6 +3,7 @@
 import * as React from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
+import { getCdpGatewayTicketAction } from "@/server/actions/cdp-gateway"
 import { toast } from "sonner"
 import {
   ArrowLeft, Globe, MonitorPlay, Share2, FileJson, Terminal, Clipboard, MousePointer2, Hand,
@@ -259,7 +260,7 @@ export function WorkspaceDetail({
         )}
         {!isVnc && (
           <TabsContent value="cdp" className="mt-4">
-            <CdpPanel workspace={workspace} canOperate={canOperate} publicCdpEndpoint={publicCdpEndpoint} />
+            <CdpPanel workspace={workspace} canOperate={canOperate} publicCdpEndpoint={publicCdpEndpoint} isAdmin={workspace.isAdmin} />
           </TabsContent>
         )}
         <TabsContent value="network" className="mt-4 space-y-4">
@@ -572,10 +573,24 @@ function IsolationPanel({ hardening, containerRef }: { hardening: Record<string,
   )
 }
 // ================= CDP 控制面板 =================
-function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: WorkspaceDetailData; canOperate: boolean; publicCdpEndpoint?: string }) {
+function CdpPanel({ workspace, canOperate, publicCdpEndpoint, isAdmin }: { workspace: WorkspaceDetailData; canOperate: boolean; publicCdpEndpoint?: string; isAdmin?: boolean }) {
   const [throttle, setThrottle] = React.useState({ download: 0, upload: 0, latency: 0 })
   const [domain, setDomain] = React.useState("")
   const [busy, setBusy] = React.useState(false)
+  // r28：CDP 外网网关票据（内网地址不暴露；票据单次 300s）
+  const [cdpTicket, setCdpTicket] = React.useState<{ gatewayUrl: string | null; expiresAt: string; durationMinutes: number; note: string } | null>(null)
+  const [ticketBusy, setTicketBusy] = React.useState(false)
+  const issueCdpTicket = async () => {
+    setTicketBusy(true)
+    try {
+      const res = await getCdpGatewayTicketAction({ workspaceId: workspace.id })
+      if (res.code === 0 && res.data) {
+        setCdpTicket(res.data)
+        if (res.data.gatewayUrl) toast.success(`已签发外网直连票据（${Math.round((new Date(res.data.expiresAt).getTime() - Date.now()) / 1000)}s 内有效）`)
+        else toast.info(res.data.note)
+      } else toast.error(res.msg || "票据签发失败")
+    } finally { setTicketBusy(false) }
+  }
 
   const applyThrottle = async () => {
     setBusy(true)
@@ -611,14 +626,41 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
               <p className="text-[11px] text-muted-foreground mt-1">内网穿透/域名部署场景：Puppeteer/Playwright/自定义脚本经此端点鉴权转发，无需访问内部网络</p>
             </div>
           )}
+          {/* r28：CDP 外网直连（HMAC 票据；容器内网地址零暴露） */}
+          <div className="rounded-md border border-sky-200 bg-sky-50 dark:bg-sky-950/30 p-2.5 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-medium text-sky-800 dark:text-sky-300">CDP 外网直连（签名票据）</div>
+              <Button variant="outline" size="sm" disabled={ticketBusy || !canOperate} onClick={() => void issueCdpTicket()}>
+                {ticketBusy ? "签发中…" : cdpTicket?.gatewayUrl ? "重新签发" : "签发票据"}
+              </Button>
+            </div>
+            {cdpTicket?.gatewayUrl ? (
+              <>
+                <code className="text-xs font-mono break-all block select-all">{cdpTicket.gatewayUrl}</code>
+                <div className="flex items-center gap-2">
+                  <Button variant="secondary" size="sm" onClick={() => {
+                    void navigator.clipboard.writeText(cdpTicket.gatewayUrl || "")
+                    toast.success("已复制外网 CDP 地址")
+                  }}>复制地址</Button>
+                  <span className="text-[11px] text-muted-foreground">
+                    {cdpTicket.durationMinutes > 0 ? `连接上限 ${cdpTicket.durationMinutes} 分钟 · ` : ""}票据单次有效 · {Math.max(0, Math.round((new Date(cdpTicket.expiresAt).getTime() - Date.now()) / 1000))}s 后过期
+                  </span>
+                </div>
+              </>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">{cdpTicket?.note || "签发后获得带 HMAC 签名的外网直连地址（需管理员配置 cdp.publicGatewayHost 穿透域名）"}</p>
+            )}
+          </div>
           <div className="flex items-center justify-between rounded-md border p-2.5">
             <span className="text-muted-foreground">浏览器会话ID</span>
             <code className="text-xs font-mono">{workspace.browserSessionId ?? "-"}</code>
           </div>
-          <div className="flex items-center justify-between rounded-md border p-2.5">
-            <span className="text-muted-foreground">内部 CDP 端点</span>
-            <code className="text-xs font-mono">{workspace.cdpUrl ?? "-"}</code>
-          </div>
+          {isAdmin && (
+            <div className="flex items-center justify-between rounded-md border p-2.5">
+              <span className="text-muted-foreground">内部 CDP 端点（仅管理员可见）</span>
+              <code className="text-xs font-mono">{workspace.cdpUrl ?? "-"}</code>
+            </div>
+          )}
           <div className="flex items-center justify-between rounded-md border p-2.5">
             <span className="text-muted-foreground">CDP 调用量 / 拦截</span>
             <span className="tabular-nums">{workspace.cdpCallCount} / {workspace.cdpBlockedCount}</span>

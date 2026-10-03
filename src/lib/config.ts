@@ -70,6 +70,9 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "vnc.recordingRetentionDays": { value: 90, category: "GENERAL", type: "number", description: "录像保留天数（到期自动入回收站，0=永久保留）" },
   "vnc.recordingQuotaGb": { value: 5, category: "GENERAL", type: "number", description: "单用户录像存储配额（GB，0=不限；超额时最旧录像自动入回收站）" },
   "vnc.recordingUserVisible": { value: true, category: "GENERAL", type: "boolean", description: "用户空间是否可见自己的录像（关闭=仅管理后台可见，用户端隐藏）" },
+  // —— r28：回放安全（水印/导出）全局默认（沙箱>用户>组>全局 四级链）——
+  "vnc.playbackWatermark": { value: "on", category: "GENERAL", type: "string", description: "回放水印默认档：force 强制水印(不可关) | on 默认开(可临时关) | off 关闭" },
+  "vnc.playbackAllowExport": { value: false, category: "GENERAL", type: "boolean", description: "回放导出/下载默认策略（false=仅在线回放；用户/组/沙箱可覆盖）" },
   "vnc.recordingManualStop": { value: false, category: "GENERAL", type: "boolean", description: "允许用户在沙箱停止前手动结束自己的录像（false=仅管理员可操作）" },
   "workspace.exitGuardDefault": { value: "fullscreen", category: "GENERAL", type: "string", description: "浏览器防退出默认档位（normal=现状/fullscreen=全屏守卫/kiosk=信息亭最强档；模板可按沙箱覆盖）" },
   "smtp.enabled": { value: false, category: "MAIL", type: "boolean", description: "邮件服务启用（关闭=控制台模拟模式）" },
@@ -87,6 +90,10 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "storage.backupOnDelete": { value: false, category: "STORAGE", type: "boolean", description: "删除文件时备份开关" },
   "storage.virusScan": { value: false, category: "STORAGE", type: "boolean", description: "文件病毒扫描开关" },
   "storage.allowedExtensions": { value: "", category: "STORAGE", type: "string", description: "文件类型白名单（逗号分隔，空=不限）" },
+  // —— r28：文件管理器治理（上传上限/下载限速/上传黑名单）——
+  "files.maxUploadMB": { value: 512, category: "STORAGE", type: "number", description: "文件管理器单文件上传上限MB" },
+  "files.transferKBps": { value: 0, category: "STORAGE", type: "number", description: "下载传输全局限速KB/s（0=不限；用户/组级可覆盖收紧）" },
+  "files.denyExts": { value: "exe,bat,cmd,sh,msi,scr,vbs,js,jar,com,pyc", category: "STORAGE", type: "string", description: "上传禁止扩展名（逗号分隔，空=不限）" },
   "backup.enabled": { value: true, category: "STORAGE", type: "boolean", description: "定时备份开关" },
   "backup.retentionCount": { value: 7, category: "STORAGE", type: "number", description: "备份保留份数" },
   "backup.encrypt": { value: false, category: "STORAGE", type: "boolean", description: "备份AES加密开关" },
@@ -128,6 +135,7 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "token.maxLifetimeDays": { value: 365, category: "SECURITY", type: "number", description: "全平台Token最大有效时长（天，0=不限）" },
   "token.expireWarnDays": { value: 7, category: "SECURITY", type: "number", description: "Token到期提前告警天数" },
   "recycle.retentionMinutes": { value: 10080, category: "GENERAL", type: "number", description: "回收站保留时长（分钟，默认7天）" },
+  "recycle.retentionDays": { value: 0, category: "GENERAL", type: "number", description: "回收站保留期全局默认（天；0=沿用旧分钟键/管理员可用组/用户/单条覆盖）" },
   "recycle.recoverWindowHours": { value: 0, category: "GENERAL", type: "number", description: "恢复时效限制（小时，0=不限）" },
   "recycle.userRestoreEnabled": { value: true, category: "GENERAL", type: "boolean", description: "用户自主恢复权限全局开关" },
   "recycle.requireReason": { value: false, category: "GENERAL", type: "boolean", description: "删除强制备注原因" },

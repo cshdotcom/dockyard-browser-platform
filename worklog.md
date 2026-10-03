@@ -974,3 +974,26 @@ Stage Summary:
 - r27 全部交付并发布：VNC 会话录像回放企业级闭环（四级策略链→进程树内 ffmpeg 分段→Range 流回放→RBAC→回收站→保留期配额→用户空间→OpenAPI）、防退出三档（kiosk 菜单退出入口物理不存在）、Chromium 策略目录 37 项、功能开关中心 24 项
 - CI 全绿 + v1.7.0 版本镜像发布 GHCR（1.7.0/1.7/latest/main）
 - 质量证据：smoke 35/35 + 真实沙箱 E2E 23/23（含 fMP4 缓冲根因修复与验证）+ 浏览器实测（video readyState=4 真实流加载）+ tsc 78=78 零新增 + eslint 0/0 + build 74 路由全绿
+
+---
+Task ID: 28
+Agent: main
+Task: r28 — 文件管理器企业级 + 书签/历史双端 + noVNC 快捷键 + 回放安全 + CDP 外网网关 + 回收站保留期策略链 + Chromium 沙箱默认启用
+
+Work Log:
+- 【数据模型】BrowseHistoryEntry/BookmarkEntry（workspaceId+userId 沙箱隔离；dwellMs 停留时长/GUID 对账/removedAt 软标记）；FileShareLink（token/有效期/LOGIN|PUBLIC|USERS/查看下载计数/下载限速）；User/Group +vncPlayback（水印导出四级链）+recycleRetentionDays+fileTransferKBps；BrowserWorkspace +vncPlayback 沙箱覆盖；RecycleBin +overrideMinutes 管理员单条；双 schema 同步 push（含补 postgres r23~r27 欠账字段 IpBanRecord/VncRecording/BrowserTemplateVersion/tokenPolicy 等）
+- 【采集引擎 src/lib/browsing-collector.ts】CDP /json/list 轮询（同 URL 120s 合并停留时长）+ Profile/Bookmarks JSON 对账（GUID upsert/移除审计 BOOKMARK_LOCAL_DELETE）；browsing_collect 任务（*/2）双种子注册；smoke 14/14
+- 【文件管理器】file-explorer.ts 核心库（三域 ROOT_FS/STORAGE/HOME、穿越拒绝、system|profiles|/etc 拒写、文本编辑 2MB 上限、zip/unzip/tar.gz/bz2/xz+密码、ffmpeg 缩略图、限速流、递归+内容搜索 2000 文件上限）；actions 12 个（browse/read/write/create/rename/delete 回收站/transfer/archive/extract/search/dirSize/share CRUD）；/api/files/raw（inline/zip/缩略图/限速）+ upload-explorer + share/[token]（PUBLIC/LOGIN/USERS+次数+限速）；通用面板（面包屑/排序/分页跳转/多选批量/深度搜索含子目录+内容开关/MD 渲染+HTML iframe 编辑器/预览图片视频音频PDF）；用户端 /files + 管理端 /admin/files 全盘三域；smoke 36/36（含修复 zip cwd bug）
+- 【书签/历史页面】用户端 /browsing（沙箱 Tab+计数徽章+本地删除+已删书签查看）；管理端 /admin/browsing（统计卡+用户筛选 Popover 搜索多选字母排序+日期+域名+关键词+导出 CSV 脱敏+批量删除+立即采集）；导航+全局搜索 3 新直达项
+- 【noVNC 快捷键】vnc-shortcuts.ts（40+ 内置 8 分类 keysym 组合+物理键捕获解析+小键盘 6 组点选构造）；shortcut-panel.tsx（搜索+折叠+自定义录入双通道+跨端同步 User.preferences.vncShortcuts）；helmport-viewer 工具栏接入 + 沉浸模式（全屏+指针锁定，Crosshair）
+- 【回放安全】playback-policy.ts（沙箱>用户>组>全局四级；force/on/off 水印+allowExport；beijingNow 服务器权威时间）；playbackRecording 返回策略+viewer+北京时间；流路由 download 策略管控（非管理员 allowExport=false → 403）+同源 Referer 校验+跨站拒绝；watermark-overlay.tsx（位置漂移 15s+服务器时钟递增+force 不可关+on 可临时关+0.5x~4x 倍速条）；双播放器升级（controlsList=nodownload+disablePictureInPicture）；三级管理对话框（用户/组/沙箱行菜单）
+- 【CDP 外网网关】mini-services/cdp-gateway:3006（HMAC 票据单次防重放+拨号容器内 CDP+双向转发+早期消息缓冲修复+连接时长上限+keepalive）；getCdpGatewayTicketAction（RBAC=所有者/OPERATE 共享/GROUP_ADMIN/ADMIN+；容器地址零暴露）；工作区 CDP 面板：内部端点仅管理员可见+外网直连票据卡片（签发/复制/倒计时）；配置 5 键+daemon-services 三服务守护；smoke 7/7（验签/转发/防重放/伪造/过期/时长）
+- 【回收站保留期】resolveRecycleRetentionMinutes（单条 override>用户>组继承链>全局天/旧分钟）；moveToRecycle 接入 ownerUserId 解析；setRecycleRetentionAction（单条）+ Baseline（用户/组）；RetentionPolicyDialog 接入 users/groups 行菜单
+- 【Chromium 沙箱默认启用】embedded-sandbox 模板 SANDBOX_FLAG（DY_CHROME_NOSANDBOX=0 默认启用进程级沙箱：渲染进程零 syscall，病毒网页无法读写任何本地文件）；sandbox-launch.sh 外层循环 8s 存活+sandbox 日志检测自动回退一次（policy.log 留痕）；supervisor.sh headless 探测→回退；三处 --no-sandbox 全部条件化
+- 【E2E 实测 agent-browser】文件创建（.md 落盘）→编辑器写入（内容落盘）→密码压缩（unzip -t OK）→密码解压（内容一致）→分享链接（DB token+浏览器 200 inline+免登录 401+坏 token 400+download attachment 头）→browsing_collect 手动触发执行成功；页面渲染：/browsing /files /admin/browsing /admin/files 全部正常
+- 【根因修复】①file-explorer actions 的 export type 与 "use server" 冲突（FileEntry is not defined → action 整体加载失败 → 列表恒空 canWrite 恒 false；多 dev 进程+console 历史噪音误导排查）→ 移除 type re-export 改从 @/lib 导入；②zip execFile 未传 cwd；③cdp-gateway upstream open 前客户端消息丢失（早期缓冲）
+- 【质量门】tsc 零新增（86=基线，含 skills/db 既有）；eslint 全部改动文件 0 error 0 warning；bun run build 全绿 69 路由（需先 prisma generate --schema postgres）；冒烟 14+36+7=57 断言全过；dev/bridge/hub/cdp-gateway 四服务守护健康
+
+Stage Summary:
+- r28 七大块全部交付并真实测试：文件管理器（三域/编辑器/预览/压缩解压密码/搜索/限速/分享链接/批量/分页）、书签历史（采集引擎+双端页面+导出）、noVNC 快捷键（40+自定义双通道录入+沉浸模式）、回放安全（四级水印/导出策略/防抓取/北京时间/变速）、CDP 外网网关（票据桥+容器地址零暴露）、回收站保留期四级链、Chromium 原生沙箱默认启用+自动回退
+- 57 项冒烟断言 + 浏览器 E2E（文件全链路+分享权限矩阵+采集任务）全部通过；QA 数据清理归零

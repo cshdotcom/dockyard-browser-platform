@@ -315,6 +315,7 @@ while :; do
     fi
   fi
   CHROME_PID=$!
+  CHROME_STARTED_AT=$(date +%s)
   write_state running
   wait "$CHROME_PID" 2>/dev/null || true
   # USR1 打断 wait 后 Chromium 可能仍在终止中：等待真正退出（防同 Profile 双实例锁冲突）
@@ -323,6 +324,15 @@ while :; do
     wait "$CHROME_PID" 2>/dev/null || true
     j=$((j + 1))
   done
+  # r28：Chromium 原生沙箱启动失败自愈（存活 <8s 且日志含 sandbox 错误 → 单次回退 --no-sandbox 并告警留痕）
+  CHROME_ALIVE_SEC=$(( $(date +%s) - CHROME_STARTED_AT ))
+  if [ "$CHROME_ALIVE_SEC" -lt 8 ] && [ "\${DY_CHROME_NOSANDBOX:-0}" != "1" ] \
+     && grep -qi "sandbox" "$LOG_DIR/chromium.log" 2>/dev/null \
+     && ! grep -qi "Parent process should exit" "$LOG_DIR/chromium.log" 2>/dev/null; then
+    export DY_CHROME_NOSANDBOX=1
+    log "WARN: Chromium 原生沙箱启动失败（容器 namespace 受限）→ 已回退 --no-sandbox（仍受 OS 用户级隔离）"
+    echo "[r28-sandbox-fallback] $(date -Is) chromium sandbox failed, fallback to no-sandbox (OS-user isolation remains)" >> "$LOG_DIR/policy.log" 2>/dev/null || true
+  fi
   CHROME_PID=""
   RESTARTS=$((RESTARTS + 1))
   log "浏览器进程退出（第 ${RESTARTS} 次），1 秒后以同一 Profile 自动拉起"

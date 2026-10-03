@@ -44,6 +44,24 @@ export async function GET(req: NextRequest, ctxParams: { params: Promise<{ id: s
     }
     if (!auth) throw new BizError(ErrorCode.FORBIDDEN, "回放票据对应的用户已不可用")
 
+    // ---- r28：防直链外传（Referer/Sec-Fetch-Site 校验：非同源导航拒绝）----
+    const ref = req.headers.get("referer") || ""
+    const fetchSite = req.headers.get("sec-fetch-site") || ""
+    if (ref && process.env.NODE_ENV === "production") {
+      try {
+        const refOrigin = new URL(ref).origin
+        const selfOrigin = new URL(req.nextUrl.origin).origin
+        if (refOrigin !== selfOrigin) {
+          throw new BizError(ErrorCode.FORBIDDEN, "跨源访问被拒绝（回放仅限平台内嵌播放器）")
+        }
+      } catch (e) {
+        if ((e as Error).message?.includes("跨源")) throw e
+      }
+    }
+    if (fetchSite && ["cross-site", "same-site"].includes(fetchSite) && fetchSite === "cross-site") {
+      throw new BizError(ErrorCode.FORBIDDEN, "跨站访问被拒绝")
+    }
+
     if (!rateLimit(`rec-stream:${auth.userId}`, download ? 30 : 240, 60_000).allowed) {
       throw new BizError(ErrorCode.RATE_LIMITED, "访问过于频繁，请稍后再试")
     }
@@ -102,6 +120,17 @@ export async function GET(req: NextRequest, ctxParams: { params: Promise<{ id: s
       ownerUserId: rec.userId,
       after: { segment: rec.segmentIndex, sizeBytes: st.size, via: token ? "signed-token" : "cookie-session" },
     }).catch(() => {})
+
+    // ---- r28：导出策略管控（download 模式：非管理员须命中 allowExport）----
+    if (download) {
+      if (!isAdmin) {
+        const { resolvePlaybackPolicy } = await import("@/lib/playback-policy")
+        const policy = await resolvePlaybackPolicy(auth.userId, rec.workspaceId)
+        if (!policy.allowExport) {
+          throw new BizError(ErrorCode.FORBIDDEN, "管理员已禁止导出/下载该录像（仅允许在线回放）")
+        }
+      }
+    }
 
     // ---- 下载模式：完整 200 + RFC5987 双文件名 ----
     if (download) {

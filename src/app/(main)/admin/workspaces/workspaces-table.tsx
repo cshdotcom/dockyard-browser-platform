@@ -15,6 +15,7 @@ import {
   AlertTriangle, X, Columns3, ShieldCheck, ShieldX, Container, History, ArrowRightLeft, Share2,
   UsersRound, Search, Snowflake, Sunrise, Video,
 } from "lucide-react"
+import { PlaybackPolicyDialog } from "@/components/recordings/playback-policy-dialog"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { Button } from "@/components/ui/button"
@@ -214,6 +215,8 @@ export function WorkspacesTable(props: Props) {
   // ---- r24-h：冻结弹窗状态 ----
   const [freezeTarget, setFreezeTarget] = React.useState<AdminWorkspaceRow | null>(null)
   // r27：录像沙箱级覆盖三态弹窗
+  // r28：回放安全策略（沙箱级覆盖：水印/导出）
+  const [pbTarget, setPbTarget] = React.useState<AdminWorkspaceRow | null>(null)
   const [recTarget, setRecTarget] = React.useState<AdminWorkspaceRow | null>(null)
   const [recChoice, setRecChoice] = React.useState<"on" | "off" | "inherit">("inherit")
   const applyRecording = async () => {
@@ -802,6 +805,9 @@ export function WorkspacesTable(props: Props) {
                   <DropdownMenuItem onClick={() => { setRecTarget(row); setRecChoice((row.recordingOverride as "on" | "off" | null) || "inherit") }}>
                     <Video className="h-4 w-4 mr-2" /> 录像策略（开/关/继承）
                   </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setPbTarget(row)}>
+                    <ShieldCheck className="h-4 w-4 mr-2" /> 回放安全策略（水印/导出）
+                  </DropdownMenuItem>
                   {row.hasNovncSession && (
                     <DropdownMenuItem onClick={() => setVncLimitTarget(row)}>
                       <Anchor className="h-4 w-4 mr-2" /> VNC 会话时长上限
@@ -907,6 +913,16 @@ export function WorkspacesTable(props: Props) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {pbTarget && (
+        <PlaybackPolicyDialog
+          open={!!pbTarget}
+          onOpenChange={(v) => !v && setPbTarget(null)}
+          scope="sandbox"
+          targetId={pbTarget.id}
+          targetName={pbTarget.name}
+          targetUserId={undefined}
+        />
+      )}
 
       <Dialog open={!!freezeTarget} onOpenChange={(v) => !freezing && setFreezeTarget(v ? freezeTarget : null)}>
         <DialogContent className="max-w-md">

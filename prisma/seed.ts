@@ -132,6 +132,7 @@ async function main() {
     { code: "baseline_scan", name: "安全基线扫描（十维合规评分+低分告警）", cron: "0 * * * *", timeout: 300 },
     { code: "recording_scan", name: "VNC录像分段扫描（新段入库/活跃段收尾/死沙箱自动终结）", cron: "*/2 * * * *", timeout: 120 },
     { code: "recording_retention", name: "VNC录像治理（保留期到期+用户配额超额最旧优先归档）", cron: "0 4 * * *", timeout: 300 },
+    { code: "browsing_collect", name: "浏览历史/书签采集（CDP轮询+Profile对账；沙箱隔离级）", cron: "*/2 * * * *", timeout: 120 },
   ]
   for (const t of tasks) {
     await db.scheduleTask.upsert({

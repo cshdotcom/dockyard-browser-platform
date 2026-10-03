@@ -106,11 +106,26 @@ start_recording
 # ---- 4. 防退出主循环 ----
 # 浏览器退出（任何原因）→ wait 返回 → 1 秒后以同一 user-data-dir 拉起
 # 用户“闪退后立即打开”得到的永远是同一个配置的浏览器环境
+# r28：Chromium 原生沙箱优先（渲染进程零 syscall：病毒网页无法读写任何本地文件）
+# 3 秒 headless 探测（无 --no-sandbox）；失败 → 单次回退（OS 用户级隔离仍然生效）
+SANDBOX_ARGS=""
+probe_chrome_sandbox() {
+  chromium --headless=new --user-data-dir=/tmp/chrome-sbx-probe --dump-dom about:blank >/dev/null 2>&1
+  local rc=$?
+  rm -rf /tmp/chrome-sbx-probe
+  [ "$rc" -eq 0 ] && return 0 || return 1
+}
+if probe_chrome_sandbox; then
+  log "Chromium 原生沙箱探测通过（渲染进程零 syscall）"
+else
+  SANDBOX_ARGS="--no-sandbox"
+  log "WARN: Chromium 沙箱不可用（容器 namespace 受限）→ 回退 --no-sandbox（OS 用户隔离兜底）"
+fi
 RESTARTS=0
 while :; do
   chromium \
     --user-data-dir=/home/browser/profile \
-    --no-sandbox \
+    $SANDBOX_ARGS \
     --disable-gpu \
     --no-first-run \
     --disable-session-crashed-bubble \

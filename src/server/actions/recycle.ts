@@ -171,3 +171,54 @@ export async function purgeAllRecycleAction(): Promise<ActionResult<BatchOutcome
     return { successCount, failCount: failures.length, failures }
   })
 }
+
+// ---- r28：管理员单条覆盖保留期（分钟；0=永久保留）----
+export async function setRecycleRetentionAction(input: unknown): Promise<ActionResult<{ id: string; purgeAt: string | null }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAdmin()
+    const { id, minutes } = zodValidate(z.object({ id: zId, minutes: z.number().int().min(0).max(5256000) }), input)
+    const entry = await db.recycleBin.findUnique({ where: { id } })
+    if (!entry) throw new Error("回收站记录不存在")
+    if (entry.locked) throw new Error("该记录已被锁定保护，先解锁再调整保留期")
+    const purgeAt = minutes > 0 ? new Date(Date.now() + minutes * 60_000) : null
+    await db.recycleBin.update({ where: { id }, data: { overrideMinutes: minutes, purgeAt } })
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "ADMIN_RECYCLE_RETENTION_SET",
+      resourceType: entry.resourceType,
+      resourceId: entry.resourceId,
+      resourceName: entry.resourceName,
+      ownerUserId: entry.ownerUserId,
+      before: { purgeAt: entry.purgeAt?.toISOString() || null },
+      after: { overrideMinutes: minutes, purgeAt: purgeAt?.toISOString() || null, note: minutes === 0 ? "永久保留" : `${minutes} 分钟后清除` },
+      severity: "WARN",
+    })
+    return { id, purgeAt: purgeAt?.toISOString() || null }
+  })
+}
+
+// ---- r28：用户/组级回收站保留期基线（管理员设置；null=继承）----
+export async function setRecycleRetentionBaselineAction(input: unknown): Promise<ActionResult<{ saved: boolean }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAdmin()
+    const p = zodValidate(z.object({
+      scope: z.enum(["user", "group"]),
+      targetId: zId,
+      days: z.number().int().min(0).max(3650).nullable(),
+    }), input)
+    if (p.scope === "user") {
+      await db.user.update({ where: { id: p.targetId }, data: { recycleRetentionDays: p.days } })
+    } else {
+      await db.group.update({ where: { id: p.targetId }, data: { recycleRetentionDays: p.days } })
+    }
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "RECYCLE_RETENTION_BASELINE_SET", resourceType: p.scope === "user" ? "USER" : "GROUP",
+      resourceId: p.targetId,
+      after: { scope: p.scope, days: p.days, note: p.days === null ? "继承上层" : p.days === 0 ? "永久保留" : `${p.days} 天` },
+      severity: "WARN",
+    })
+    return { saved: true }
+  })
+}

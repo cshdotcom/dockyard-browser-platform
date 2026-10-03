@@ -19,9 +19,10 @@ import {
   Anchor, Camera, Clipboard, Expand, Minimize2, RefreshCw, Loader2,
   MousePointer2, Hand, ShieldCheck, Eye, TriangleAlert, Zap, Radio, Keyboard, ShipWheel, Monitor,
   Languages, Timer, GripVertical, Send, PanelRightClose, PanelRightOpen, Lock, ChevronsUp,
-} from "lucide-react"
+  Crosshair } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ImeSwitcher } from "./ime-switcher"
+import { ShortcutPanel } from "./shortcut-panel"
 import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
 import {
@@ -202,6 +203,7 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
   const [retryIn, setRetryIn] = React.useState(0)
   const [stats, setStats] = React.useState({ fps: 0, kbps: 0, idle: 0 })
   const [fullscreen, setFullscreen] = React.useState(false)
+  const [immersive, setImmersive] = React.useState(false) // 沉浸模式：全屏+指针锁定+键盘抓取（Esc 退出）
   const [lastKeys, setLastKeys] = React.useState<string[]>([])
   const [clipboardText, setClipboardText] = React.useState("")
   const [clipboardReceived, setClipboardReceived] = React.useState("")
@@ -549,6 +551,25 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
     return () => document.removeEventListener("fullscreenchange", onFs)
   }, [])
 
+  // r28：沉浸模式（全屏 + 指针锁定 + 键盘/鼠标抓取，等效本地云电脑体验）
+  const toggleImmersive = async () => {
+    try {
+      if (immersive) {
+        document.exitPointerLock?.()
+        if (document.fullscreenElement) await document.exitFullscreen()
+        setImmersive(false)
+        toast.success("已退出沉浸模式")
+      } else {
+        if (!document.fullscreenElement) await (stageRef.current?.requestFullscreen?.() || stageRef.current?.requestFullscreen())
+        await (stageRef.current as HTMLElement | null)?.requestPointerLock?.()
+        setImmersive(true)
+        toast.success("沉浸模式：键盘与鼠标已抓取（按 Esc 退出）")
+      }
+    } catch {
+      toast.error("当前环境不允许沉浸模式")
+    }
+  }
+
   const toggleFullscreen = async () => {
     try {
       if (document.fullscreenElement) await document.exitFullscreen()
@@ -875,6 +896,14 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
             </Button>
             {/* r24-c：输入法切换（作用域=本沙箱 X 显示；只读镜像禁用） */}
             <ImeSwitcher workspaceId={workspace.id} disabled={readonly || (phase !== "live" && phase !== "connecting")} />
+            {/* r28：远程快捷键面板（40+ 内置 + 自定义录入，绕过本地抢占） */}
+            <ShortcutPanel
+              sendKey={(keysym, down) => rfbRef.current?.sendKey(keysym, down)}
+              disabled={readonly || phase !== "live"}
+            />
+            <Button size="sm" variant={immersive ? "default" : "outline"} className="h-8 gap-1" onClick={toggleImmersive} title="沉浸模式（全屏+键鼠抓取，Esc 退出）">
+              <Crosshair className="h-3.5 w-3.5" />{immersive ? "沉浸中" : "沉浸"}
+            </Button>
             <Button size="sm" variant="outline" className="h-8" onClick={toggleFullscreen} title="全屏">
               {fullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Expand className="h-3.5 w-3.5" />}
             </Button>

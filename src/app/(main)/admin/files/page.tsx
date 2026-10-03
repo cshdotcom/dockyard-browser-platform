@@ -7,6 +7,8 @@ import { FilesTable, type FileRow } from "./files-table"
 import { UploadCard } from "./upload-card"
 import { TopUsersCard, type UserDiskRow } from "./top-users-card"
 import { FileText, HardDrive, FilePlus2, ShieldCheck } from "lucide-react"
+import { FileExplorerPanel } from "@/components/file-explorer/file-explorer-panel"
+import { Home, Server } from "lucide-react"
 
 // 文件存储管理（管理员）：分页列表 / 统计 / 用户占用 Top10 / 上传 / 下载 / 软删
 export const metadata = { title: "文件存储" }
@@ -111,6 +113,23 @@ export default async function AdminFilesPage({
           sub={virusScanEnabled ? "上传后自动调用扫描接口" : "storage.virusScan=false"}
           icon={<ShieldCheck className="h-4 w-4" />}
           tone={virusScanEnabled ? "success" : "warning"}
+        />
+      </div>
+
+      <div className="rounded-xl border bg-card p-4 space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold">全盘文件管理器</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            容器全盘（只读浏览 + 非敏感区受控写）/ 平台存储 / 用户空间三域切换；编辑器 / 预览 / 压缩解压 / 深度搜索 / 批量操作
+          </p>
+        </div>
+        <FileExplorerPanel
+          initialDomain="STORAGE"
+          domains={[
+            { key: "ROOT_FS", label: "容器全盘", icon: <Server className="h-3.5 w-3.5" /> },
+            { key: "STORAGE", label: "平台存储", icon: <HardDrive className="h-3.5 w-3.5" /> },
+            { key: "HOME", label: "我的空间", icon: <Home className="h-3.5 w-3.5" /> },
+          ]}
         />
       </div>
 

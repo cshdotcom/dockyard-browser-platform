@@ -3,7 +3,7 @@
 // 录像管理面板（r27）：列表 / 回放播放器 / 下载 / 删除 / 备注 / 扫描 + 回收站页签
 // 播放器：HTML5 <video>（src = 60 秒签名票据 URL；服务端 Range 流式 + RBAC）
 
-import React, { useState, useTransition } from "react"
+import React, { useState, useTransition, useRef } from "react"
 import Link from "next/link"
 import {
   listRecordingsAction, playbackRecordingAction, deleteRecordingAction,
@@ -14,6 +14,8 @@ import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { WatermarkOverlay, PlaybackSpeedBar } from "@/components/recordings/watermark-overlay"
+import type { PlaybackTicketInfo } from "@/server/actions/recordings"
 import { toast } from "sonner"
 import { Play, Download, Trash2, RotateCcw, StickyNote, RefreshCcw, Eye, EyeOff, Video, ArchiveRestore } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -59,6 +61,8 @@ export function RecordingsPanel({
   const [playRow, setPlayRow] = useState<RecordingRow | null>(null)
   const [playUrl, setPlayUrl] = useState<string | null>(null)
   const [dlUrl, setDlUrl] = useState<string | null>(null)
+  const [playTicket, setPlayTicket] = useState<PlaybackTicketInfo | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
   const [noteRow, setNoteRow] = useState<RecordingRow | null>(null)
   const [noteText, setNoteText] = useState("")
   const [deleteRow, setDeleteRow] = useState<RecordingRow | null>(null)
@@ -72,6 +76,7 @@ export function RecordingsPanel({
         if (res.code !== 0 || !res.data) throw new Error(res.msg || "回放票据签发失败")
         setPlayUrl(res.data.streamUrl)
         setDlUrl(res.data.downloadUrl)
+        setPlayTicket(res.data)
         setPlayRow(row)
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "回放失败")
@@ -233,6 +238,7 @@ export function RecordingsPanel({
       try {
         const res = await playbackRecordingAction({ id: r.id })
         if (res.code !== 0 || !res.data) throw new Error(res.msg || "下载票据签发失败")
+        if (!res.data.downloadUrl) throw new Error("策略禁止导出该录像（仅允许在线回放）")
         window.open(res.data.downloadUrl, "_blank")
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "下载失败")
@@ -380,15 +386,35 @@ export function RecordingsPanel({
               {playRow && fmtDur(playRow.durationSec)} · {playRow && fmtBytes(playRow.sizeBytes)} · {playRow?.resolution} · {playRow?.fps}fps
             </DialogDescription>
           </DialogHeader>
-          <div className="rounded-lg overflow-hidden bg-black">
+          <div className="relative rounded-lg overflow-hidden bg-black">
             <video
               key={playUrl || "none"}
+              ref={videoRef}
               src={playUrl || undefined}
               controls
               autoPlay
               className="w-full max-h-[60vh]"
               preload="metadata"
+              controlsList="nodownload"
+              disablePictureInPicture
             />
+            {playTicket && (
+              <WatermarkOverlay
+                mode={playTicket.watermark}
+                viewerName={playTicket.viewerName}
+                workspaceName={playTicket.workspaceName}
+                serverNow={playTicket.serverNow}
+                serverTz={playTicket.serverTz}
+              />
+            )}
+          </div>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <PlaybackSpeedBar videoRef={videoRef} />
+            {playTicket && (
+              <div className="text-xs text-muted-foreground">
+                水印策略：{playTicket.watermark === "force" ? "强制开启" : playTicket.watermark === "on" ? "默认开启（可临时关闭）" : "关闭"}（来源 {playTicket.watermarkSource}）· 服务器时间 {playTicket.serverTz}
+              </div>
+            )}
           </div>
           <DialogFooter className="sm:justify-between">
             <p className="text-xs text-muted-foreground">回放与下载均已审计留痕（RECORDING_VIEW / RECORDING_DOWNLOAD）</p>

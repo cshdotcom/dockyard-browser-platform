@@ -5,7 +5,7 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { ChevronDown, ChevronRight, FileDown, FileUp, KeyRound, MoreHorizontal, Plus, Search, Trash2, X, Loader2, UserX } from "lucide-react"
+import { ChevronDown, ChevronRight, FileDown, FileUp, KeyRound, MoreHorizontal, Plus, Search, Trash2, X, Loader2, UserX , Video , Recycle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -20,6 +20,8 @@ import { adminEvictGroupSharesAction, adminShareEvictPreviewAction } from "@/ser
 import { BatchFailuresDialog } from "@/components/shared/batch-ui"
 import { GroupFormDialog } from "./group-form"
 import { GroupTokenPolicyDialog } from "../users/token-policy-dialog"
+import { PlaybackPolicyDialog } from "@/components/recordings/playback-policy-dialog"
+import { RetentionPolicyDialog } from "@/components/recycle/retention-policy-dialog"
 import {
   MembersDialog, AdminsDialog, ProxiesDialog, LocksDialog, CopyGroupDialog, ImportGroupsDialog,
   type UserOption, type ProxyOption,
@@ -79,6 +81,8 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
   const [locksGroup, setLocksGroup] = React.useState<AdminGroupNode | null>(null)
   // r23-d：组级 API-Key 策略（成员默认基线）
   const [tokenPolicyGroup, setTokenPolicyGroup] = React.useState<AdminGroupNode | null>(null)
+  const [pbPolicyGroup, setPbPolicyGroup] = React.useState<AdminGroupNode | null>(null)
+  const [retentionGroup, setRetentionGroup] = React.useState<AdminGroupNode | null>(null)
   const [copyGroup, setCopyGroup] = React.useState<AdminGroupNode | null>(null)
   const [deleteGroup, setDeleteGroup] = React.useState<AdminGroupNode | null>(null)
   const [importOpen, setImportOpen] = React.useState(false)
@@ -308,6 +312,12 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
                 <DropdownMenuItem onClick={() => { setAdminsGroup(node) }}>组管理员</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setProxiesGroup(node) }}>代理绑定</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setLocksGroup(node) }}>权限锁</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setPbPolicyGroup(node) }}>
+                  <Video className="mr-1.5 h-4 w-4 text-teal-600" /> 回放安全策略（水印/导出）
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setRetentionGroup(node) }}>
+                  <Recycle className="mr-1.5 h-4 w-4 text-amber-600" /> 回收站保留期（天）
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setTokenPolicyGroup(node) }}>
                   <KeyRound className="mr-1.5 h-4 w-4" /> API-Key 策略
                 </DropdownMenuItem>
@@ -475,6 +485,25 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
         onOpenChange={(v) => !v && setTokenPolicyGroup(null)}
         group={tokenPolicyGroup ? { id: tokenPolicyGroup.id, name: tokenPolicyGroup.name } : null}
       />
+      {retentionGroup && (
+        <RetentionPolicyDialog
+          open={!!retentionGroup}
+          onOpenChange={(v) => !v && setRetentionGroup(null)}
+          scope="group"
+          targetId={retentionGroup.id}
+          targetName={retentionGroup.name}
+          initialDays={null}
+        />
+      )}
+      {pbPolicyGroup && (
+        <PlaybackPolicyDialog
+          open={!!pbPolicyGroup}
+          onOpenChange={(v) => !v && setPbPolicyGroup(null)}
+          scope="group"
+          targetId={pbPolicyGroup.id}
+          targetName={pbPolicyGroup.name}
+        />
+      )}
 
       {/* 复制 */}
       <CopyGroupDialog

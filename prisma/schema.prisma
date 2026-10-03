@@ -53,6 +53,12 @@ model User {
   tokenPolicy            Json? // { allowCreate, maxPerUser, allowPermanent, maxLifetimeDays, rateLimitPerMin, allowedScopes }（null字段=继承）
   // —— r27：VNC 会话录像策略（用户级覆盖；null=继承用户组/全局默认）——
   vncRecording           Boolean?
+  // —— r28：回放安全策略（水印/导出；null=继承组/全局默认）{ watermark: "force"|"on"|"off", allowExport: bool }——
+  vncPlayback            Json?
+  // —— r28：回收站保留期（天，null=继承组/全局默认；0=永久保留）——
+  recycleRetentionDays   Int?
+  // —— r28：文件传输限速（KB/s，null=继承组/全局；0=不限）——
+  fileTransferKBps       Int?
   loginSessionCount   Int       @default(0)
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -206,6 +212,12 @@ model Group {
   tokenPolicy      Json? // { allowCreate, maxPerUser, allowPermanent, maxLifetimeDays, rateLimitPerMin, allowedScopes }（null字段=继承）
   // —— r27：VNC 会话录像组级基线（null=继承全局默认）——
   vncRecording     Boolean?
+  // —— r28：回放安全组级基线 { watermark, allowExport }（null=继承全局默认）——
+  vncPlayback      Json?
+  // —— r28：回收站保留期组级基线（天，null=继承全局默认；0=永久保留）——
+  recycleRetentionDays Int?
+  // —— r28：文件传输限速组级基线（KB/s，null=继承全局；0=不限）——
+  fileTransferKBps Int?
   createdByUserId  String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -624,6 +636,8 @@ model BrowserWorkspace {
   kbLayout           String?  // 偏好键盘布局（如 us/cn/de/fr…；空=跟随默认）
   // —— r27：VNC 会话录像沙箱级覆盖（"on"/"off"；null=继承 用户>组>全局 默认）——
   recordingOverride  String?
+  // —— r28：回放安全沙箱级覆盖 { watermark: force|on|off, allowExport }（null=继承上层）——
+  vncPlayback Json?
   containerRef       String?  // 自托管硬隔离浏览器容器（name/id，防退出看门狗自愈目标）
   hardeningJson      Json?    // 隔离防护快照（只读根FS/CapDrop/noexec下载/独立Profile卷/防退出循环）
   networkPolicyJson  Json?    // 生效网络策略快照 { allowInternalNetwork, allowSecureLocationAccess, source, enforcedAt, domainMode, domainBlack, domainWhite, endpointBlack, endpointWhite }
@@ -1017,6 +1031,52 @@ model McpTaskItem {
 // 十、回收站 / 风控 / 公告 / 行为画像 / 自检
 // ============================================================
 
+// ============================================================
+// r28：浏览历史 / 书签（沙箱隔离 + 用户隔离，采集引擎周期入库）
+// ============================================================
+
+model BrowseHistoryEntry {
+  id            String    @id @default(cuid())
+  workspaceId   String
+  workspaceUuid String?   // 冗余 uuid（沙箱克隆/重建后仍可溯源）
+  userId        String?
+  url           String
+  title         String?
+  domain        String?
+  visitAt       DateTime  @default(now())
+  dwellMs       Int       @default(0) // 停留时长（同 URL 连续访问合并累计）
+  incognitoHint Boolean   @default(false)
+  source        String    @default("CDP_POLL") // CDP_POLL | MANUAL
+  deletedAt     DateTime? // 用户本地删除标记（审计另有归档）
+  createdAt     DateTime  @default(now())
+
+  @@index([workspaceId, visitAt])
+  @@index([userId, visitAt])
+  @@index([domain])
+  @@index([url])
+}
+
+model BookmarkEntry {
+  id            String    @id @default(cuid())
+  workspaceId   String
+  workspaceUuid String?
+  userId        String?
+  guid          String?   // Chromium 书签 GUID
+  url           String
+  title         String?
+  folder        String?   // 所在文件夹路径（如 书签栏/工作）
+  position      Int       @default(0)
+  dateAdded     DateTime?
+  removedAt     DateTime? // 用户删除时标记（upsert 对账）
+  lastSyncAt    DateTime  @default(now())
+  createdAt     DateTime  @default(now())
+
+  @@unique([workspaceId, guid])
+  @@index([userId])
+  @@index([url])
+  @@index([workspaceId, removedAt])
+}
+
 model RecycleBin {
   id                String    @id @default(cuid())
   resourceType      String
@@ -1029,6 +1089,7 @@ model RecycleBin {
   reason            String?
   originalSnapshot  String // 完整原始记录快照，恢复用
   locked            Boolean   @default(false) // 锁定保护
+  overrideMinutes   Int?      // r28：管理员单条覆盖保留期（分钟；null=策略链解析值）
   recoverDeadline   DateTime? // 恢复时效限制
   purgeAt           DateTime? // 物理清除时间
   restoredAt        DateTime?
@@ -1037,6 +1098,35 @@ model RecycleBin {
   @@index([resourceType, resourceId])
   @@index([ownerUserId])
   @@index([purgeAt])
+}
+
+// ============================================================
+// r28：文件分享链接（有效期/权限模式/次数/限速）
+// ============================================================
+
+model FileShareLink {
+  id             String    @id @default(cuid())
+  token          String    @unique
+  domain         String    @default("STORAGE") // ROOT_FS | STORAGE
+  filePath       String    // 域内相对路径
+  fileName       String
+  sizeBytes      Int       @default(0)
+  ownerUserId    String
+  accessMode     String    @default("LOGIN") // PUBLIC(免登录) | LOGIN(需登录) | USERS(指定用户)
+  allowedUsers   Json?     // userIds 名单（USERS 模式）
+  expiresAt      DateTime? // null = 永久有效
+  maxViews       Int?      // null = 不限查看次数
+  maxDownloads   Int?      // null = 不限下载次数
+  downloadKBps   Int?      // null = 继承用户/全局限速
+  viewCount      Int       @default(0)
+  downloadCount  Int       @default(0)
+  note           String?
+  revokedAt      DateTime?
+  lastAccessAt   DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([ownerUserId])
+  @@index([revokedAt, expiresAt])
 }
 
 model RiskListRule {

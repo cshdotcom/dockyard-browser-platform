@@ -54,6 +54,16 @@ model User {
   // —— 闲置超时四级策略链（分钟；沙箱>用户>用户组>全局默认；0=无限即永不闲置回收）——
   idleTimeoutMinutes     Int? // null=继承用户组
   idleTimeoutLocked      Boolean @default(false) // true=管理员锁定：用户创建/编辑沙箱时不可自行调整闲置超时
+  // —— r23：API-Key 精确管控（用户级覆盖，null=继承所属组；组也未设置时用全局默认）——
+  tokenPolicy            Json? // { allowCreate, maxPerUser, allowPermanent, maxLifetimeDays, rateLimitPerMin, allowedScopes }（null字段=继承）
+  // —— r27：VNC 会话录像策略（用户级覆盖；null=继承用户组/全局默认）——
+  vncRecording           Boolean?
+  // —— r28：回放安全策略（水印/导出；null=继承组/全局默认）——
+  vncPlayback            Json? // { watermark: "force"|"on"|"off", allowExport: bool }
+  // —— r28：回收站保留期（天，null=继承组/全局默认；0=永久保留）——
+  recycleRetentionDays   Int?
+  // —— r28：文件传输限速（KB/s，null=继承组/全局；0=不限）——
+  fileTransferKBps       Int?
   loginSessionCount   Int       @default(0)
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -203,6 +213,16 @@ model Group {
   idleTimeoutMinutes         Int? // 组级闲置超时（分钟，null=继承全局默认，0=无限）
   idleTimeoutLocked          Boolean @default(false) // true=组内成员不可自行调整闲置超时（沙箱级仍可由管理员改）
   policy           Json? // 组级权限锁 / 生命周期默认策略
+  // —— r23：API-Key 精确管控（组级基线；用户级 tokenPolicy 可覆盖，均未设置时用全局默认）——
+  tokenPolicy      Json? // { allowCreate, maxPerUser, allowPermanent, maxLifetimeDays, rateLimitPerMin, allowedScopes }
+  // —— r27：VNC 会话录像组级基线（null=继承全局默认）——
+  vncRecording     Boolean?
+  // —— r28：回放安全组级基线（null=继承全局默认）——
+  vncPlayback      Json? // { watermark: "force"|"on"|"off", allowExport: bool }
+  // —— r28：回收站保留期组级基线（天，null=继承全局默认；0=永久保留）——
+  recycleRetentionDays Int?
+  // —— r28：文件传输限速组级基线（KB/s，null=继承全局；0=不限）——
+  fileTransferKBps Int?
   createdByUserId  String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -592,6 +612,10 @@ model BrowserWorkspace {
   networkPolicyJson  Json?    // 生效网络策略快照 { allowInternalNetwork, allowSecureLocationAccess, source, enforcedAt, domainMode, domainBlack, domainWhite, endpointBlack, endpointWhite }
   startedAt          DateTime? // 最近一次启动时间（运行时长计算基准；停止时冻结增量入 runtimeAccumSec）
   runtimeAccumSec    Int       @default(0) // 累计运行秒数（不含当前运行段）
+  // —— r27：沙箱级录像三态覆盖（on/off/inherit）——
+  recordingOverride  String? // on | off | null=inherit
+  // —— r28：回放安全沙箱级覆盖 { watermark: force|on|off, allowExport }（null=继承上层）——
+  vncPlayback        Json?
   lastActiveAt       DateTime? // 最近活跃（VNC取票/CDP指令/脚本执行触发）
   createdByUserId    String?
   createdAt          DateTime  @default(now())
@@ -963,6 +987,81 @@ model McpTaskItem {
 // 十、回收站 / 风控 / 公告 / 行为画像 / 自检
 // ============================================================
 
+model IpBanRecord {
+  id            String    @id @default(cuid())
+  ip            String
+  source        String    @default("LOGIN") // LOGIN | API_KEY | MANUAL
+  failCount     Int       @default(0) // 窗口内累计失败次数
+  firstFailAt   DateTime?
+  lastFailAt    DateTime?
+  bannedUntil   DateTime? // null=当前未封禁（仅计数）；非空=封禁生效中
+  reason        String?   // 封禁原因
+  note          String?   // 管理员备注（手动封禁/解封说明）
+  createdByUserId String? // 手动封禁操作人
+  unbannedByUserId String? // 手动解封操作人
+  unbannedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([ip])
+  @@index([bannedUntil])
+  @@index([lastFailAt])
+}
+
+model VncRecording {
+  id             String    @id @default(cuid())
+  workspaceId    String
+  workspaceUuid  String?   // 冗余（工作区删除后仍可溯源）
+  workspaceName  String    // 冗余同上（列表可读）
+  userId         String    // 归属用户（录像文件存其用户空间）
+  username       String?   // 冗余（用户删除后可读）
+  sessionId      String    // 录像会话组（= 沙箱进程树 id emb-*/dy-browser-*）
+  segmentIndex   Int       @default(0) // 组内分段序号（0 起）
+  status         String    @default("RECORDING") // RECORDING | COMPLETED | FAILED
+  trigger        String    @default("AUTO") // AUTO（策略自动开录）| MANUAL（管理员手动取证）
+  startedAt      DateTime  @default(now()) // 本段开始
+  endedAt        DateTime? // 本段结束（扫描/终结时回填）
+  durationSec    Int       @default(0)
+  sizeBytes      Int       @default(0)
+  storageKey     String?   // 相对 storage 根路径（recordings/<userId>/<sessionId>/seg-NNN.mp4）
+  resolution     String?
+  fps            Int       @default(12)
+  policySource   String?   // 录像策略命中层（SANDBOX|USER|GROUP|GLOBAL_DEFAULT）
+  note           String?
+  viewCount      Int       @default(0)
+  lastViewedAt   DateTime?
+  downloadCount  Int       @default(0)
+  lastDownloadAt DateTime?
+  metadata       Json?     // 溯源（模板/策略快照/浏览器版本等）
+  deletedAt      DateTime? // 软删 → 回收站
+  purgeAt        DateTime? // 物理清除计划时间（保留期到期）
+  restoredAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([sessionId, segmentIndex]) // 幂等：补行/注册双通道不会产生重复分段行
+  @@index([userId, deletedAt])
+  @@index([workspaceId])
+  @@index([status, deletedAt])
+  @@index([deletedAt, purgeAt])
+  @@index([createdAt])
+}
+
+model BrowserTemplateVersion {
+  id             String   @id @default(cuid())
+  templateId     String
+  version        Int      // 对应 BrowserTemplate.version（快照时点）
+  configJson     String   // 该版本完整配置快照
+  changeNote     String?  // 变更说明（自动生成或人工备注）
+  changedFields  Json?    // 相对上一版本的变更字段清单（差异对比预计算）
+  createdByUserId String?
+  createdByName  String?
+  createdAt      DateTime @default(now())
+
+  @@unique([templateId, version])
+  @@index([templateId, createdAt])
+}
+
 model RecycleBin {
   id                String    @id @default(cuid())
   resourceType      String
@@ -975,6 +1074,7 @@ model RecycleBin {
   reason            String?
   originalSnapshot  String // 完整原始记录快照，恢复用
   locked            Boolean   @default(false) // 锁定保护
+  overrideMinutes   Int?      // r28：管理员单条覆盖保留期（分钟；null=策略链解析值）
   recoverDeadline   DateTime? // 恢复时效限制
   purgeAt           DateTime? // 物理清除时间
   restoredAt        DateTime?
@@ -983,6 +1083,77 @@ model RecycleBin {
   @@index([resourceType, resourceId])
   @@index([ownerUserId])
   @@index([purgeAt])
+}
+
+model BookmarkEntry {
+  id            String    @id @default(cuid())
+  workspaceId   String
+  workspaceUuid String?
+  userId        String?
+  guid          String?   // Chromium 书签 GUID
+  url           String
+  title         String?
+  folder        String?   // 所在文件夹路径（如 书签栏/工作）
+  position      Int       @default(0)
+  dateAdded     DateTime?
+  removedAt     DateTime? // 用户删除时标记（upsert 对账）
+  lastSyncAt    DateTime  @default(now())
+  createdAt     DateTime  @default(now())
+
+  @@unique([workspaceId, guid])
+  @@index([userId])
+  @@index([url])
+  @@index([workspaceId, removedAt])
+}
+
+model BrowseHistoryEntry {
+  id            String    @id @default(cuid())
+  workspaceId   String
+  workspaceUuid String?   // 冗余 uuid（沙箱克隆/重建后仍可溯源）
+  userId        String?
+  url           String
+  title         String?
+  domain        String?
+  visitAt       DateTime  @default(now())
+  dwellMs       Int       @default(0) // 停留时长（同 URL 连续访问合并累计）
+  incognitoHint Boolean   @default(false)
+  source        String    @default("CDP_POLL") // CDP_POLL | MANUAL
+  deletedAt     DateTime? // 用户本地删除标记（审计另有归档）
+  createdAt     DateTime  @default(now())
+
+  @@index([workspaceId, visitAt])
+  @@index([userId, visitAt])
+  @@index([domain])
+  @@index([url])
+}
+
+// ============================================================
+// r28：文件分享链接（有效期/权限模式/次数/限速）
+// ============================================================
+
+model FileShareLink {
+  id             String    @id @default(cuid())
+  token          String    @unique
+  domain         String    @default("STORAGE") // ROOT_FS | STORAGE
+  filePath       String    // 域内相对路径
+  fileName       String
+  sizeBytes      Int       @default(0)
+  ownerUserId    String
+  accessMode     String    @default("LOGIN") // PUBLIC(免登录) | LOGIN(需登录) | USERS(指定用户)
+  allowedUsers   Json?     // userIds 名单（USERS 模式）
+  expiresAt      DateTime? // null = 永久有效
+  maxViews       Int?      // null = 不限查看次数
+  maxDownloads   Int?      // null = 不限下载次数
+  downloadKBps   Int?      // null = 继承用户/全局限速
+  viewCount      Int       @default(0)
+  downloadCount  Int       @default(0)
+  note           String?
+  revokedAt      DateTime?
+  lastAccessAt   DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([ownerUserId])
+  @@index([revokedAt, expiresAt])
 }
 
 model RiskListRule {

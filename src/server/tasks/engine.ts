@@ -708,6 +708,14 @@ export const TASKS: Record<string, (log: (m: string) => void, params?: unknown) 
     return { itemsProcessed: r.expired + r.quotaEvicted, summary: `保留期到期 ${r.expired} 段、配额治理 ${r.quotaEvicted} 段（覆盖 ${r.usersChecked} 个用户）` }
   },
 
+  // 27. r28：浏览历史/书签采集（CDP /json/list 轮询 + Profile Bookmarks 对账；沙箱隔离级）
+  async browsing_collect(log) {
+    const { collectAllRunningBrowsing } = await import("@/lib/browsing-collector")
+    const r = await collectAllRunningBrowsing()
+    log(`历史新增 ${r.historyInserted} 条 / 合并 ${r.historyMerged} 条；书签对账 ${r.bookmarkWorkspaces} 个沙箱（upsert ${r.bookmarkUpserted}、移除 ${r.bookmarkRemoved}）`)
+    return { itemsProcessed: r.historyInserted + r.bookmarkUpserted, summary: `采集 ${r.workspaces} 个运行沙箱：历史新 ${r.historyInserted}/合并 ${r.historyMerged}，书签同步 ${r.bookmarkUpserted} 条（移除 ${r.bookmarkRemoved}）` }
+  },
+
   // ---- r24-a：参数化自定义执行体（执行内容完全放开；paramsJson 携带参数）----
   // 注：custom_shell 顶层调用由 runTask 直连（携带任务自身 timeoutSec）；
   // 此注册表项用于类型清单展示 + 任务链步骤内调用（步骤超时兜底 300s）

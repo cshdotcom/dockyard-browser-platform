@@ -947,6 +947,7 @@ export async function setUserNetworkPolicyAction(
         allowInternalNetwork: z.boolean().nullable(), // null=继承所属组
         allowSecureLocationAccess: z.boolean().nullable(), // null=继承所属组
         vncSessionMaxMinutes: z.number().int().min(0).max(43200).nullable().optional(), // null=继承组，0=不限
+        fileTransferKBps: z.number().int().min(0).max(1048576).nullable().optional(), // r28：用户级文件传输限速（KB/s；null=继承组/全局，0=不限）
       }),
       input,
     )
@@ -971,6 +972,7 @@ export async function setUserNetworkPolicyAction(
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
         ...(p.vncSessionMaxMinutes !== undefined ? { vncSessionMaxMinutes: p.vncSessionMaxMinutes } : {}),
+        ...(p.fileTransferKBps !== undefined ? { fileTransferKBps: p.fileTransferKBps } : {}),
       },
     })
 

@@ -777,9 +777,13 @@ if [ -n "$DY_POLICY_FILE" ] && [ -f "$DY_POLICY_FILE" ]; then
     echo "[emb] WARN: /etc/chromium/policies/managed/dockyard.json 不存在 → 以全局基线运行" >>"$DY_LOG_DIR/policy.log"
   fi
 fi
+# r28: Chromium process-level sandbox enabled by default (renderer zero-syscall; virus page cannot read any local file).
+# DY_CHROME_NOSANDBOX=1 -> fallback (auto-set once by outer supervisor on sandbox startup failure).
+SANDBOX_FLAG=""
+if [ "\${DY_CHROME_NOSANDBOX:-0}" = "1" ]; then SANDBOX_FLAG="--no-sandbox"; fi
 ${nprocExec} "${bins.chrome}" \\
   --user-data-dir="\${DY_PROFILE_DIR}" \\
-  --no-sandbox --disable-gpu --no-first-run \\
+  \${SANDBOX_FLAG} --disable-gpu --no-first-run \\
   --disable-session-crashed-bubble --hide-crash-restore-bubble \\
   --restore-last-session ${resolutionArgs(resolution).join(" ")} ${guard.args} \\
   --remote-debugging-address=127.0.0.1 --remote-debugging-port=${cdpPort} \\

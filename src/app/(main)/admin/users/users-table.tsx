@@ -3,9 +3,11 @@
 // 用户管理交互表格：批量操作 / 行操作菜单 / CSV导入导出 / 2FA管控 / 临时密码与备份码展示
 
 import * as React from "react"
+import { PlaybackPolicyDialog } from "@/components/recordings/playback-policy-dialog"
+import { RetentionPolicyDialog } from "@/components/recycle/retention-policy-dialog"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2, Share2, Ban, Undo2, UserX } from "lucide-react"
+import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2, Share2, Ban, Undo2, UserX , Video , Recycle , Gauge } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { UserAvatar } from "@/components/shared/user-avatar"
@@ -140,6 +142,8 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
 
   // r23-d：用户级 API-Key 策略（四级链覆盖）
   const [tokenPolicyUser, setTokenPolicyUser] = React.useState<AdminUserRow | null>(null)
+  const [pbPolicyUser, setPbPolicyUser] = React.useState<AdminUserRow | null>(null)
+  const [retentionTarget, setRetentionTarget] = React.useState<AdminUserRow | null>(null)
 
   const [importOpen, setImportOpen] = React.useState(false)
   const [importMode, setImportMode] = React.useState<"skip" | "update">("skip")
@@ -522,6 +526,18 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
         >
           <KeyRound className="mr-1.5 h-4 w-4 text-amber-500" /> API-Key 策略（创建/数量/限流）
         </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setPbPolicyUser(row)}>
+          <Video className="mr-1.5 h-4 w-4 text-teal-600" /> 回放安全策略（水印/导出）
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setRetentionTarget(row)}>
+          <Recycle className="mr-1.5 h-4 w-4 text-amber-600" /> 回收站保留期（天）
+        </DropdownMenuItem>
+        <DropdownMenuItem key="rate-limit" onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: row.allowInternalNetwork, allowSecureLocationAccess: row.allowSecureLocationAccess, fileTransferKBps: 512 }))}>
+          <Gauge className="mr-1.5 h-4 w-4 text-sky-600" /> 文件传输限速 512KB/s
+        </DropdownMenuItem>
+        <DropdownMenuItem key="rate-unlimit" onClick={() => callAction(row.id, () => setUserNetworkPolicyAction({ id: row.id, allowInternalNetwork: row.allowInternalNetwork, allowSecureLocationAccess: row.allowSecureLocationAccess, fileTransferKBps: 0 }))}>
+          <Gauge className="mr-1.5 h-4 w-4 text-sky-600" /> 文件传输不限速
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={() => callAction(row.id, () => kickUserSessionsAction({ ids: [row.id] }))}>
           强制下线全部会话
         </DropdownMenuItem>
@@ -668,6 +684,25 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
         open={!!tokenPolicyUser}
         onOpenChange={(v) => !v && setTokenPolicyUser(null)}
       />
+        {retentionTarget && (
+          <RetentionPolicyDialog
+            open={!!retentionTarget}
+            onOpenChange={(v) => !v && setRetentionTarget(null)}
+            scope="user"
+            targetId={retentionTarget.id}
+            targetName={retentionTarget.username}
+            initialDays={null}
+          />
+        )}
+        {pbPolicyUser && (
+          <PlaybackPolicyDialog
+            open={!!pbPolicyUser}
+            onOpenChange={(v) => !v && setPbPolicyUser(null)}
+            scope="user"
+            targetId={pbPolicyUser.id}
+            targetName={pbPolicyUser.username}
+          />
+        )}
 
       {/* 删除确认 */}
       <ConfirmDialog

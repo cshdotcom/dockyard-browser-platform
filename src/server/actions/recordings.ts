@@ -195,7 +195,24 @@ export async function myRecordingsAction(input: unknown): Promise<ActionResult<{
 }
 
 // ---- 回放票据签发（RBAC 校验后授予 60 秒时效流媒体 URL）----
-export async function playbackRecordingAction(input: unknown): Promise<ActionResult<{ streamUrl: string; downloadUrl: string; durationSec: number; sizeBytes: number; resolution: string | null }>> {
+export interface PlaybackTicketInfo {
+  streamUrl: string
+  downloadUrl: string | null
+  durationSec: number
+  sizeBytes: number
+  resolution: string | null
+  watermark: "force" | "on" | "off"
+  watermarkForced: boolean
+  allowExport: boolean
+  watermarkSource: string
+  serverNow: string
+  serverTz: string
+  viewerName: string
+  workspaceName: string
+  workspaceUuid: string | null
+}
+
+export async function playbackRecordingAction(input: unknown): Promise<ActionResult<PlaybackTicketInfo>> {
   return actionHandler(async () => {
     const ctx = await requireAuth()
     const { id } = zodValidate(z.object({ id: zId }), input)
@@ -219,13 +236,28 @@ export async function playbackRecordingAction(input: unknown): Promise<ActionRes
     }
     if (!rec.storageKey || rec.status !== "COMPLETED") throw new Error("该分段尚未完成写入，稍后再试")
 
+    // r28：回放安全策略（水印/导出四级链）+ 服务器北京时间（水印时间权威源）
+    const { resolvePlaybackPolicy } = await import("@/lib/playback-policy")
+    const policy = await resolvePlaybackPolicy(ctx.userId, rec.workspaceId)
+    const isAdminViewer = ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN"
+    const allowExport = policy.allowExport || isAdminViewer // 管理员导出始终放行（受审计）；用户受策略管控
+
     const token = signPlaybackToken(rec.id, ctx.userId, 60)
     return {
       streamUrl: `/api/recordings/stream/${rec.id}?token=${encodeURIComponent(token)}`,
-      downloadUrl: `/api/recordings/stream/${rec.id}?token=${encodeURIComponent(token)}&download=1`,
+      downloadUrl: allowExport ? `/api/recordings/stream/${rec.id}?token=${encodeURIComponent(token)}&download=1` : null,
       durationSec: rec.durationSec,
       sizeBytes: rec.sizeBytes,
       resolution: rec.resolution,
+      watermark: policy.watermark,
+      watermarkForced: policy.watermark === "force",
+      allowExport,
+      watermarkSource: policy.source,
+      serverNow: policy.serverNow,
+      serverTz: policy.serverTz,
+      viewerName: ctx.username,
+      workspaceName: rec.workspaceName,
+      workspaceUuid: rec.workspaceUuid,
     }
   })
 }
