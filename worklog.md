@@ -1103,3 +1103,18 @@ Work Log:
 Stage Summary:
 - r31 交付 13 大块：VNC 手机输入体系（软键盘/即时输入/多语言剪贴板/全屏自适应）、手动录屏按钮+异步引擎（真 ffmpeg 15/15）、我的记录多选沙箱、分享系统全面重构（404 根因=页面路由缺失+目录 404；预览页/zip/Range/双多选/自定义到期/延期）、文件管理多标签页+收藏夹+跨端同步、用户资料直达、DFS 节点筛选+统一归属点击筛选、VNC 时长三级自定义、时区系统（后台可改默认北京时间）、权限中心（30 锁三级矩阵）、管理员用户侧默认自己+后台能力继承、跨域部署文档、修复入库损坏行
 - E2E：分享全链路（含 demo 授权访问/Range 修复实证）+ 手动录屏引擎冒烟 15/15 + 6 页面渲染验证；QA 数据归零
+---
+Task ID: 31-final
+Agent: main
+Task: r31 终态 — CI 全绿监督 + GHCR 发布确认 + 收尾
+
+Work Log:
+- 【提交链】614cd12（r31 主体 44 文件：VNC 输入体系/手动录屏/分享重构/多标签/权限中心/时区/DFS/文档等）单提交推送 main
+- 【CI 终态】614cd12：CI Lint ✅ success + Build & Push Docker Image ✅ success（主镜像 + Worker 双镜像同批构建，~35 分钟：prisma schema 变更层重建）
+- 【GHCR 发布确认】主镜像 main tag manifest HTTP 200（oci image index，匿名 pull token 实测可拉取）；r31 组件（在线软键盘/手动录屏引擎/分享预览页/多标签收藏/权限中心/时区系统）随 main/latest 发布
+- 【环境】dev 三服务守护健康（app 200 / bridge 3005 ok / cdp-gateway ok）；QA 数据归零（工作区 0/分享 0/录像 0/偏好清/测试文件清）
+- 【质量证据汇总】手动录屏引擎冒烟 15/15（真 Xvfb+ffmpeg）；分享全链路 E2E（深链直达/文件夹 USERS 授权 demo 访问/单文件 Markdown 预览/Range 206 修复实证 0-9/24/zip 魔数 504b0304/未登录 401/坏 token 404）；权限中心/DFS/工作区管理员视图/时区配置 6 页面渲染验证；tsc 83=基线 85-2（stash 对照，零新增+修复 r29 入库损坏）；lint 0 error 0 warning（38 文件）；build 全绿
+
+Stage Summary:
+- r31 全部交付并推送发布：13 大块企业级增强（VNC 手机输入/录屏按钮/记录多选/分享重构 404 根因修复/多标签收藏跨端同步/用户资料直达/DFS 归属点击/时长自定义/时区/权限中心/管理员用户侧视图/跨域文档/入库损坏修复）
+- CI 双工作流全绿；GHCR 主镜像 main/latest 更新可拉取；QA 数据清理归零
