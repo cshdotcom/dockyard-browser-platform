@@ -16,6 +16,69 @@
 
 import { db } from "./db"
 
+// ---- CRX 插件库元数据缓存（16 条约束之一：合并引擎免 N+1） ----
+// 插件库元数据（名称/权限/高危/开关/软删）在五级合并时被逐条引用；
+// 直查 DB 会在大策略链下产生 N+1。缓存 TTL 30s + 写路径主动失效（保存/启停/回收/恢复）。
+const LIB_CACHE_TTL_MS = 30_000
+const gLib = globalThis as unknown as { __dyCrxLibCache?: Map<string, { at: number; lib: LibMeta }> }
+function libCache(): Map<string, { at: number; lib: LibMeta }> {
+  if (!gLib.__dyCrxLibCache) gLib.__dyCrxLibCache = new Map()
+  return gLib.__dyCrxLibCache
+}
+
+interface LibMeta {
+  name: string
+  updateUrl: string
+  backupUpdateUrl: string | null
+  lockedVersion: string | null
+  allowIncognito: boolean
+  allowUserDisable: boolean
+  highRisk: boolean
+  highRiskReason: string[]
+  permissions: string[]
+  enabled: boolean
+  deletedAt: Date | null
+}
+
+/** 批量取插件库元数据（命中缓存直接返回；未命中批量查库回填） */
+async function getLibMetaBatch(crxIds: string[]): Promise<Map<string, LibMeta | null>> {
+  const out = new Map<string, LibMeta | null>()
+  const need: string[] = []
+  const now = Date.now()
+  for (const id of crxIds) {
+    const hit = libCache().get(id)
+    if (hit && now - hit.at < LIB_CACHE_TTL_MS) out.set(id, hit.lib)
+    else need.push(id)
+  }
+  if (need.length > 0) {
+    const rows = await db.crxPlugin.findMany({
+      where: { crxId: { in: need } },
+    })
+    const rowMap = new Map(rows.map((r) => [r.crxId, r]))
+    for (const id of need) {
+      const r = rowMap.get(id)
+      const meta: LibMeta | null = r
+        ? {
+            name: r.name, updateUrl: r.updateUrl, backupUpdateUrl: r.backupUpdateUrl,
+            lockedVersion: r.lockedVersion, allowIncognito: r.allowIncognito, allowUserDisable: r.allowUserDisable,
+            highRisk: r.highRisk, highRiskReason: Array.isArray(r.highRiskReason) ? (r.highRiskReason as string[]) : [],
+            permissions: Array.isArray(r.permissions) ? (r.permissions as string[]) : [],
+            enabled: r.enabled, deletedAt: r.deletedAt,
+          }
+        : null
+      out.set(id, meta)
+      libCache().set(id, { at: now, lib: meta as LibMeta })
+    }
+  }
+  return out
+}
+
+/** 插件库写路径主动失效（保存/启停/回收/恢复/导入后调用） */
+export function invalidateCrxLibCache(crxId?: string): void {
+  if (crxId) libCache().delete(crxId)
+  else libCache().clear()
+}
+
 // 高危权限关键词（manifest 权限命中即自动标记高危）
 const HIGH_RISK_PERMISSIONS = [
   "all_urls", "<all_urls>", "*://*/*", "clipboardRead", "clipboardWrite",
@@ -115,19 +178,24 @@ export async function resolveWorkspaceCrxPolicy(workspaceId: string): Promise<Me
   }
   layers.push({ scopeType: "SANDBOX", scopeId: workspaceId })
 
+  // r26：批量预取插件库元数据（元数据缓存，免逐条 N+1）
+  const layerEntries = await Promise.all(
+    layers.map((layer) => db.crxPolicyEntry.findMany({
+      where: { scopeType: layer.scopeType, scopeId: layer.scopeId, deletedAt: null },
+    })),
+  )
+  const allCrxIds = Array.from(new Set(layerEntries.flat().map((e) => e.crxId)))
+  const libMetaMap = await getLibMetaBatch(allCrxIds)
+
   const merged = new Map<string, MergedCrxEntry>()
   const resolvedBy = new Map<string, MergedCrxEntry["resolvedBy"]>()
 
-  for (const layer of layers) {
-    const entries = await db.crxPolicyEntry.findMany({
-      where: { scopeType: layer.scopeType, scopeId: layer.scopeId, deletedAt: null },
-    })
-    for (const e of entries) {
-      const lib = await db.crxPlugin.findUnique({ where: { crxId: e.crxId } })
+  layers.forEach((layer, li) => {
+    for (const e of layerEntries[li]) {
+      const lib = libMetaMap.get(e.crxId) ?? null
       // 库内不存在或已软删 → 上层错误配置，跳过（审计告警由轮询任务负责）
       if (!lib || lib.deletedAt) continue
-      const libPermissions = Array.isArray(lib.permissions) ? (lib.permissions as string[]) : []
-      const hr = detectHighRisk(libPermissions)
+      const hr = detectHighRisk(lib.permissions)
       const base: MergedCrxEntry | undefined = merged.get(e.crxId)
       const next: MergedCrxEntry = {
         crxId: e.crxId,
@@ -143,7 +211,7 @@ export async function resolveWorkspaceCrxPolicy(workspaceId: string): Promise<Me
       merged.set(e.crxId, next)
       resolvedBy.set(e.crxId, layer.scopeType)
     }
-  }
+  })
 
   // 沙箱单插件独立配置（SANDBOX 单插件粒度 = 最高优先级，覆盖上面 SANDBOX 层的通用值）
   // 实现形态：CrxPolicyEntry scopeType=SANDBOX 即为单插件粒度（每个 crxId 一条），天然覆盖。

@@ -15,6 +15,7 @@ import { bizError, ErrorCode } from "@/lib/errors"
 import {
   isValidCrxId, isValidUpdateUrl, isValidVersion, detectHighRisk,
   checkForceBlocklistConflict, checkSandboxForcelistLimit, MAX_FORCED_EXTENSIONS_PER_SANDBOX,
+  invalidateCrxLibCache,
 } from "@/lib/crx-policy"
 import { raiseAlert } from "@/lib/alerts"
 
@@ -94,6 +95,7 @@ export async function saveCrxPluginAction(input: unknown): Promise<ActionResult<
         })
       }
     }
+    invalidateCrxLibCache(plugin.crxId) // 元数据缓存写路径失效
     return { crxId: plugin.crxId, highRisk: hr.highRisk, highRiskReason: hr.reasons }
   })
 }
@@ -126,6 +128,7 @@ export async function toggleCrxPluginAction(input: unknown): Promise<ActionResul
         })
       }
     }
+    invalidateCrxLibCache(crxId)
     return { enabled }
   })
 }
@@ -143,6 +146,7 @@ export async function recycleCrxPluginAction(input: unknown): Promise<ActionResu
       resourceType: "CRX_PLUGIN", resourceId: crxId, resourceName: plugin.name, severity: "WARN",
       after: { movedTo: "插件库回收站" },
     })
+    invalidateCrxLibCache(crxId)
     return { ok: true }
   })
 }
@@ -156,6 +160,7 @@ export async function restoreCrxPluginAction(input: unknown): Promise<ActionResu
       operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "CRX_PLUGIN_RESTORE",
       resourceType: "CRX_PLUGIN", resourceId: crxId, resourceName: plugin.name, after: { restored: true },
     })
+    invalidateCrxLibCache(crxId)
     return { ok: true }
   })
 }
@@ -211,6 +216,7 @@ export async function importCrxCsvAction(input: unknown): Promise<ActionResult<{
       resourceType: "CRX_PLUGIN", resourceId: "csv-batch",
       after: { lines: lines.length, imported: imported.length, skipped: skipped.length }, severity: "INFO",
     })
+    invalidateCrxLibCache() // 批量导入全量失效
     return { imported: imported.length, skipped }
   })
 }

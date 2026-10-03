@@ -17,7 +17,7 @@ import {
 // 鉴权：x-api-key（READ 查询 / WRITE 写入 / ADMIN 灰度与回收站）；全部写不可篡改审计
 // ============================================================
 
-const OPS = ["library", "plugin-get", "status", "status-workspace", "refs", "blocklist", "gray"] as const
+const OPS = ["library", "plugin-get", "status", "status-workspace", "refs", "blocklist", "gray", "lifecycle"] as const
 const POST_OPS = [
   "plugin-create", "plugin-update", "plugin-toggle", "plugin-recycle", "plugin-restore",
   "policy-entry-save", "policy-entry-remove", "blocklist-save", "blocklist-remove",
@@ -77,6 +77,29 @@ export async function GET(req: NextRequest) {
     if (op === "gray") {
       const rows = await db.crxGrayTask.findMany({ orderBy: { createdAt: "desc" }, take: 100 })
       return NextResponse.json({ code: 0, msg: "ok", data: { grayTasks: rows }, traceId })
+    }
+    // r26：CRX 扩展生命周期审计查询（永久归档；支持 crxId/workspaceId/事件类型/时间范围过滤）
+    if (op === "lifecycle") {
+      const crxId = sp.get("crxId") || undefined
+      const workspaceId = sp.get("workspaceId") || undefined
+      const kind = sp.get("kind") // INSTALLED | REMOVED | VERSION_CHANGE | INCOGNITO_ENABLED | UNKNOWN_DETECTED
+      const from = sp.get("from")
+      const to = sp.get("to")
+      const operationTypes = kind
+        ? [`CRX_${kind.toUpperCase()}`]
+        : ["CRX_INSTALLED", "CRX_REMOVED", "CRX_VERSION_CHANGE", "CRX_INCOGNITO_ENABLED", "CRX_UNKNOWN_DETECTED"]
+      const rows = await db.auditLog.findMany({
+        where: {
+          operationType: { in: operationTypes },
+          ...(crxId ? { resourceId: crxId } : {}),
+          ...(workspaceId ? { afterJson: { contains: workspaceId } } : {}),
+          ...(from || to ? { createdAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } } : {}),
+        },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+        select: { id: true, operationType: true, resourceId: true, resourceName: true, ownerUserId: true, beforeJson: true, afterJson: true, severity: true, createdAt: true },
+      })
+      return NextResponse.json({ code: 0, msg: "ok", data: { events: rows, total: rows.length, note: "审计永久归档：沙箱销毁不随行清理" }, traceId })
     }
     return NextResponse.json({ code: 40001, msg: `未知 op：${op}（可用：${OPS.join(" / ")}）`, data: null, traceId })
   } catch (e) {

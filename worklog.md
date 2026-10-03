@@ -867,3 +867,29 @@ Work Log:
 Stage Summary:
 - r25 全部五项交付：全局搜索升级为命令面板（功能/设置项/页面/动作全可搜、按角色过滤、深链直达含配置行级定位与卡片级高亮）、缺口页面搜索补齐（用户组树+策略批次历史）、多语言字体全覆盖（Noto 全家桶+Unifont 兜底+34 locale+fontconfig 回退链，24 语言真实渲染实证零乱码）、VNC 创建零出错（幂等/并发去重/三重试/结构化诊断/磁盘预检/陈旧锁清理/ERROR 态可见可重试）、部署三形态 compose 化（单容器 3 步最简 + PostgreSQL/外部浏览器节点可选）
 - 质量门：tsc 75=基线持平（零新增）；eslint 全部改动文件 0 error 0 warning；bun run build 全绿 60 路由；冒烟 44+19 断言全过；QA 数据清理归零
+
+---
+Task ID: 26
+Agent: main
+Task: r26 — CRX 深度功能批次：扩展生命周期审计 + 未知扩展扫描 + 防篡改校验 + 基线扫描 + 模板版本快照差异对比回滚 + 沙箱克隆
+
+Work Log:
+- 【环境】推送 r24~r25 四提交（b0675d5..188f104）→ CI Lint ✅ 随即转绿；.env 密钥第 7 次被环境重置（CRON_SECRET/VNC_BRIDGE_SECRET 等四键自愈补齐）+ 三服务守护化恢复（app 200/bridge ok/hub 200）
+- 【生命周期审计】src/lib/crx-lifecycle.ts 新模块（402 行）：五类事件（INSTALLED/REMOVED/VERSION_CHANGE/INCOGNITO_ENABLED/UNKNOWN_DETECTED）→ 全局不可篡改审计；审计表零级联 → 沙箱软删/物理删后事件永久归档（实测 4 条事件跨删除存活）；planLifecycleTransition 状态迁移计划（同状态零事件幂等语义）
+- 【引擎集成】crx_install_poll：advancePluginStatus 迁移前后状态对比 → emitLifecycle（首次安装/POLICY_APPLIED→INSTALLED 升级/版本漂移/无痕许可首装）；策略链移除的 INSTALLED 行 → REMOVED 审计（updateMany 状态集扩充含 INSTALLED）
+- 【未知扩展扫描】crx_unknown_scan 任务（*/5）：真实容器 CDP /json/list 枚举 - 五级合并策略白名单 - 黑名单 - 内置集 → 未授权扩展 DANGER 审计 + CRITICAL 告警 + webhook（event: crx.unknown_extension_detected）
+- 【防篡改校验】policy_tamper_check 任务（*/5）：writeNetworkPolicyFile 落盘 → rememberPolicyFileHash（SHA-256 存 hardeningJson.policyFileHash/Path/At）→ 周期对账；refreshWorkspacePolicyFile 落盘即登记 + 老工作区首次自动补登记；实测注入篡改 → 检出 1 处 + CRITICAL 告警「沙箱策略文件被篡改：QA-R26-基线沙箱」+ POLICY_FILE_TAMPERED/DANGER 审计
+- 【基线扫描】baseline_scan 任务（每小时）：十维加权评分（只读根FS15/CapDrop10/禁提权10/网络快照10/内网受控5/防篡改哈希10/CRX策略10/无高危扩展15/Profile独立10/剪贴板隔离5）→ hardeningJson.baselineScore + baselineCheckedAt + baselineFailed 数组；<70 分 WARNING 告警；实测 1 沙箱 100 分落库
+- 【模板版本系统】BrowserTemplateVersion 模型（unique[templateId,version]）；upsertTemplateAction 自动存档（编辑 v+1 快照 + changedFields 差异预计算 + 创建即 v1 初始快照）；listTemplateVersionsAction（倒序 50 条）/diffTemplateVersionsAction（字段级+variables 键级+CRX 相关紫色标记）/rollbackTemplateVersionAction（新版本号回滚 + WARN 审计 TEMPLATE_VERSION_ROLLBACK + 快照链不中断）；diffTemplateConfig 等纯函数独立 src/lib/template-diff.ts（use server 文件禁止同步导出——E2E 发现 Build Error 后重构）
+- 【模板 UI】templates-table 行新增「版本历史」按钮（History 图标）→ version-history-dialog.tsx（双版本选择器 + 差异三栏表（旧值红/新值绿/CRX 徽章紫底）+ 版本链列表（当前徽章/变更说明/变更人）+ 回滚确认弹窗（琥珀警示+变更说明））；实测：创建 QA 模板 → 编辑（locale zh-CN→en-US + variables.crxForcelist 注入）→ v2 快照 → 版本历史弹窗差异表 4 行（locale/variables/variables.crxForcelist CRX 徽章）→ 回滚 v1 → v3 落库 locale 恢复 zh-CN → 版本链 v1(初始)→v2(变更)→v3(回滚至 v1) + 审计
+- 【沙箱克隆】cloneWorkspaceAction：可见性三通道（所有者/ADMIN+/被共享 OPERATE）+ 幂等 + 限速 5/min + 配额 + 代理节点权限继承校验（labels group: 白名单降级）；配置全量复制（mode/组/代理/模板/标签/闲置超时/VNC 时限/共享否决/双网络覆盖/CRX 继承开关/IME/布局/生命周期规则）+ hardening.clonedFrom 溯源 + provisioned:pending；CRX SANDBOX 级条目逐条复制（note 标注克隆来源）；共享/会话句柄/统计不复制；STOPPED 新实例；workspaces-table 行「克隆」按钮（CopyPlus teal）+ prompt 命名 + 结果 toast（同步 N 条插件策略）；实测：克隆「QA-R26-基线沙箱」→「QA-R26-克隆体」STOPPED + hardening.clonedFrom=源 uuid + CRX 1 条同步（lockedVersion 1.0.0 + 克隆自源沙箱注记）+ WORKSPACE_CLONE 审计
+- 【基线评分面板】工作区详情安全面板顶部评分条：大字号分数（≥90 绿/≥70 琥珀/红）+ 十维说明 + 最近扫描时间 + 未通过项清单 + 进度条；实测 100/100 分渲染（含「全部通过」）
+- 【种子】三新任务双 schema 注册（seed.ts + seed-postgres.ts）；活库重播种 24 任务就绪
+- 【响应结构修复】version-history-dialog 初版误用 res.ok/res.message（ActionResult 实为 code/msg/data）→ 修 5 处；workspaces-table 克隆 toast res.data 判空
+- 【质量门】eslint 11 个改动文件 0 error 0 warning（清理 1 个无用 disable 指令）；tsc 改动文件零新增错误（detail-tabs 511 为基线既有）；bun run build 全绿（60 路由）
+- 【QA】smoke-r26-crx-deep.ts 22/22 断言（引擎任务注册/迁移计划 5 语义/版本比较 3 向量/SHA-256 已知向量+灵敏度/字段级差异/版本链/CRX 标记）；浏览器 E2E 5 链路（模板版本历史→差异→回滚/克隆/基线面板/篡改检出/弹窗结构）；4 张截图 download/qa-r26/；qa-r26-lifecycle.ts 验证四事件落库 + 永久归档（软删后 4 条保留）+ 全量清理归零（工作区 0/模板 0/审计/告警/策略文件还原）
+- 【提交】a0d90b2 推送 main（17 文件）
+
+Stage Summary:
+- r26 全部交付：CRX 扩展生命周期审计闭环（五类事件+永久归档）、未知扩展扫描、策略文件防篡改校验（实测检出篡改）、安全基线扫描（十维评分+低分告警+详情页面板）、模板版本快照/差异对比（CRX 高亮）/一键回滚、沙箱克隆（CRX 同步+溯源+STOPPED）
+- 21+22 断言 + 浏览器 5 链路 E2E 全过；QA 数据清理归零；r24~r25 CI Lint 绿 + 主镜像构建进行中（188f104），r26（a0d90b2）CI 已排队

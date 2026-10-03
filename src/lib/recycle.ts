@@ -179,7 +179,18 @@ export async function purgeFromRecycle(recycleId: string, operator: { userId: st
       await (db as unknown as Record<string, { delete: (a: { where: { id: string } }) => Promise<unknown>; deleteMany: (a: { where: { id: string } }) => Promise<unknown> }>)[modelName].deleteMany({
         where: { id: entry.resourceId },
       })
-    } catch { /* 已不存在 */ }
+
+    // r26：工作区物理清理级联业务行（审计永久保留，业务态随行清理）
+    if (entry.resourceType === "WORKSPACE") {
+      try {
+        await db.crxInstallStatus.deleteMany({ where: { workspaceId: entry.resourceId } })
+        await db.crxPolicyEntry.deleteMany({ where: { scopeType: "SANDBOX", scopeId: entry.resourceId } })
+        await db.crxBlocklistEntry.deleteMany({ where: { scopeType: "SANDBOX", scopeId: entry.resourceId } })
+        await db.workspaceShare.deleteMany({ where: { workspaceId: entry.resourceId } })
+        await db.workspaceShareLink.deleteMany({ where: { workspaceId: entry.resourceId } })
+        await db.harRecord.deleteMany({ where: { workspaceId: entry.resourceId } })
+      } catch { /* 非关键：个别模型不存在时跳过 */ }
+    }    } catch { /* 已不存在 */ }
   }
   await db.recycleBin.delete({ where: { id: recycleId } })
   await writeAudit({

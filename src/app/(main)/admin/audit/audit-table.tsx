@@ -285,6 +285,8 @@ export function AuditTable({ tab, auditRows = [], securityRows = [], total, page
           { key: "resourceType", label: "资源类型", options: [
             { label: "用户", value: "USER" }, { label: "用户组", value: "GROUP" }, { label: "工作区", value: "WORKSPACE" },
             { label: "配置", value: "CONFIG" }, { label: "审计记录", value: "AUDIT" }, { label: "文件", value: "FILE" }, { label: "网络策略", value: "NETWORK" },
+            { label: "CRX 插件", value: "CRX_PLUGIN" }, { label: "模板", value: "TEMPLATE" }, { label: "令牌", value: "API_TOKEN" },
+            { label: "会话", value: "LOGIN_SESSION" }, { label: "代理节点", value: "PROXY_NODE" },
           ] },
         ] : [
           { key: "success", label: "结果", options: [{ label: "成功", value: "true" }, { label: "失败", value: "false" }] },
