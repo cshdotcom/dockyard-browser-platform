@@ -123,3 +123,123 @@ export async function listPermissionTargetsAction(input: unknown): Promise<Actio
     }
   })
 }
+
+// ============================================================
+// r33：批量授权（多用户 + 多用户组 → 权限锁矩阵批量子量下发）
+// 需求：管理员可批量为单个/多个用户或用户组「增加创建和操作实例沙箱功能」，
+//       并支持完整颗粒度控制（30 项锁逐项三态）。
+// 语义（updates 为稀疏三态映射，逐键执行）：
+//   true  = 锁定（禁止该能力）
+//   false = 解锁（开启该能力；写入时从锁集合移除该键）
+//   null  = 不变（跳过） —— UI 上三态开关「保持不变/解锁/锁定」
+// 合并模式：
+//   merge（默认）= 在目标现有锁集合上叠加 updates（只改动提交的键）
+//   replace      = 以 updates 为完整快照整体替换（未提交键视为解锁清除）
+// 授权感知：对「创建/操作沙箱」相关键解锁时向用户发站内信（可感知开通）
+// ============================================================
+const SANDBOX_GRANT_KEYS: PermissionLockKey[] = [
+  "blockCreateWorkspace", "blockModifyWorkspace", "blockBatchOps", "blockModifyResourceExpiry",
+  "blockSwitchVncMode", "blockCustomVncResolution", "blockShareWorkspace", "blockRefreshVncKey",
+]
+
+export async function batchSetPermissionLocksAction(input: unknown): Promise<ActionResult<{
+  userCount: number
+  groupCount: number
+  noticesSent: number
+  appliedKeys: string[]
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAdmin()
+    const p = zodValidate(z.object({
+      userIds: z.array(z.string().max(64)).max(500, "单批最多 500 个用户").default([]),
+      groupIds: z.array(z.string().max(64)).max(200, "单批最多 200 个用户组").default([]),
+      updates: z.record(z.string().max(64), z.boolean().nullable()), // key → true=锁 / false=解锁 / null=不变
+      mode: z.enum(["merge", "replace"]).default("merge"),
+      notify: z.boolean().default(true),
+    }), input)
+    if (p.userIds.length === 0 && p.groupIds.length === 0) throw new Error("请选择至少一个用户或用户组")
+    if (Object.keys(p.updates).length === 0) throw new Error("请至少设置一项权限变更")
+
+    // 校验键合法 + 收集实际提交键
+    const submittedKeys: PermissionLockKey[] = []
+    for (const k of Object.keys(p.updates)) {
+      if (!PERMISSION_LOCK_KEYS.includes(k as PermissionLockKey)) throw new Error(`未知权限锁键：${k}`)
+      submittedKeys.push(k as PermissionLockKey)
+    }
+
+    const mergeLocks = (current: Record<string, boolean> | null | undefined): Record<string, boolean> => {
+      const base = p.mode === "replace" ? {} : { ...(current || {}) }
+      for (const k of submittedKeys) {
+        const v = p.updates[k]
+        if (v === null || v === undefined) continue // 不变
+        if (v === true) base[k] = true
+        else delete base[k] // 解锁
+      }
+      return base
+    }
+
+    let noticesSent = 0
+    // ---- 用户组批量子量 ----
+    for (const gid of p.groupIds) {
+      const group = await db.group.findUnique({ where: { id: gid }, select: { id: true, name: true, deletedAt: true, policy: true } })
+      if (!group || group.deletedAt) continue
+      const policy = (group.policy as Record<string, unknown> | null) || {}
+      const next = mergeLocks((policy.permissionLocks as Record<string, boolean> | null) || undefined)
+      await db.group.update({ where: { id: group.id }, data: { policy: { ...policy, permissionLocks: next } } })
+      await writeAudit({
+        operatorUserId: ctx.userId, operatorName: ctx.username,
+        operationType: "PERMISSION_CENTER_BATCH", resourceType: "GROUP",
+        resourceId: group.id, resourceName: group.name, severity: "WARN",
+        before: { permissionLocks: (policy.permissionLocks as Record<string, boolean> | null) || {} },
+        after: { permissionLocks: next, submittedKeys, mode: p.mode },
+      }).catch(() => null)
+    }
+
+    // ---- 用户批量子量 + 授权感知通知 ----
+    for (const uid of p.userIds) {
+      const user = await db.user.findUnique({ where: { id: uid }, select: { id: true, username: true, deletedAt: true, permissionLocks: true } })
+      if (!user || user.deletedAt) continue
+      const next = mergeLocks((user.permissionLocks as Record<string, boolean> | null) || undefined)
+      await db.user.update({ where: { id: user.id }, data: { permissionLocks: next } })
+      await writeAudit({
+        operatorUserId: ctx.userId, operatorName: ctx.username,
+        operationType: "PERMISSION_CENTER_BATCH", resourceType: "USER",
+        resourceId: user.id, resourceName: user.username, severity: "WARN",
+        before: { permissionLocks: (user.permissionLocks as Record<string, boolean> | null) || {} },
+        after: { permissionLocks: next, submittedKeys, mode: p.mode },
+      }).catch(() => null)
+
+      // 授权感知：创建/操作沙箱相关键被解锁（原锁 true → 现无）时站内信告知
+      if (p.notify) {
+        const prev = (user.permissionLocks as Record<string, boolean> | null) || {}
+        const grantedNow = SANDBOX_GRANT_KEYS.filter((k) => prev[k] === true && next[k] !== true)
+        if (grantedNow.length > 0) {
+          await db.notice.create({
+            data: {
+              userId: user.id,
+              title: "管理员已为你开通沙箱相关权限",
+              content: `管理员已为你解锁以下能力：${grantedNow.map(lockLabel).join("、")}。你现在可以在「工作区」创建并操作浏览器沙箱。`,
+              type: "SYSTEM",
+              link: "/workspaces",
+              sourceType: "USER",
+              sourceKey: user.id,
+              senderUserId: ctx.userId,
+            },
+          }).catch(() => null)
+          noticesSent++
+        }
+      }
+    }
+
+    return { userCount: p.userIds.length, groupCount: p.groupIds.length, noticesSent, appliedKeys: submittedKeys }
+  })
+}
+
+function lockLabel(key: string): string {
+  const labels: Record<string, string> = {
+    blockCreateWorkspace: "创建沙箱", blockModifyWorkspace: "修改沙箱配置", blockBatchOps: "批量操作",
+    blockModifyResourceExpiry: "调整资源时效", blockSwitchVncMode: "切换 VNC 模式", blockCustomVncResolution: "自定义分辨率",
+    blockShareWorkspace: "共享沙箱", blockRefreshVncKey: "刷新 VNC 密钥",
+  }
+  return labels[key] || key
+}

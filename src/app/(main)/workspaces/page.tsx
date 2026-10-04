@@ -3,6 +3,7 @@ import { requireAuth, userGroupIds } from "@/lib/permissions"
 import { parseListQuery, pageSkipTake, safeOrderBy, fmtDate } from "@/lib/utils-server"
 import { resolveShareControl } from "@/lib/share-policy"
 import { resolveIdlePolicyForUser } from "@/lib/idle-policy"
+import { resolveTtlPolicyForUser } from "@/lib/ttl-policy"
 import { WorkspacesTable } from "./workspaces-table"
 
 export const metadata = { title: "浏览器工作区" }
@@ -83,6 +84,8 @@ export default async function WorkspacesPage({
 
   // r14（22-c）：闲置超时四级策略链（创建表单默认值 + 锁定态；管理员不受锁定）
   const idlePolicy = await resolveIdlePolicyForUser(ctx.userId, ctx.role)
+  // r33：沙箱最大时长策略（用户创建时可选时长上限；无限时长开关管控）
+  const ttlPolicy = await resolveTtlPolicyForUser(ctx.userId)
 
   const data = rows.map((r) => {
     const isOwner = r.userId === ctx.userId
@@ -155,6 +158,11 @@ export default async function WorkspacesPage({
           minutes: idlePolicy.defaultMinutes,
           sourceLabel: idlePolicy.defaultSourceLabel,
           lockSourceLabel: idlePolicy.lockSourceLabel,
+        }}
+        ttlPolicy={{
+          maxMinutes: ttlPolicy.maxTtlMinutes,
+          allowUnlimited: ttlPolicy.allowUnlimited,
+          sourceLabel: ttlPolicy.sourceLabel,
         }}
       />
     </div>

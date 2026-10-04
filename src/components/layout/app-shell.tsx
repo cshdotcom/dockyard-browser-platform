@@ -315,12 +315,13 @@ function NotificationBell({ initial }: { initial: number }) {
   }
 
   // r28：通知清除（单条/已读批量/全部）—— 软删除后从列表移除
-  const clearNotices = async (mode: "one" | "read" | "all", id?: string) => {
+  // r33：新增「多选」模式 —— ids 数组批量清除（用户诉求：清除单个/多个站内信）
+  const clearNotices = async (mode: "one" | "read" | "all" | "many", id?: string, ids?: string[]) => {
     try {
       const res = await fetch("/api/notifications", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, id }),
+        body: JSON.stringify({ mode, id, ids }),
       })
       const json = await res.json()
       if (json.code === 0) {
@@ -328,8 +329,14 @@ function NotificationBell({ initial }: { initial: number }) {
         if (mode === "one" && id) {
           setItems((prev) => prev.filter((x) => x.id !== id))
           if (selected?.id === id) setSelected(null)
+        } else if (mode === "many" && ids && ids.length > 0) {
+          const idSet = new Set(ids)
+          setItems((prev) => prev.filter((x) => !idSet.has(x.id)))
+          if (selected && idSet.has(selected.id)) setSelected(null)
+          setPicked(new Set())
         } else {
           setItems([])
+          setPicked(new Set())
         }
         void load()
       } else toast.error(json.msg || "清除失败")
@@ -337,6 +344,19 @@ function NotificationBell({ initial }: { initial: number }) {
       toast.error("网络异常，清除失败")
     }
   }
+
+  // r33：多选模式状态（复选框勾选 → 批量清除）
+  const [multiMode, setMultiMode] = React.useState(false)
+  const [picked, setPicked] = React.useState<Set<string>>(new Set())
+  const togglePick = (id: string) =>
+    setPicked((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  const pickedAll = items.length > 0 && picked.size === items.length
+  const exitMulti = () => { setMultiMode(false); setPicked(new Set()) }
 
   // 查看详情目标：公告类 → 公告页（link 携带 focus 定位）；其他 → 有 link 才跳转
   const detailLink = (n: NonNullable<typeof selected>): string | null => {
@@ -393,29 +413,60 @@ function NotificationBell({ initial }: { initial: number }) {
           <DropdownMenuLabel className="flex items-center justify-between">
             <span>站内通知</span>
             <span className="flex items-center gap-2 text-xs">
-              <button
-                className="text-teal-600 underline"
-                onClick={async (e) => {
-                  e.stopPropagation()
-                  await fetch("/api/notifications", { method: "PUT" })
-                  void load()
-                }}
-              >
-                全部已读
-              </button>
-              {/* r28：通知清除（用户诉求）—— 清已读 / 清全部 */}
-              <button
-                className="text-muted-foreground underline hover:text-foreground"
-                onClick={(e) => { e.stopPropagation(); void clearNotices("read") }}
-              >
-                清除已读
-              </button>
-              <button
-                className="text-red-500 underline"
-                onClick={(e) => { e.stopPropagation(); void clearNotices("all") }}
-              >
-                清除全部
-              </button>
+              {/* r33：多选批量清除入口 */}
+              {multiMode ? (
+                <>
+                  <button
+                    className="text-teal-600 underline"
+                    onClick={(e) => { e.stopPropagation(); setPicked(pickedAll ? new Set() : new Set(items.map((x) => x.id))) }}
+                  >
+                    {pickedAll ? "取消全选" : "全选"}
+                  </button>
+                  <button
+                    className="text-red-500 underline"
+                    disabled={picked.size === 0}
+                    onClick={(e) => { e.stopPropagation(); if (picked.size > 0) void clearNotices("many", undefined, Array.from(picked)) }}
+                  >
+                    清除所选（{picked.size}）
+                  </button>
+                  <button className="text-muted-foreground underline hover:text-foreground" onClick={(e) => { e.stopPropagation(); exitMulti() }}>
+                    退出多选
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    className="text-muted-foreground underline hover:text-foreground"
+                    onClick={(e) => { e.stopPropagation(); setMultiMode(true); setPicked(new Set()) }}
+                    title="勾选多条通知后批量清除"
+                  >
+                    多选
+                  </button>
+                  <button
+                    className="text-teal-600 underline"
+                    onClick={async (e) => {
+                      e.stopPropagation()
+                      await fetch("/api/notifications", { method: "PUT" })
+                      void load()
+                    }}
+                  >
+                    全部已读
+                  </button>
+                  {/* r28：通知清除（用户诉求）—— 清已读 / 清全部 */}
+                  <button
+                    className="text-muted-foreground underline hover:text-foreground"
+                    onClick={(e) => { e.stopPropagation(); void clearNotices("read") }}
+                  >
+                    清除已读
+                  </button>
+                  <button
+                    className="text-red-500 underline"
+                    onClick={(e) => { e.stopPropagation(); void clearNotices("all") }}
+                  >
+                    清除全部
+                  </button>
+                </>
+              )}
             </span>
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
@@ -428,14 +479,27 @@ function NotificationBell({ initial }: { initial: number }) {
                 className={cn(
                   "block w-full text-left px-3 py-2.5 border-b last:border-0 transition cursor-pointer hover:bg-muted/70",
                   !n.readAt && "bg-teal-600/5",
+                  multiMode && picked.has(n.id) && "bg-teal-600/10",
                 )}
                 onClick={() => {
+                  if (multiMode) { togglePick(n.id); return }
                   // 先打开小弹窗（不直接跳转）
                   setOpen(false)
                   setSelected(n)
                 }}
               >
                 <p className="text-sm font-medium leading-tight flex items-center gap-1.5">
+                  {multiMode && (
+                    <span
+                      className={cn(
+                        "h-3.5 w-3.5 shrink-0 rounded border flex items-center justify-center",
+                        picked.has(n.id) ? "bg-teal-600 border-teal-600" : "border-muted-foreground/40",
+                      )}
+                      aria-hidden
+                    >
+                      {picked.has(n.id) && <CheckCircle2 className="h-2.5 w-2.5 text-white" />}
+                    </span>
+                  )}
                   {!n.readAt && <span className="h-1.5 w-1.5 rounded-full bg-teal-600 shrink-0" aria-label="未读" />}
                   {n.type === "ANNOUNCEMENT" && <Megaphone className="h-3 w-3 text-violet-500 shrink-0" />}
                   <span className="truncate">{n.title}</span>
@@ -444,7 +508,7 @@ function NotificationBell({ initial }: { initial: number }) {
                 <p className="mt-1 text-[10px] text-muted-foreground flex items-center gap-1">
                   <span>{new Date(n.createdAt).toLocaleString("zh-CN")}</span>
                   {!n.readAt && <span className="text-teal-600">未读</span>}
-                  <span className="ml-auto text-teal-600 inline-flex items-center gap-0.5">详情<ChevronRight className="h-3 w-3" /></span>
+                  {!multiMode && <span className="ml-auto text-teal-600 inline-flex items-center gap-0.5">详情<ChevronRight className="h-3 w-3" /></span>}
                 </p>
               </button>
             ))}

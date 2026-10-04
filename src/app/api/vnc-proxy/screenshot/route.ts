@@ -9,6 +9,7 @@ import { rateLimit } from "@/lib/rate-limit"
 import { writeAudit } from "@/lib/audit"
 import { ENV } from "@/lib/env"
 import { BizError, ErrorCode } from "@/lib/errors"
+import { resolveStoragePolicy, checkStorageQuota } from "@/lib/storage-quota"
 
 // ============================================================
 // r28 VNC 截图：POST /api/vnc-proxy/screenshot
@@ -54,6 +55,12 @@ export async function POST(req: NextRequest) {
     }
     if (!allowed) throw new BizError(ErrorCode.FORBIDDEN, "无该沙箱的截图权限")
 
+    // r33：存储配额执行链 —— 截图入库开关（录像/截图/云盘统一口径；配额校验在解码后执行）
+    const stPolicy = await resolveStoragePolicy(ws.userId)
+    if (!stPolicy.screenshotAllowed) {
+      throw new BizError(ErrorCode.FORBIDDEN, `管理员已禁用截图入库（${stPolicy.switchSourceLabel}）；截图仍可本地保存，不占用云盘空间`)
+    }
+
     // ---- 图片解码（dataURL 或裸 base64；MIME 白名单）----
     let mime = "image/png"
     let raw: string = body.imageBase64
@@ -72,6 +79,12 @@ export async function POST(req: NextRequest) {
     const isJpeg = buf[0] === 0xff && buf[1] === 0xd8
     const isWebp = buf.subarray(0, 4).toString("ascii") === "RIFF" && buf.subarray(8, 12).toString("ascii") === "WEBP"
     if (!isPng && !isJpeg && !isWebp) throw new BizError(ErrorCode.PARAM_ERROR, "图片内容校验失败（魔数不匹配）")
+
+    // r33：截图配额校验（真实字节数已知后执行）
+    const stQuota = await checkStorageQuota(ws.userId, buf.length, "screenshot")
+    if (!stQuota.ok) {
+      throw new BizError(ErrorCode.FORBIDDEN, stQuota.reason || "存储配额不足，无法保存截图")
+    }
 
     // ---- 落盘：storage/screenshots/<userId>/<ts>-<rand>.<ext> ----
     const ext = mime === "image/png" ? "png" : mime === "image/jpeg" ? "jpg" : "webp"

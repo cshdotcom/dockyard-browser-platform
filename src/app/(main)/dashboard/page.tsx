@@ -3,12 +3,14 @@ import { db } from "@/lib/db"
 import { requireAuth } from "@/lib/permissions"
 import { getConfig, getConfigNumber } from "@/lib/config"
 import { fmtDate } from "@/lib/utils-server"
+import { getStorageOverview } from "@/lib/storage-quota"
 import { StatCard } from "@/components/shared/confirm"
 import { StatusBadge } from "@/components/shared/data-table"
 import { TrendChart } from "./trend-chart"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Progress } from "@/components/ui/progress"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Globe, Server, Megaphone, Bell, Activity, Cpu } from "lucide-react"
+import { Globe, Server, Megaphone, Bell, Activity, Cpu, Database } from "lucide-react"
 
 export const metadata = { title: "仪表盘" }
 
@@ -49,6 +51,8 @@ export default async function DashboardPage() {
 
   const siteName = await getConfig<string>("ui.siteName", "Dockyard")
   const myQuota = await getConfigNumber("workspace.maxConcurrentSessions", 50)
+  // r33：个人存储用量（录像+截图+云盘统一口径；三级策略链解析）
+  const storageOverview = await getStorageOverview(ctx.userId)
 
   return (
     <div className="space-y-6">
@@ -75,6 +79,48 @@ export default async function DashboardPage() {
       <div className="grid gap-4 grid-cols-1 lg:grid-cols-3 min-w-0">
         <div className="lg:col-span-2 space-y-4 min-w-0">
           <TrendChart data={days} />
+          {/* r33：个人存储与配额概览（仪表盘直达；管理员为个人/组分配的配置与当前用量） */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Database className="h-4 w-4" /> 我的存储与配额
+              </CardTitle>
+              <CardDescription>
+                录像 · 截图 · 云盘文件统一计量（来源：{storageOverview.policy.sourceLabel}）
+                {!storageOverview.policy.storageEnabled && " · 存储类功能已被管理员停用"}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex items-center justify-between text-sm">
+                <span className="font-medium">{storageOverview.pct != null ? `已用 ${storageOverview.pct}%` : "当前用量"}</span>
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  {(storageOverview.usage.totalMb / 1024).toFixed(2)}GB
+                  {storageOverview.policy.totalMb > 0 ? ` / ${(storageOverview.policy.totalMb / 1024).toFixed(2)}GB` : "（不限）"}
+                </span>
+              </div>
+              {storageOverview.policy.totalMb > 0 && (
+                <Progress value={storageOverview.pct ?? 0} className="h-2" aria-label={`存储已用 ${storageOverview.pct ?? 0}%`} />
+              )}
+              <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                <div className="rounded-md border p-2">
+                  <p className="text-muted-foreground">录像</p>
+                  <p className="font-medium tabular-nums">{(storageOverview.usage.recordingMb / 1024).toFixed(2)}GB · {storageOverview.usage.recordingCount}段</p>
+                </div>
+                <div className="rounded-md border p-2">
+                  <p className="text-muted-foreground">截图</p>
+                  <p className="font-medium tabular-nums">{(storageOverview.usage.screenshotMb / 1024).toFixed(2)}GB · {storageOverview.usage.screenshotCount}张</p>
+                </div>
+                <div className="rounded-md border p-2">
+                  <p className="text-muted-foreground">云盘文件</p>
+                  <p className="font-medium tabular-nums">{(storageOverview.usage.fileMb / 1024).toFixed(2)}GB · {storageOverview.usage.fileCount}个</p>
+                </div>
+              </div>
+              <div className="flex gap-3 text-xs text-muted-foreground">
+                <Link href="/account/profile" className="underline">配置明细（时长/闲置/配额分配）</Link>
+                <Link href="/files" className="underline">管理文件</Link>
+              </div>
+            </CardContent>
+          </Card>
           {isAdmin && (
             <Card>
               <CardHeader className="pb-3">

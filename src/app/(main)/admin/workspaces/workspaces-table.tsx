@@ -13,7 +13,7 @@ import { toast } from "sonner"
 import {
   Loader2, MoreHorizontal, Square, RotateCw, Trash2, Flame, Unplug, Timer, UserRoundCog, Anchor,
   AlertTriangle, X, Columns3, ShieldCheck, ShieldX, Container, History, ArrowRightLeft, Share2,
-  UsersRound, Search, Snowflake, Sunrise, Video, FolderOpen,
+  UsersRound, Search, Snowflake, Sunrise, Video, FolderOpen, Undo2, Rocket,
 } from "lucide-react"
 import { PlaybackPolicyDialog } from "@/components/recordings/playback-policy-dialog"
 import { HardwarePermsDialog } from "@/components/hardware/hardware-perms-dialog"
@@ -34,7 +34,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import {
   forceStopWorkspaceAction, forceRestartWorkspaceAction, forceRecycleWorkspaceAction, forcePurgeWorkspaceAction,
   forceDisconnectVncAction, forceUpdateTtlAction, transferWorkspaceAction, batchWorkspaceAction, setWorkspaceVncLimitAction,
-  freezeWorkspaceAction, unfreezeWorkspaceAction,
+  freezeWorkspaceAction, unfreezeWorkspaceAction, restoreReclaimedWorkspaceAction,
 } from "@/server/actions/admin-workspaces"
 import { adminForceUpdateWorkspaceTimersAction, updateWorkspaceAction } from "@/server/actions/workspaces"
 
@@ -316,7 +316,7 @@ export function WorkspacesTable(props: Props) {
     setSel([])
   }
 
-  const runBatch = async (name: string, op: "STOP" | "RESTART" | "RECYCLE" | "PURGE" | "TTL" | "TRANSFER", extra?: Record<string, unknown>) => {
+  const runBatch = async (name: string, op: "STOP" | "RESTART" | "RECYCLE" | "PURGE" | "TTL" | "TRANSFER" | "RESTORE_RECLAIM", extra?: Record<string, unknown>) => {
     setBusy(`batch-${op}`)
     try {
       const res = await batchWorkspaceAction({ ids: sel, op, ...extra })
@@ -383,8 +383,25 @@ export function WorkspacesTable(props: Props) {
       )
     }
     if (!row.containerState) {
+      // r33：原「未知容器」语义模糊 —— 按工作区状态给出可操作解释
+      if (row.status === "DESTROYED") {
+        return (
+          <div className="text-xs">
+            <Badge variant="outline" className="text-xs text-amber-600 border-amber-300">容器已回收</Badge>
+            <p className="text-muted-foreground truncate max-w-32">{row.crashCategory || "闲置/到期回收"} · 可归还</p>
+          </div>
+        )
+      }
+      if (row.status === "ERROR") {
+        return (
+          <div className="text-xs">
+            <Badge variant="outline" className="text-xs text-red-600 border-red-300">容器异常</Badge>
+            <p className="text-muted-foreground truncate max-w-32" title={row.freezeReason || row.crashCategory || ""}>{row.crashCategory || "RESTART_FAILED"} · 可重建</p>
+          </div>
+        )
+      }
       return (
-        <Badge variant="outline" className="text-xs">未知容器</Badge>
+        <Badge variant="outline" className="text-xs">容器信息待同步</Badge>
       )
     }
     if (row.containerState === "running") {
@@ -774,7 +791,17 @@ export function WorkspacesTable(props: Props) {
           { key: "mode", placeholder: "模式", options: [{ label: "CDP 轻量", value: "cdp_light" }, { label: "NoVNC 完整", value: "novnc_full" }] },
           {
             key: "status", placeholder: "状态",
-            options: ["RUNNING", "IDLE", "CREATING", "STOPPED", "ERROR", "FROZEN", "DESTROYED"].map((s) => ({ label: s, value: s })),
+            options: [
+              { label: "RUNNING", value: "RUNNING" },
+              { label: "IDLE", value: "IDLE" },
+              { label: "CREATING", value: "CREATING" },
+              { label: "STOPPED", value: "STOPPED" },
+              { label: "ERROR", value: "ERROR" },
+              { label: "FROZEN", value: "FROZEN" },
+              { label: "DESTROYED", value: "DESTROYED" },
+              // r33：闲置回收快捷筛选（含闲置超时/TTL到期/NoVNC闲置回收三类；可批量归还）
+              { label: "★ 闲置回收（可归还）", value: "RECLAIMED" },
+            ],
           },
         ]}
         emptyText={view === "deleted" ? "回收站中没有工作区删除记录" : undefined}
@@ -810,6 +837,17 @@ export function WorkspacesTable(props: Props) {
                   <DropdownMenuItem onClick={() => restart(row)}>
                     <RotateCw className="h-4 w-4 mr-2" /> 强制重启
                   </DropdownMenuItem>
+                  {/* r33：闲置回收/错误态归还（后台退回给对应用户） */}
+                  {(row.status === "DESTROYED" || row.status === "ERROR") && (
+                    <>
+                      <DropdownMenuItem className="text-teal-600" onClick={() => callAction(`restore-${row.id}`, () => restoreReclaimedWorkspaceAction({ id: row.id, restart: false }))}>
+                        <Undo2 className="h-4 w-4 mr-2" /> 归还给用户（停止态）
+                      </DropdownMenuItem>
+                      <DropdownMenuItem className="text-emerald-600" onClick={() => callAction(`restore-r-${row.id}`, () => restoreReclaimedWorkspaceAction({ id: row.id, restart: true }))}>
+                        <Rocket className="h-4 w-4 mr-2" /> 归还并拉起（RUNNING）
+                      </DropdownMenuItem>
+                    </>
+                  )}
                   <DropdownMenuItem onClick={() => setTtlTarget(row)}>
                     <Timer className="h-4 w-4 mr-2" /> 强制修改 TTL
                   </DropdownMenuItem>
@@ -872,6 +910,12 @@ export function WorkspacesTable(props: Props) {
               </Button>
               <Button size="sm" variant="outline" disabled={!!busy} onClick={() => setBatchTtlOpen(true)}>
                 <Timer className="h-4 w-4 mr-1" /> 批量改 TTL
+              </Button>
+              <Button size="sm" variant="outline" disabled={!!busy} onClick={() => runBatch("批量归还（停止态）", "RESTORE_RECLAIM", { restart: false })}>
+                <Undo2 className="h-4 w-4 mr-1" /> 批量归还（停止态）
+              </Button>
+              <Button size="sm" variant="outline" disabled={!!busy} onClick={() => runBatch("批量归还并拉起", "RESTORE_RECLAIM", { restart: true })}>
+                <Rocket className="h-4 w-4 mr-1" /> 批量归还并拉起
               </Button>
               <Button size="sm" variant="outline" disabled={!!busy} onClick={() => setBatchTransferOpen(true)}>
                 <UserRoundCog className="h-4 w-4 mr-1" /> 批量转移

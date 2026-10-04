@@ -9,14 +9,17 @@ import { Cpu } from "lucide-react"
 import { RetentionPolicyDialog } from "@/components/recycle/retention-policy-dialog"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2, Share2, Ban, Undo2, UserX , Video , Recycle , Gauge, Pencil } from "lucide-react"
+import { cn } from "@/lib/utils"
+import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2, Share2, Ban, Undo2, UserX , Video , Recycle , Gauge, Pencil, Database } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { UserAvatar } from "@/components/shared/user-avatar"
 import { Button } from "@/components/ui/button"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Checkbox } from "@/components/ui/checkbox"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
@@ -28,7 +31,7 @@ import {
   DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
-  importUsersCsvAction, batchSetUserStatusAction, batchMoveGroupAction, batchResetQuotaAction,
+  importUsersCsvAction, batchSetUserStatusAction, batchMoveGroupAction, batchResetQuotaAction, batchAssignStorageQuotaAction,
   kickUserSessionsAction, deleteUserAction, unlockUserAction, adminResetPasswordAction,
   setForce2faAction, resetUserTotpAction, clearTrustedDevicesAction, resetBackupCodesAction,
   setUserNetworkPolicyAction, setUserShareAllowedAction,
@@ -66,6 +69,12 @@ export interface AdminUserRow {
   shareAllowed: boolean | null // r13c：用户级共享开关（null=继承组，true=强制允许，false=强制禁止）
   allowSecureLocationAccess: boolean | null
   netPolicy: { allowInternalNetwork: boolean; allowSecureLocationAccess: boolean; source: string } | null // 生效快照
+  // —— r33：存储配额 + 沙箱最大时长（用户级覆盖；null=继承组/全局）——
+  storageQuotaMb: number | null
+  storagePolicy: { recording?: boolean | null; screenshot?: boolean | null; upload?: boolean | null; recordingMb?: number | null; screenshotMb?: number | null; fileMb?: number | null } | null
+  maxTtlMinutes: number | null
+  allowUnlimitedTtl: boolean | null
+  storageUsageMb: number // 当前用量（FileMeta 统一口径）
 }
 
 interface UsersTableProps {
@@ -160,6 +169,12 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
   const [bqSessions, setBqSessions] = React.useState(10)
   const [bqNovnc, setBqNovnc] = React.useState(4)
   const [bqDisk, setBqDisk] = React.useState(2048)
+
+  // r33：批量分配存储配额（覆盖/继承/增量）
+  const [batchStorageOpen, setBatchStorageOpen] = React.useState(false)
+  const [bsMode, setBsMode] = React.useState<"override" | "inherit" | "add">("override")
+  const [bsMb, setBsMb] = React.useState(2048)
+  const [bsDelta, setBsDelta] = React.useState(1024)
 
   const [deleteUser, setDeleteUser] = React.useState<AdminUserRow | null>(null)
   const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false)
@@ -357,6 +372,40 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
       key: "netPolicy",
       title: "网络策略",
       render: (row: AdminUserRow) => <NetPolicyCell row={row} />,
+    },
+    {
+      // r33：存储配额与当前用量（统一口径：录像+截图+云盘）
+      key: "storage",
+      title: "存储用量/配额",
+      render: (row: AdminUserRow) => {
+        const quota = row.storageQuotaMb
+        const pct = quota && quota > 0 ? Math.min(100, Math.round((row.storageUsageMb / quota) * 100)) : null
+        return (
+          <div className="space-y-1 text-xs min-w-28">
+            <div className="flex items-center gap-1.5">
+              <span className="tabular-nums font-medium">{row.storageUsageMb}MB</span>
+              <span className="text-muted-foreground">/ {quota == null ? <span title="继承组/全局">继承</span> : quota === 0 ? "不限" : `${quota}MB`}</span>
+            </div>
+            {pct != null && (
+              <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden" aria-label={`存储已用 ${pct}%`}>
+                <div
+                  className={cn("h-full rounded-full", pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-500" : "bg-teal-500")}
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            )}
+            {(row.storagePolicy?.recording === false || row.storagePolicy?.screenshot === false || row.storagePolicy?.upload === false) && (
+              <p className="text-[10px] text-amber-600">
+                {[
+                  row.storagePolicy.recording === false ? "录像✕" : null,
+                  row.storagePolicy.screenshot === false ? "截图✕" : null,
+                  row.storagePolicy.upload === false ? "上传✕" : null,
+                ].filter(Boolean).join(" ")}
+              </p>
+            )}
+          </div>
+        )
+      },
     },
     {
       key: "lastLoginAt",
@@ -580,6 +629,10 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
       <Button size="sm" variant="outline" disabled={!!busyAction} onClick={() => setBatchQuotaOpen(true)}>
         重置配额
       </Button>
+      {/* r33：批量分配存储配额（录像+截图+云盘统一口径） */}
+      <Button size="sm" variant="outline" disabled={!!busyAction} onClick={() => { setBsMode("override"); setBatchStorageOpen(true) }}>
+        <Database className="mr-1 h-3.5 w-3.5" /> 分配存储配额
+      </Button>
       <Button size="sm" variant="outline" disabled={!!busyAction} onClick={() => callAction("batch", () => kickUserSessionsAction({ ids: sel }))}>
         强制下线会话
       </Button>
@@ -607,6 +660,12 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
         <Button size="sm" className="bg-teal-600 hover:bg-teal-700" onClick={() => { setFormMode("create"); setEditingUser(null); setFormOpen(true) }}>
           <Plus className="mr-1 h-4 w-4" /> 新建用户
         </Button>
+        {/* r33：多用户筛选（管理员界面支持搜索并多选用户筛选） */}
+        <UserMultiFilter
+          options={rows.map((r) => ({ id: r.id, username: r.username, displayName: r.displayName }))}
+          selected={(filters.ids || "").split(",").filter(Boolean)}
+          onApply={(ids) => pushQuery({ ids: ids.length ? ids.join(",") : undefined, page: "1" })}
+        />
         <Button size="sm" variant="outline" onClick={() => { setImportText(""); setImportReport(null); setImportOpen(true) }}>
           <FileUp className="mr-1 h-4 w-4" /> 导入CSV
         </Button>
@@ -1011,6 +1070,133 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* r33：批量分配存储配额弹窗（覆盖/恢复继承/增量三模式） */}
+      <Dialog open={batchStorageOpen} onOpenChange={setBatchStorageOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>批量分配存储配额</DialogTitle>
+            <DialogDescription>对所选 {sel.length} 名用户统一设置存储配额（录像+截图+云盘统一计量）；生效后立即用于写入校验</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <div className="space-y-1.5">
+              <Label>分配模式</Label>
+              <Select value={bsMode} onValueChange={(v) => setBsMode(v as "override" | "inherit" | "add")}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="override">统一覆盖（所有选中用户设为相同配额）</SelectItem>
+                  <SelectItem value="inherit">恢复继承（清除个人覆盖，跟随组/全局）</SelectItem>
+                  <SelectItem value="add">在现值上增减（可负数）</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {bsMode === "override" && (
+              <div className="space-y-1.5">
+                <Label>总配额（0 = 不限）</Label>
+                <PrecisionInput value={bsMb} onChange={setBsMb} min={0} max={10000000} suffix="MB" />
+                <p className="text-[11px] text-muted-foreground">参考：1024MB=1GB；用户可在个人中心看到分配结果</p>
+              </div>
+            )}
+            {bsMode === "add" && (
+              <div className="space-y-1.5">
+                <Label>增量（MB，可负）</Label>
+                <PrecisionInput value={bsDelta} onChange={setBsDelta} min={-10000000} max={10000000} suffix="MB" />
+                <p className="text-[11px] text-muted-foreground">在每人现有用户级配额基础上增减（未设置=从 0 起算；结果不低于 0）</p>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBatchStorageOpen(false)}>取消</Button>
+            <Button
+              className="bg-teal-600 hover:bg-teal-700"
+              disabled={!!busyAction}
+              onClick={async () => {
+                await callAction("batch", () =>
+                  batchAssignStorageQuotaAction({
+                    ids: sel,
+                    mode: bsMode,
+                    ...(bsMode === "override" ? { storageQuotaMb: Math.max(0, Math.round(bsMb)) } : {}),
+                    ...(bsMode === "add" ? { deltaMb: Math.round(bsDelta) } : {}),
+                  })
+                )
+                setBatchStorageOpen(false)
+              }}
+            >
+              确认分配
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
+  )
+}
+
+// ============================================================
+// r33：多用户筛选弹层（管理员界面搜索 + 勾选多个用户 → 服务端 ids 过滤）
+// 复用 admin-workspaces 用户筛选交互心智：搜索框 + 复选列表 + 全选/清空 + 应用
+// ============================================================
+function UserMultiFilter({
+  options,
+  selected,
+  onApply,
+}: {
+  options: Array<{ id: string; username: string; displayName: string | null }>
+  selected: string[]
+  onApply: (ids: string[]) => void
+}) {
+  const [open, setOpen] = React.useState(false)
+  const [search, setSearch] = React.useState("")
+  const [draft, setDraft] = React.useState<string[]>(selected)
+
+  React.useEffect(() => {
+    if (open) {
+      setDraft(selected)
+      setSearch("")
+    }
+  }, [open, selected])
+
+  const kw = search.trim().toLowerCase()
+  const filtered = kw
+    ? options.filter((o) => o.username.toLowerCase().includes(kw) || (o.displayName || "").toLowerCase().includes(kw))
+    : options
+  const toggle = (id: string) => setDraft((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]))
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button size="sm" variant="outline" className="gap-1.5">
+          <Users2 className="h-3.5 w-3.5" />
+          筛选用户{selected.length > 0 ? `：已选 ${selected.length}` : ""}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-80 p-3">
+        <div className="space-y-2">
+          <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索用户名/显示名…" className="h-8" />
+          <div className="flex items-center gap-2 text-xs">
+            <button className="underline text-teal-600" onClick={() => setDraft(filtered.map((o) => o.id))}>全选</button>
+            <button className="underline text-muted-foreground" onClick={() => setDraft([])}>清空</button>
+            <span className="ml-auto text-muted-foreground">已勾选 {draft.length} / {filtered.length} 个（当前页）</span>
+          </div>
+          <div className="max-h-64 overflow-y-auto rounded border p-1 space-y-0.5">
+            {filtered.map((o) => (
+              <label key={o.id} className="flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/50 cursor-pointer">
+                <Checkbox checked={draft.includes(o.id)} onCheckedChange={() => toggle(o.id)} />
+                <span className="truncate">{o.displayName ? `${o.displayName}（${o.username}）` : o.username}</span>
+              </label>
+            ))}
+            {filtered.length === 0 && <p className="py-4 text-center text-xs text-muted-foreground">当前页无匹配用户</p>}
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            勾选后点「应用筛选」仅显示所选用户；翻页/搜索后可再次叠加勾选。清除请清空后应用。
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="outline" onClick={() => setOpen(false)}>取消</Button>
+            <Button size="sm" className="bg-teal-600 hover:bg-teal-700" onClick={() => { onApply(draft); setOpen(false) }}>
+              应用筛选{draft.length > 0 ? `（${draft.length}）` : ""}
+            </Button>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
   )
 }

@@ -61,6 +61,12 @@ model User {
   fileTransferKBps       Int?
   // —— r29：17 项硬件权限用户级覆盖（稀疏 JSON；null=继承组/全局）——
   hardwarePolicy         Json?
+  // —— r33：存储配额（用户级覆盖；null=继承用户组/全局默认；0=不限）——
+  storageQuotaMb     Int? // 总配额（MB，录像+截图+云盘文件统一计入）
+  storagePolicy      Json? // 稀疏覆盖 { recording?: bool, screenshot?: bool, upload?: bool, recordingMb?: int, screenshotMb?: int, fileMb?: int }（null 字段=继承）
+  // —— r33：沙箱最大时长（用户级覆盖；null=继承组/全局；0=不限）——
+  maxTtlMinutes      Int?
+  allowUnlimitedTtl  Boolean? // 是否允许选择「无限时长」（null=继承；false 时创建必选有限时长且 ≤ maxTtlMinutes）
   loginSessionCount   Int       @default(0)
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -222,6 +228,12 @@ model Group {
   fileTransferKBps Int?
   // —— r29：17 项硬件权限组级基线（稀疏 JSON；null=继承父组/全局）——
   hardwarePolicy  Json?
+  // —— r33：存储配额组级基线（null=继承全局；0=不限；用户级可覆盖）——
+  storageQuotaMb     Int? // 总配额（MB）
+  storagePolicy      Json? // { recording?: bool, screenshot?: bool, upload?: bool, recordingMb?: int, screenshotMb?: int, fileMb?: int }
+  // —— r33：沙箱最大时长组级基线（null=继承全局；0=不限；用户级可覆盖）——
+  maxTtlMinutes      Int?
+  allowUnlimitedTtl  Boolean?
   createdByUserId  String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -845,6 +857,9 @@ model BrowserNode {
   baseUrl       String
   // r32：公网展示地址（外部工具/跨域接入展示用；空 = 连接信息回退 ENV 推导）
   publicUrl     String?
+  // r33：公网 CDP 接入地址（每浏览器节点独立填写，如 wss://cdp.example.com 或 host:port；
+  // 空时工作区 CDP 面板回退 PUBLIC_BASE_URL 推导。拨号仍走 baseUrl，此字段仅对外展示）
+  publicCdpUrl  String?
   labels        Json?
   weight        Int      @default(1)
   status        String   @default("ONLINE") // ONLINE | OFFLINE | ISOLATED | GRAY_TEST

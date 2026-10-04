@@ -1133,3 +1133,150 @@ export async function setUserShareAllowedAction(
     return { id: user.id, shareAllowed: p.shareAllowed }
   })
 }
+
+// ============================================================
+// r33：用户级存储配额 + 沙箱最大时长精细分配
+//   · storageQuotaMb：null=继承组/全局，0=不限，>0=MB 上限（录像+截图+云盘统一计入）
+//   · storagePolicy：稀疏 JSON { recording, screenshot, upload, recordingMb, screenshotMb, fileMb }
+//     —— 分类开关 + 分类子配额（字段级覆盖；null 字段=继承）
+//   · maxTtlMinutes / allowUnlimitedTtl：沙箱最大时长与「无限时长」开关
+//   鉴权：SUPER_ADMIN / ADMIN 全量；GROUP_ADMIN 仅限本组成员
+// ============================================================
+export async function setUserStorageQuotaAction(
+  input: unknown,
+): Promise<ActionResult<{ id: string; storageQuotaMb: number | null; maxTtlMinutes: number | null; allowUnlimitedTtl: boolean | null; effective: { totalMb: number; sourceLabel: string } }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAuth()
+    const isAdmin = ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN"
+    const isGroupAdmin = ctx.role === "GROUP_ADMIN"
+    if (!isAdmin && !isGroupAdmin) throw new Error("无权分配存储配额（需要管理员或组管理员权限）")
+
+    const p = zodValidate(z.object({
+      id: zId,
+      storageQuotaMb: z.number().int().min(0).max(10_000_000).nullable(), // null=继承，0=不限
+      storagePolicy: z.object({
+        recording: z.boolean().nullable().optional(),
+        screenshot: z.boolean().nullable().optional(),
+        upload: z.boolean().nullable().optional(),
+        recordingMb: z.number().int().min(0).max(10_000_000).nullable().optional(),
+        screenshotMb: z.number().int().min(0).max(10_000_000).nullable().optional(),
+        fileMb: z.number().int().min(0).max(10_000_000).nullable().optional(),
+      }).nullable().optional(), // null=清除覆盖（全继承）
+      maxTtlMinutes: z.number().int().min(0).max(525600).nullable().optional(),
+      allowUnlimitedTtl: z.boolean().nullable().optional(),
+    }), input)
+
+    const user = await db.user.findUnique({ where: { id: p.id } })
+    if (!user || user.deletedAt) throw new Error("用户不存在或已删除")
+    if (isGroupAdmin && !isAdmin) {
+      const { isGroupAdminOf } = await import("@/lib/permissions")
+      if (!(await isGroupAdminOf(ctx.userId, user.id))) throw new Error("仅可为本组成员分配存储配额")
+    }
+
+    const before = { storageQuotaMb: user.storageQuotaMb, storagePolicy: user.storagePolicy, maxTtlMinutes: user.maxTtlMinutes, allowUnlimitedTtl: user.allowUnlimitedTtl }
+
+    // storagePolicy 合并语义：传入对象=部分覆盖合并（null 字段清除该键）；传入 null=全清除
+    let nextPolicy: Record<string, unknown> | null = null
+    if (p.storagePolicy === null) {
+      nextPolicy = null
+    } else if (p.storagePolicy) {
+      const cur = (user.storagePolicy && typeof user.storagePolicy === "object" ? user.storagePolicy : {}) as Record<string, unknown>
+      nextPolicy = { ...cur }
+      for (const [k, v] of Object.entries(p.storagePolicy)) {
+        if (v === null || v === undefined) delete nextPolicy[k]
+        else nextPolicy[k] = v
+      }
+      if (Object.keys(nextPolicy).length === 0) nextPolicy = null
+    }
+
+    await db.user.update({
+      where: { id: user.id },
+      data: {
+        storageQuotaMb: p.storageQuotaMb,
+        ...(p.storagePolicy !== undefined ? { storagePolicy: nextPolicy as never } : {}),
+        ...(p.maxTtlMinutes !== undefined ? { maxTtlMinutes: p.maxTtlMinutes } : {}),
+        ...(p.allowUnlimitedTtl !== undefined ? { allowUnlimitedTtl: p.allowUnlimitedTtl } : {}),
+      },
+    })
+
+    // 生效解析即时回显
+    const { resolveStoragePolicy } = await import("@/lib/storage-quota")
+    const eff = await resolveStoragePolicy(user.id)
+
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "USER_STORAGE_QUOTA",
+      resourceType: "USER", resourceId: user.id, resourceName: user.username, ownerUserId: user.id,
+      before,
+      after: { storageQuotaMb: p.storageQuotaMb, storagePolicy: nextPolicy, maxTtlMinutes: p.maxTtlMinutes, allowUnlimitedTtl: p.allowUnlimitedTtl, effective: { totalMb: eff.totalMb, sourceLabel: eff.sourceLabel } },
+      severity: "WARN",
+    })
+    // 站内信告知用户配额变更（可感知）
+    await db.notice.create({
+      data: {
+        userId: user.id,
+        title: "你的存储配额已更新",
+        content: `管理员已更新你的存储分配：总配额 ${eff.totalMb > 0 ? `${(eff.totalMb / 1024).toFixed(2)}GB` : "不限"}（${eff.sourceLabel}）。可在「个人中心 → 存储与配额」查看明细与当前用量。`,
+        type: "SYSTEM",
+        link: "/account/profile",
+        sourceType: "USER",
+        sourceKey: user.id,
+        senderUserId: ctx.userId,
+      },
+    }).catch(() => {})
+    return { id: user.id, storageQuotaMb: p.storageQuotaMb, maxTtlMinutes: p.maxTtlMinutes ?? null, allowUnlimitedTtl: p.allowUnlimitedTtl ?? null, effective: { totalMb: eff.totalMb, sourceLabel: eff.sourceLabel } }
+  })
+}
+
+// ---- r33：批量分配存储配额（多用户；模式：override=统一覆盖 / inherit=恢复继承 / add=在现值上加减）----
+export async function batchAssignStorageQuotaAction(
+  input: unknown,
+): Promise<ActionResult<{ total: number; success: number; failed: number; failures: { id: string; reason: string }[] }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAuth()
+    const isAdmin = ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN"
+    if (!isAdmin) throw new Error("仅管理员可批量分配存储配额")
+
+    const p = zodValidate(z.object({
+      ids: z.array(zId).min(1, "请选择用户").max(500, "单批最多 500 个用户"),
+      mode: z.enum(["override", "inherit", "add"]),
+      storageQuotaMb: z.number().int().min(0).max(10_000_000).optional(), // override/add 必填；add 可为负数语义用 delta
+      deltaMb: z.number().int().min(-10_000_000).max(10_000_000).optional(), // add 模式增量
+    }), input)
+    if (p.mode === "override" && p.storageQuotaMb === undefined) throw new Error("覆盖模式需填写配额值")
+    if (p.mode === "add" && p.deltaMb === undefined && p.storageQuotaMb === undefined) throw new Error("增量模式需填写增量")
+
+    const failures: { id: string; reason: string }[] = []
+    let success = 0
+    for (const id of p.ids) {
+      try {
+        const user = await db.user.findUnique({ where: { id }, select: { id: true, username: true, storageQuotaMb: true, deletedAt: true } })
+        if (!user || user.deletedAt) { failures.push({ id, reason: "用户不存在" }); continue }
+        let next: number | null = null
+        if (p.mode === "inherit") next = null
+        else if (p.mode === "override") next = p.storageQuotaMb!
+        else {
+          const delta = p.deltaMb ?? p.storageQuotaMb ?? 0
+          const base = user.storageQuotaMb ?? 0
+          next = Math.max(0, base + delta)
+        }
+        await db.user.update({ where: { id }, data: { storageQuotaMb: next } })
+        success++
+      } catch (e) {
+        failures.push({ id, reason: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "USER_STORAGE_QUOTA_BATCH",
+      resourceType: "USER",
+      severity: failures.length > 0 ? "WARN" : "INFO",
+      after: { mode: p.mode, storageQuotaMb: p.storageQuotaMb, deltaMb: p.deltaMb, total: p.ids.length, success, failed: failures.length, failures: failures.slice(0, 20) },
+      extra: { batchSize: p.ids.length },
+    })
+    await trackBehavior(ctx.userId, "BATCH")
+    return { total: p.ids.length, success, failed: failures.length, failures }
+  })
+}

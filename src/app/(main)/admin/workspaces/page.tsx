@@ -169,7 +169,13 @@ export default async function AdminWorkspacesPage({
     where.OR = [{ uuid: { contains: q.keyword } }, { name: { contains: q.keyword } }]
   }
   if (f.mode) where.mode = f.mode
-  if (f.status) where.status = f.status
+  // r33：★ 闲置回收快捷筛选 —— DESTROYED 且回收原因属于闲置/TTL/NoVNC 闲置（可归还视图）
+  if (f.status === "RECLAIMED") {
+    where.status = "DESTROYED"
+    where.crashCategory = { in: ["闲置超时", "TTL到期", "NoVNC闲置回收"] }
+  } else if (f.status) {
+    where.status = f.status
+  }
   // r14（22-c）：用户筛选作用域（三级）：
   //   scope=all（全选）→ 全部用户；scope=custom + users=多选 ID → 所选用户；
   //   默认（无参数）→ 仅当前管理员自己的工作区；旧版单选 user 参数兼容

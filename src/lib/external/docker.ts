@@ -199,6 +199,11 @@ export async function createIsolatedBrowserContainer(
   const hardening = browserHardeningSummary(spec)
   const name = `dy-browser-${randomUUID().replace(/-/g, "").slice(0, 12)}`
   if (externalAvailable.docker) {
+    // r33：镜像存在性保障（404 根因修复）——创建前确保镜像在节点本地，缺失则自动拉取
+    const img = await ensureImagePresent(spec.image)
+    if (!img.present) {
+      throw new Error(`浏览器镜像 ${spec.image} 不可用${img.message ? `（${img.message}）` : ""}；请在节点预拉取后重试`)
+    }
     // r27：录像用户空间目录（name 本函数生成 → 目录此处统一推导；调用方无需预知容器名）
     let recordDir: string | null = null
     if (spec.recording?.enabled && spec.recordingUserId && safeId(spec.recordingUserId)) {
@@ -236,7 +241,7 @@ export async function createIsolatedBrowserContainer(
       method: "POST",
       body: JSON.stringify(body),
     })
-    if (!res.ok) throw new Error(`Docker API create browser failed: HTTP ${res.status}`)
+    if (!res.ok) throw new Error(`Docker API create browser failed: HTTP ${res.status}${await dockerErrDetail(res)}`)
     const json = (await res.json()) as { Id: string }
     const start = await dockerFetch(`/containers/${json.Id}/start`, { method: "POST" }, 60000)
     if (!start.ok && start.status !== 304) throw new Error(`Docker API start browser failed: HTTP ${start.status}`)
@@ -339,6 +344,64 @@ async function dockerFetch(path: string, init?: RequestInit, timeoutMs = ENV.doc
   }
 }
 
+// ============================================================
+// r33：镜像存在性保障（修复「重建会话失败：Docker API create browser failed: HTTP 404」根因）
+// Docker Engine API 对 /containers/create 返回 404 的最常见原因是「本地不存在该镜像」
+// （节点重装 / docker image prune / 新扩容 Worker 未预拉镜像）。
+// createIsolatedBrowserContainer / createContainer 创建前统一调用：
+//   1. GET /images/<ref>/json 命中 → 直接创建
+//   2. 404 → POST /images/create?fromImage=<ref> 自动拉取（默认 5 分钟超时），再复查
+//   3. 拉取失败 → 抛出可操作错误（提示在节点预拉镜像）
+// ============================================================
+async function dockerErrDetail(res: Response): Promise<string> {
+  try {
+    const text = await res.text()
+    try {
+      const j = JSON.parse(text) as { message?: string; error?: string }
+      const msg = j.message || j.error
+      if (msg) return `：${msg.slice(0, 300)}`
+    } catch {
+      if (text) return `：${text.slice(0, 300)}`
+    }
+  } catch { /* 响应体不可读 */ }
+  return ""
+}
+
+export async function ensureImagePresent(
+  image: string,
+  opts?: { pullTimeoutMs?: number; log?: (m: string) => void },
+): Promise<{ present: boolean; pulled: boolean; message?: string }> {
+  if (!externalAvailable.docker) return { present: true, pulled: false }
+  const ref = image.trim()
+  if (!ref) return { present: false, pulled: false, message: "镜像引用为空" }
+  const inspect = await dockerFetch(`/images/${encodeURIComponent(ref)}/json`, { method: "GET" }, 15_000)
+  if (inspect.ok) return { present: true, pulled: false }
+  if (inspect.status !== 404) {
+    return { present: false, pulled: false, message: `镜像检查失败 HTTP ${inspect.status}${await dockerErrDetail(inspect)}` }
+  }
+  // 本地不存在 → 自动拉取（流式进度体不消费，仅等状态码；registry 鉴权场景需预先 docker login）
+  opts?.log?.(`镜像 ${ref} 本地不存在，自动拉取中…`)
+  const pullTimeout = opts?.pullTimeoutMs ?? 300_000
+  try {
+    const pull = await dockerFetch(`/images/create?fromImage=${encodeURIComponent(ref)}`, { method: "POST" }, pullTimeout)
+    if (!pull.ok && pull.status !== 404) {
+      return { present: false, pulled: false, message: `镜像拉取失败 HTTP ${pull.status}${await dockerErrDetail(pull)}` }
+    }
+    if (pull.status === 404) {
+      return { present: false, pulled: false, message: `仓库中不存在镜像 ${ref}（请检查镜像名/标签或在节点手动拉取）` }
+    }
+    // 拉取流（JSON lines）读掉以释放连接
+    await pull.text().catch(() => "")
+  } catch (e) {
+    const msg = e instanceof Error && e.name === "AbortError" ? `镜像拉取超时（>${Math.round(pullTimeout / 1000)}s）` : `镜像拉取异常：${e instanceof Error ? e.message : String(e)}`
+    return { present: false, pulled: false, message: msg }
+  }
+  // 复查
+  const verify = await dockerFetch(`/images/${encodeURIComponent(ref)}/json`, { method: "GET" }, 15_000)
+  if (verify.ok) return { present: true, pulled: true }
+  return { present: false, pulled: false, message: "镜像拉取后仍未检出（请检查节点磁盘/registry 状态）" }
+}
+
 // ---- 嵌入式进程形态（r13：sing-box 容器内进程，单容器全内置）----
 // 条件：未配置 DOCKER_API_URL 且镜像内 sing-box 二进制可用；调用方（singbox 编排）无感知切换
 async function embeddedProcessRuntime() {
@@ -363,6 +426,11 @@ export async function createContainer(spec: DockerContainerSpec): Promise<{ id: 
     }
   }
   if (externalAvailable.docker) {
+    // r33：镜像存在性保障（404 根因修复，同浏览器容器链路）
+    const img = await ensureImagePresent(spec.image)
+    if (!img.present) {
+      throw new Error(`镜像 ${spec.image} 不可用${img.message ? `（${img.message}）` : ""}；请在节点预拉取后重试`)
+    }
     // HostConfig 资源硬限制：CPU/内存超限直接OOM终止，禁止特权，不挂载宿主机敏感目录
     const body = {
       Image: spec.image,
@@ -384,7 +452,7 @@ export async function createContainer(spec: DockerContainerSpec): Promise<{ id: 
       method: "POST",
       body: JSON.stringify(body),
     })
-    if (!res.ok) throw new Error(`Docker API create failed: HTTP ${res.status}`)
+    if (!res.ok) throw new Error(`Docker API create failed: HTTP ${res.status}${await dockerErrDetail(res)}`)
     const json = (await res.json()) as { Id: string }
     return { id: json.Id, simulated: false }
   }

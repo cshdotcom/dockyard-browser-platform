@@ -35,6 +35,8 @@ type Workspace = {
   novncConnCount: number
   expireAt: Date | null
   freezeReason: string | null
+  crashCategory: string | null
+  containerRef: string | null
   startedAt: Date | null
   runtimeAccumSec: number
 }
@@ -178,7 +180,10 @@ export async function forceRestartWorkspaceAction(input: unknown): Promise<Actio
     try {
       await coreRestart(ctx, ws)
     } catch (e) {
-      await db.browserWorkspace.update({ where: { id }, data: { status: "ERROR", crashCategory: "RESTART_FAILED" } })
+      // r33：RESTART_FAILED 错误态优化 —— 附带可操作指引（镜像缺失/网络异常时用户能看懂下一步）
+      const raw = e instanceof Error ? e.message : String(e)
+      const hint = raw.includes("404") || raw.includes("镜像") ? "（节点镜像缺失已触发自动拉取，请稍后重试；持续失败请检查节点 Docker 环境）" : "（请检查节点 Docker 状态后重试）"
+      await db.browserWorkspace.update({ where: { id }, data: { status: "ERROR", crashCategory: "RESTART_FAILED", freezeReason: `${raw}${hint}`.slice(0, 500) } })
       await writeAudit({
         operatorUserId: ctx.userId,
         operatorName: ctx.username,
@@ -189,11 +194,92 @@ export async function forceRestartWorkspaceAction(input: unknown): Promise<Actio
         ownerUserId: ws.userId,
         createdByUserId: ws.createdByUserId,
         severity: "WARN",
-        after: { status: "ERROR", crashCategory: "RESTART_FAILED", error: e instanceof Error ? e.message : String(e) },
+        after: { status: "ERROR", crashCategory: "RESTART_FAILED", error: raw },
       })
-      throw new Error(`重建会话失败：${e instanceof Error ? e.message : String(e)}`)
+      throw new Error(`重建会话失败：${raw}${hint}`)
     }
     return { id, status: "RUNNING" }
+  })
+}
+
+// ============================================================
+// r33：闲置回收会话「归还」用户（后台可退回）
+// 场景：闲置超时/TTL到期/NoVNC闲置回收将工作区置为 DESTROYED ——
+//   管理员可将被回收的会话重新归还给对应用户：
+//     · 仅归还不拉起：状态 → STOPPED，用户可自行启动（保留全部配置/Profile/录像）
+//     · 归还并拉起：销毁残畡会话 → 按原配置重建 → RUNNING（用户无感续用）
+//   归还后：站内信通知 + 审计留痕
+// ============================================================
+
+export async function restoreReclaimedWorkspaceAction(input: unknown): Promise<ActionResult<{ id: string; status: string; restarted: boolean }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAdmin()
+    const p = zodValidate(z.object({ id: zId, restart: z.boolean().default(false) }), input)
+    const ws = await getWorkspace(p.id)
+
+    if (ws.status !== "DESTROYED" && ws.status !== "ERROR") throw new Error("仅被回收/错误态工作区可归还")
+    // 销毁可能残留的底层会话引用（安全：归还前先清理，避免新旧会话引用错乱）
+    if (ws.mode === "cdp_light" && ws.browserSessionId) await destroySession(ws.browserSessionId).catch(() => {})
+    if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId, ws.containerRef).catch(() => {})
+
+    let restarted = false
+    if (p.restart) {
+      await coreRestart(ctx, ws)
+      restarted = true
+    } else {
+      await db.browserWorkspace.update({
+        where: { id: ws.id },
+        data: { status: "STOPPED", crashCategory: null, freezeReason: null, browserSessionId: null, cdpUrl: null, novncSessionId: null, startedAt: null, lastActiveAt: new Date() },
+      })
+    }
+
+    const status = restarted ? "RUNNING" : "STOPPED"
+    // 站内信：告知用户管理员已将会话归还
+    await db.notice.create({
+      data: {
+        userId: ws.userId,
+        title: `管理员已将「${ws.name}」归还给你`,
+        content: `被闲置回收的工作区「${ws.name}」（原回收原因：${ws.freezeReason || ws.crashCategory || "闲置回收"}）已由管理员 ${ctx.username} 归还。${restarted ? "会话已重新拉起，可直接接入使用。" : "工作区已恢复为停止状态，可随时在「工作区」页启动。"}原配置、Profile 与录像均已保留。`,
+        type: "SYSTEM",
+        link: `/workspaces/${ws.id}`,
+        sourceType: "WORKSPACE",
+        sourceKey: ws.id,
+        senderUserId: ctx.userId,
+      },
+    }).catch(() => {})
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "ADMIN_RECLAIM_RESTORE",
+      resourceType: "WORKSPACE",
+      resourceId: ws.id,
+      resourceName: ws.name,
+      ownerUserId: ws.userId,
+      createdByUserId: ws.createdByUserId,
+      severity: "INFO",
+      before: { status: ws.status, crashCategory: ws.crashCategory, freezeReason: ws.freezeReason },
+      after: { status, restarted, originalCrash: ws.crashCategory },
+    })
+    return { id: ws.id, status, restarted }
+  })
+}
+
+export async function batchRestoreReclaimedWorkspaceAction(input: unknown): Promise<ActionResult<{ successCount: number; failCount: number; failures: { id: string; reason: string }[] }>> {
+  return actionHandler(async () => {
+    await requireAdmin()
+    const p = zodValidate(z.object({ ids: z.array(zId).min(1, "请选择工作区"), restart: z.boolean().default(false) }), input)
+    const failures: { id: string; reason: string }[] = []
+    let successCount = 0
+    for (const id of p.ids) {
+      try {
+        const res = await restoreReclaimedWorkspaceAction({ id, restart: p.restart })
+        if (res.code !== 0) failures.push({ id, reason: res.msg || "归还失败" })
+        else successCount++
+      } catch (e) {
+        failures.push({ id, reason: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    return { successCount, failCount: failures.length, failures }
   })
 }
 
@@ -378,10 +464,11 @@ interface BatchResult {
 
 const batchSchema = z.object({
   ids: z.array(zId).min(1, "请选择工作区"),
-  op: z.enum(["STOP", "RESTART", "RECYCLE", "PURGE", "TTL", "TRANSFER"]),
+  op: z.enum(["STOP", "RESTART", "RECYCLE", "PURGE", "TTL", "TRANSFER", "RESTORE_RECLAIM"]),
   ttlMinutes: zPrecision("TTL", 0, 525600).optional(),
   idleTimeoutMinutes: zPrecision("闲置超时", 1, 525600).optional(),
   targetUsername: zUsername.optional(),
+  restart: z.boolean().optional(),
 })
 
 export async function batchWorkspaceAction(input: unknown): Promise<ActionResult<BatchResult>> {
@@ -404,6 +491,8 @@ export async function batchWorkspaceAction(input: unknown): Promise<ActionResult
           res = await forceRecycleWorkspaceAction({ id })
         } else if (p.op === "PURGE") {
           res = await forcePurgeWorkspaceAction({ id })
+        } else if (p.op === "RESTORE_RECLAIM") {
+          res = await restoreReclaimedWorkspaceAction({ id, restart: !!p.restart })
         } else if (p.op === "TTL") {
           res = await forceUpdateTtlAction({ id, ttlMinutes: p.ttlMinutes, idleTimeoutMinutes: p.idleTimeoutMinutes })
         } else {

@@ -33,7 +33,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 
-export type Domain = "ROOT_FS" | "STORAGE" | "HOME"
+export type Domain = "ROOT_FS" | "STORAGE" | "HOME" | "RECORDING" | "SCREENSHOT"
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -149,10 +149,11 @@ interface ShareTargets {
   groups: Array<{ id: string; name: string; memberCount: number }>
 }
 
-export function FileExplorerPanel({ initialDomain, initialPath, domains }: {
+export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFileName }: {
   initialDomain: Domain
   initialPath?: string // r31：深链定位（如 /admin/files?path=home/<userId> 用户资料直达）
   domains: Array<{ key: Domain; label: string; icon: React.ReactNode }>
+  focusFileName?: string // r33：?focus=<FileMetaId> 深链：目录载入后自动选中并高亮该文件
 }) {
   const [domain, setDomain] = useState<Domain>(initialDomain)
   const [curPath, setCurPath] = useState(
@@ -165,7 +166,7 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains }: {
   const prefsLoadedRef = useRef(false)
   const prefsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const allowedDomains = useMemo(() => new Set(domains.map((d) => d.key)), [domains])
-  const domainLabel = (d: Domain) => d === "ROOT_FS" ? "根目录" : d === "STORAGE" ? "存储空间" : "我的空间"
+  const domainLabel = (d: Domain) => d === "ROOT_FS" ? "根目录" : d === "STORAGE" ? "存储空间" : d === "RECORDING" ? "我的录像" : d === "SCREENSHOT" ? "我的截图" : "我的空间"
   const tabTitle = (t: ExplorerTabPref) => (t.path ? t.path.split("/").filter(Boolean).pop() || t.path : domainLabel(t.domain))
 
   // 载入用户偏好（首次挂载：恢复上次会话的多标签与收藏夹 → 跨端同步）
@@ -311,6 +312,15 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains }: {
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [canWrite, setCanWrite] = useState(false)
+  // r33：focus 深链定位（一次性：命中后自动选中 + 高亮 + 滚动到可见）
+  const [focusHit, setFocusHit] = useState(false)
+  const focusAppliedRef = useRef(false)
+  const focusRowRef = useRef<HTMLTableRowElement | null>(null)
+  useEffect(() => {
+    if (focusHit && focusRowRef.current) {
+      focusRowRef.current.scrollIntoView({ block: "center", behavior: "smooth" })
+    }
+  }, [focusHit])
 
   const [preview, setPreview] = useState<FileEntry | null>(null)
   const [editor, setEditor] = useState<EditorState | null>(null)
@@ -351,12 +361,19 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains }: {
         setEntries(res.data.entries)
         setTotal(res.data.total)
         setCanWrite(res.data.canWrite)
-        setSelected(new Set())
+        // r33：focus 深链 —— 首次载入后自动选中并高亮目标文件（通知直达/录像「更多」入口；仅一次）
+        if (focusFileName && !focusAppliedRef.current && res.data.entries.some((e) => e.name === focusFileName)) {
+          focusAppliedRef.current = true
+          setSelected(new Set([focusFileName]))
+          setFocusHit(true)
+        } else {
+          setSelected(new Set())
+        }
       } else toast.error(res.msg || "读取目录失败")
     } finally {
       setLoading(false)
     }
-  }, [domain, curPath, page, pageSize, sortBy, sortDir, keyword])
+  }, [domain, curPath, page, pageSize, sortBy, sortDir, keyword, focusFileName])
 
   useEffect(() => { void reload() }, [reload])
 
@@ -769,13 +786,15 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains }: {
               {entries.map((e) => {
                 const path = joinPath(curPath, e.name)
                 const isSel = selected.has(e.name)
+                const isFocus = focusHit && focusFileName === e.name
                 return (
-                  <tr key={e.name} className={`border-b last:border-0 hover:bg-muted/40 ${isSel ? "bg-primary/5" : ""}`}>
+                  <tr key={e.name} ref={isFocus ? focusRowRef : undefined} className={`border-b last:border-0 hover:bg-muted/40 ${isSel ? "bg-primary/5" : ""} ${isFocus ? "ring-2 ring-teal-400 ring-inset" : ""}`}>
                     <td className="p-2"><Checkbox checked={isSel} onCheckedChange={() => toggleOne(e.name)} /></td>
                     <td className="p-2 max-w-0">
                       <button className="flex items-center gap-2 text-left min-w-0 group" onClick={() => { if (e.isDir) go(path); else openPreview(e) }}>
                         {KIND_ICON[e.kind] || <File className="h-4 w-4" />}
                         <span className="truncate font-medium group-hover:underline" title={path}>{e.name}</span>
+                        {isFocus && <span className="ml-1 shrink-0 rounded bg-teal-500/15 px-1.5 py-0.5 text-[10px] font-medium text-teal-700 dark:text-teal-300">定位</span>}
                       </button>
                     </td>
                     <td className="p-2 text-xs text-muted-foreground hidden sm:table-cell">{e.isDir ? "-" : fmtBytes(e.size)}</td>

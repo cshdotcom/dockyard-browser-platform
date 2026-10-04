@@ -16,7 +16,7 @@
 import { promises as fsp } from "fs"
 import path from "path"
 
-export type FileDomain = "ROOT_FS" | "STORAGE" | "HOME"
+export type FileDomain = "ROOT_FS" | "STORAGE" | "HOME" | "RECORDING" | "SCREENSHOT" // RECORDING/SCREENSHOT：r33 用户录像/截图域（storage/recordings|screenshots/<userId>；只读+下载，不可写）
 
 export const MAX_EDIT_BYTES = 2 * 1024 * 1024 // 文本编辑上限
 export const MAX_SEARCH_FILES = 2000 // 搜索扫描文件数上限
@@ -62,10 +62,12 @@ export interface DomainRoots {
   ROOT_FS: string
   STORAGE: string
   HOME?: string
+  RECORDING?: string // r33：用户录像域根（storage/recordings/<userId>）
+  SCREENSHOT?: string // r33：用户截图域根（storage/screenshots/<userId>）
 }
 
 export function resolveDomainPath(roots: DomainRoots, domain: FileDomain, rel: string): { abs: string; ok: boolean } {
-  const root = domain === "ROOT_FS" ? roots.ROOT_FS : domain === "STORAGE" ? roots.STORAGE : roots.HOME || ""
+  const root = domain === "ROOT_FS" ? roots.ROOT_FS : domain === "STORAGE" ? roots.STORAGE : domain === "RECORDING" ? roots.RECORDING || "" : domain === "SCREENSHOT" ? roots.SCREENSHOT || "" : roots.HOME || ""
   if (!root) return { abs: "", ok: false }
   const abs = path.resolve(root, rel || ".")
   const rootNorm = path.resolve(root)
@@ -81,6 +83,8 @@ export function isWriteDenied(domain: FileDomain, abs: string, storageRoot: stri
   if (domain === "ROOT_FS") {
     return ROOT_FS_WRITE_DENY.some((d) => abs === d || abs.startsWith(d + path.sep))
   }
+  // r33：录像/截图域整体只读（删除/移动/重命名/上传全部拒绝；回放/下载经专用链路）
+  if (domain === "RECORDING" || domain === "SCREENSHOT") return true
   if (domain === "STORAGE" || domain === "HOME") {
     const rel = path.relative(path.resolve(storageRoot), abs)
     if (rel.startsWith("..")) return true

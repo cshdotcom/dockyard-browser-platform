@@ -24,6 +24,7 @@ import { moveToRecycle } from "@/lib/recycle"
 import { getConfigBool, getConfig, getConfigNumber } from "@/lib/config"
 import { assertShareAllowed } from "@/lib/share-policy"
 import { resolveIdlePolicyForUser, isAdminRole, fmtIdleBrief } from "@/lib/idle-policy"
+import { resolveTtlPolicyForUser, validateTtlAgainstPolicy } from "@/lib/ttl-policy"
 import { resolveRecordingPolicy, recordingTuning, registerWorkspaceRecording, type RecordingPolicy, type RecordingTuning } from "@/lib/recording"
 import { resolveHardwarePolicy, hardwareManagedPolicies, resolveClipboardSync } from "@/lib/hardware-perms"
 import { validateExtraPolicies } from "@/lib/chromium-policies"
@@ -215,6 +216,13 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
     const idleIgnoredByPolicy = !isAdminRole(ctx.role) && idlePolicy.locked && idleMinutes !== idlePolicy.defaultMinutes
     if (idleIgnoredByPolicy) idleMinutes = idlePolicy.defaultMinutes
 
+    // r33：沙箱最大时长策略链校验（用户创建时长 ≤ 管理员为该用户/组配置的上限；无限时长受开关管控）
+    const ttlPolicy = await resolveTtlPolicyForUser(ctx.userId)
+    const requestedTtl = p.ttlMinutes ?? (await getConfigNumber("workspace.defaultTtlMinutes", 0))
+    const ttlErr = validateTtlAgainstPolicy(ttlPolicy, requestedTtl, isAdminRole(ctx.role))
+    if (ttlErr) throw new Error(ttlErr)
+    const ttlApplied = requestedTtl
+
     // 模板加载（继承配置）
     let templateConfig: Record<string, unknown> = {}
     if (p.templateId) {
@@ -244,7 +252,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         userAgent: (templateConfig.ua as string) || undefined,
         timezone: (templateConfig.timezone as string) || undefined,
         locale: (templateConfig.locale as string) || undefined,
-        ttlMinutes: p.ttlMinutes || undefined,
+        ttlMinutes: ttlApplied || undefined,
         profileMount: p.profileSnapshotId ? `snapshots/${p.profileSnapshotId}` : undefined,
       })
       const ws = await db.browserWorkspace.create({
@@ -265,7 +273,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           browserSessionId: session.sessionId,
           cdpUrl: session.cdpUrl,
           networkPolicyJson: netPolicyJson(netPolicy, domPolicy, endPolicy, filePolicy),
-          ttlMinutes: p.ttlMinutes || (await getConfigNumber("workspace.defaultTtlMinutes", 0)),
+          ttlMinutes: ttlApplied,
           idleTimeoutMinutes: idleMinutes,
           createdByUserId: ctx.userId,
         },
@@ -300,7 +308,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
       const novnc = await createNovncSession({
         proxyUrl: proxyInfo.proxyUrl,
         resolution: p.resolution,
-        ttlMinutes: p.ttlMinutes || undefined,
+        ttlMinutes: ttlApplied || undefined,
         profileMount: p.profileSnapshotId ? `snapshots/${p.profileSnapshotId}` : undefined,
         userId: ctx.userId,
         profileKey,
@@ -354,7 +362,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
           containerRef: novnc.containerName || null,
           hardeningJson: hardeningJsonInput,
           networkPolicyJson: netPolicyJson(netPolicy, domPolicy, endPolicy, filePolicy),
-          ttlMinutes: p.ttlMinutes,
+          ttlMinutes: ttlApplied,
           idleTimeoutMinutes: idleMinutes,
           createdByUserId: ctx.userId,
         },
@@ -1108,6 +1116,13 @@ export async function updateWorkspaceAction(input: unknown): Promise<ActionResul
     const idleLockedForUser = !isAdminRole(ctx.role) && idlePolicy.locked
     const idleIgnoredByPolicy = idleLockedForUser && idleTimeoutMinutes !== undefined && idleTimeoutMinutes !== idlePolicy.defaultMinutes
     const effectiveIdle = idleLockedForUser && idleTimeoutMinutes !== undefined ? idlePolicy.defaultMinutes : idleTimeoutMinutes
+
+    // r33：TTL 上限校验（普通用户修改时长同样受策略链约束；管理员豁免）
+    if (ttlMinutes !== undefined) {
+      const ttlPolicy = await resolveTtlPolicyForUser(ws.userId)
+      const ttlErr = validateTtlAgainstPolicy(ttlPolicy, ttlMinutes, isAdminRole(ctx.role))
+      if (ttlErr) throw new Error(ttlErr)
+    }
 
     await db.browserWorkspace.update({
       where: { id },

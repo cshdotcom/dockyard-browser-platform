@@ -9,6 +9,7 @@ import { writeAudit } from "@/lib/audit"
 import { ENV } from "@/lib/env"
 import { BizError, ErrorCode } from "@/lib/errors"
 import { resolveDomainPath, isWriteDenied } from "@/lib/file-explorer"
+import { checkStorageQuota, notifyStorageWatermark, resolveStoragePolicy } from "@/lib/storage-quota"
 
 // ============================================================
 // r28 文件管理器上传：POST /api/files/upload-explorer (multipart)
@@ -35,7 +36,7 @@ export async function POST(req: NextRequest) {
     if (!form) throw new BizError(ErrorCode.PARAM_ERROR, "无效的表单数据")
     const file = form.get("file")
     if (!(file instanceof File)) throw new BizError(ErrorCode.PARAM_ERROR, "缺少文件字段")
-    const domain = (String(form.get("domain") || "HOME")) as "ROOT_FS" | "STORAGE" | "HOME"
+    const domain = (String(form.get("domain") || "HOME")) as "ROOT_FS" | "STORAGE" | "HOME" | "RECORDING" | "SCREENSHOT"
     const dir = String(form.get("dir") || "")
 
     const isAdmin = ctx.role === "ADMIN" || ctx.role === "SUPER_ADMIN"
@@ -49,6 +50,30 @@ export async function POST(req: NextRequest) {
       throw new BizError(ErrorCode.PARAM_ERROR, `文件超过上传上限 ${maxMb}MB`)
     }
 
+    // r33：存储配额执行链 —— 功能开关 + 总配额/分类子配额校验（管理员豁免配额但受总开关约束）
+    const policy = await resolveStoragePolicy(ctx.userId)
+    if (!policy.uploadAllowed) {
+      throw new BizError(ErrorCode.FORBIDDEN, `管理员已禁用云盘上传（${policy.switchSourceLabel}）；已有文件仍可下载`)
+    }
+    if (!isAdmin) {
+      const quota = await checkStorageQuota(ctx.userId, file.size, "upload")
+      if (!quota.ok) {
+        // 站内信留痕（去重） + 拒绝
+        await db.notice.create({
+          data: {
+            userId: ctx.userId,
+            title: "上传被拒绝：存储配额不足",
+            content: quota.reason || "存储配额不足",
+            type: "ALERT",
+            link: "/files",
+            sourceType: "FILE",
+            sourceKey: ctx.userId,
+          },
+        }).catch(() => {})
+        throw new BizError(ErrorCode.FORBIDDEN, quota.reason || "存储配额不足")
+      }
+    }
+
     const name = sanitizeName(file.name)
     const lower = name.toLowerCase()
     const denyList = await getConfig("files.denyExts", "")
@@ -58,7 +83,7 @@ export async function POST(req: NextRequest) {
     }
 
     const home = path.join(ENV.storageLocalPath, "home", ctx.userId)
-    const roots = { ROOT_FS: "/", STORAGE: path.resolve(ENV.storageLocalPath), HOME: home }
+    const roots = { ROOT_FS: "/", STORAGE: path.resolve(ENV.storageLocalPath), HOME: home, RECORDING: path.join(ENV.storageLocalPath, "recordings", ctx.userId), SCREENSHOT: path.join(ENV.storageLocalPath, "screenshots", ctx.userId) }
     const { abs: dirAbs, ok } = resolveDomainPath(roots, domain, dir)
     if (!ok) throw new BizError(ErrorCode.FORBIDDEN, "非法路径")
     const destAbs = path.join(dirAbs, name)
@@ -76,6 +101,9 @@ export async function POST(req: NextRequest) {
       operationType: "FILE_UPLOAD", resourceType: "FILE", resourceName: name, severity: "INFO",
       after: { domain, dir, sizeBytes: file.size, mime: file.type },
     }).catch(() => null)
+
+    // r33：上传成功后水位预警（异步、去重）
+    void notifyStorageWatermark(ctx.userId).catch(() => null)
 
     return Response.json({ code: 0, msg: "ok", data: { fileName: name, sizeBytes: file.size } })
   })

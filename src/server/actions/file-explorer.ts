@@ -24,18 +24,20 @@ import { promises as fsp } from "fs"
 import path from "path"
 import { randomBytes } from "crypto"
 
-// ---- 域解析（含 HOME 用户根锁定） ----
-async function domainRoots(userId: string): Promise<{ ROOT_FS: string; STORAGE: string; HOME: string }> {
+// ---- 域解析（含 HOME 用户根锁定 + r33 RECORDING 用户录像域） ----
+async function domainRoots(userId: string): Promise<{ ROOT_FS: string; STORAGE: string; HOME: string; RECORDING: string; SCREENSHOT: string }> {
   const home = path.join(ENV.storageLocalPath, "home", userId)
   await fsp.mkdir(home, { recursive: true }).catch(() => null)
-  return { ROOT_FS: "/", STORAGE: path.resolve(ENV.storageLocalPath), HOME: home }
+  const recordings = path.join(ENV.storageLocalPath, "recordings", userId)
+  const screenshots = path.join(ENV.storageLocalPath, "screenshots", userId)
+  return { ROOT_FS: "/", STORAGE: path.resolve(ENV.storageLocalPath), HOME: home, RECORDING: recordings, SCREENSHOT: screenshots }
 }
 
 const relSchema = z.string().max(1024).default("")
 
 // ---- 1. 目录浏览 ----
 const browseSchema = z.object({
-  domain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+  domain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
   path: relSchema,
   page: z.number().int().min(1).max(10000).default(1),
   pageSize: z.number().int().min(10).max(500).default(50),
@@ -55,13 +57,14 @@ export async function browseFilesAction(input: unknown): Promise<ActionResult<{ 
     const p = zodValidate(browseSchema, input)
     const isAdmin = ctx.role === "ADMIN" || ctx.role === "SUPER_ADMIN"
 
-    // 域权限：ROOT_FS/STORAGE 仅管理员；HOME 自动锁定本人根
+    // 域权限：ROOT_FS/STORAGE 仅管理员；HOME/RECORDING/SCREENSHOT 自动锁定本人根
     const domain: FileDomain = p.domain
     if ((domain === "ROOT_FS" || domain === "STORAGE") && !isAdmin) {
       return biz403("该目录域仅管理员可访问")
     }
     const roots = await domainRoots(ctx.userId)
-    const target = domain === "HOME" ? { abs: roots.HOME, ok: true } : resolveDomainPath(roots, domain, domain === "STORAGE" ? p.path : p.path)
+    const userRoot = domain === "HOME" ? roots.HOME : domain === "RECORDING" ? roots.RECORDING : domain === "SCREENSHOT" ? roots.SCREENSHOT : null
+    const target = userRoot ? { abs: userRoot, ok: true } : resolveDomainPath(roots, domain, p.path)
     if (!target.ok) return biz403("非法路径")
 
     const relBase = domain === "HOME" ? p.path : p.path
@@ -89,7 +92,7 @@ function biz403(msg: string): never {
 
 // ---- 2. 文本读取（编辑器） ----
 const readSchema = z.object({
-  domain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+  domain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
   path: z.string().max(1024),
 })
 
@@ -124,7 +127,7 @@ export async function readFileAction(input: unknown): Promise<ActionResult<{ con
 
 // ---- 3. 文本保存 ----
 const writeSchema = z.object({
-  domain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+  domain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
   path: z.string().max(1024),
   content: z.string().max(MAX_EDIT_BYTES),
 })
@@ -159,7 +162,7 @@ export async function writeFileAction(input: unknown): Promise<ActionResult<{ si
 
 // ---- 4. 新建（目录 / 空文件） ----
 const createSchema = z.object({
-  domain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+  domain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
   dir: z.string().max(1024).default(""),
   name: z.string().min(1).max(255),
   type: z.enum(["dir", "file"]),
@@ -196,7 +199,7 @@ export async function createEntryAction(input: unknown): Promise<ActionResult<{ 
 
 // ---- 5. 重命名 ----
 const renameSchema = z.object({
-  domain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+  domain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
   path: z.string().max(1024),
   newName: z.string().min(1).max(255),
 })
@@ -228,7 +231,7 @@ export async function renameEntryAction(input: unknown): Promise<ActionResult<{ 
 // ---- 6. 批量删除（软删入回收站：STORAGE/HOME 域） ----
 const deleteSchema = z.object({
   items: z.array(z.object({
-    domain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+    domain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
     path: z.string().max(1024),
     isDir: z.boolean().default(false),
   })).min(1).max(100),
@@ -286,10 +289,10 @@ export async function deleteEntriesAction(input: unknown): Promise<ActionResult<
 // ---- 7. 移动 / 复制（批量；跨域受限） ----
 const transferSchema = z.object({
   items: z.array(z.object({
-    domain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+    domain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
     path: z.string().max(1024),
   })).min(1).max(50),
-  destDomain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+  destDomain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
   destDir: z.string().max(1024).default(""),
   mode: z.enum(["move", "copy"]),
 })
@@ -339,10 +342,10 @@ export async function transferEntriesAction(input: unknown): Promise<ActionResul
 // ---- 8. 压缩 / 解压 ----
 const archiveSchema = z.object({
   items: z.array(z.object({
-    domain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+    domain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
     path: z.string().max(1024),
   })).min(1).max(20),
-  destDomain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+  destDomain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
   destDir: z.string().max(1024).default(""),
   archiveName: z.string().min(1).max(255),
   password: z.string().max(128).optional(),
@@ -382,7 +385,7 @@ export async function archiveEntriesAction(input: unknown): Promise<ActionResult
 }
 
 const extractSchema = z.object({
-  domain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+  domain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
   path: z.string().max(1024),
   password: z.string().max(128).optional(),
   destDir: z.string().max(1024).optional(), // 缺省=归档所在目录
@@ -415,7 +418,7 @@ export async function extractArchiveAction(input: unknown): Promise<ActionResult
 
 // ---- 9. 搜索（文件名/内容/递归开关） ----
 const searchSchema = z.object({
-  domain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+  domain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
   path: z.string().max(1024).default(""),
   keyword: z.string().min(1).max(200),
   recursive: z.boolean().default(true),
@@ -452,7 +455,7 @@ export async function searchFilesAction(input: unknown): Promise<ActionResult<{ 
 
 // ---- 10. 目录大小统计 ----
 const dusizeSchema = z.object({
-  domain: z.enum(["ROOT_FS", "STORAGE", "HOME"]).default("STORAGE"),
+  domain: z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"]).default("STORAGE"),
   path: z.string().max(1024),
 })
 

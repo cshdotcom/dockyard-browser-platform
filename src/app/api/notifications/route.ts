@@ -74,12 +74,12 @@ export async function PUT() {
 }
 
 // r28：通知清除（软删除 —— 用户诉求「站内信增加通知清除功能」）
-// mode: "one"（单条，id 必填）| "read"（清除全部已读）| "all"（清除全部）
+// mode: "one"（单条，id 必填）| "read"（清除全部已读）| "all"（清除全部）| "many"（r33：多选批量，ids 必填）
 export async function DELETE(req: NextRequest) {
   return apiHandler(async () => {
     const ctx = await getAuthContext()
     if (!ctx) return NextResponse.json({ code: 40100, msg: "未登录" })
-    const body = (await req.json().catch(() => ({}))) as { mode?: string; id?: string }
+    const body = (await req.json().catch(() => ({}))) as { mode?: string; id?: string; ids?: string[] }
     const mode = body.mode || "one"
     const now = new Date()
     let affected = 0
@@ -87,6 +87,15 @@ export async function DELETE(req: NextRequest) {
       if (!body.id) return NextResponse.json({ code: 40001, msg: "参数错误（单条清除需 id）" })
       const r = await db.notice.updateMany({
         where: { id: body.id, userId: ctx.userId, clearedAt: null },
+        data: { clearedAt: now, clearedBy: ctx.userId },
+      })
+      affected = r.count
+    } else if (mode === "many") {
+      // r33：多选批量清除（单次上限 200 条；归属校验由 where 保证）
+      const ids = (body.ids || []).filter((x) => typeof x === "string" && x.length > 0).slice(0, 200)
+      if (ids.length === 0) return NextResponse.json({ code: 40001, msg: "参数错误（批量清除需 ids）" })
+      const r = await db.notice.updateMany({
+        where: { id: { in: ids }, userId: ctx.userId, clearedAt: null },
         data: { clearedAt: now, clearedBy: ctx.userId },
       })
       affected = r.count

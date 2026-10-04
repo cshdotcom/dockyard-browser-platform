@@ -65,7 +65,7 @@ export async function GET(req: NextRequest) {
   return apiHandler(async () => {
     const ctx = await requireAuth()
     const sp = req.nextUrl.searchParams
-    const domain = (sp.get("domain") || "HOME") as "ROOT_FS" | "STORAGE" | "HOME"
+    const domain = (sp.get("domain") || "HOME") as "ROOT_FS" | "STORAGE" | "HOME" | "RECORDING" | "SCREENSHOT"
     const filePath = sp.get("path") || ""
     const mode = sp.get("mode") || "preview" // preview | download | zip
     const adminOnly = domain === "ROOT_FS" || domain === "STORAGE"
@@ -77,7 +77,7 @@ export async function GET(req: NextRequest) {
     }
 
     const home = path.join(ENV.storageLocalPath, "home", ctx.userId)
-    const roots = { ROOT_FS: "/", STORAGE: path.resolve(ENV.storageLocalPath), HOME: home }
+    const roots = { ROOT_FS: "/", STORAGE: path.resolve(ENV.storageLocalPath), HOME: home, RECORDING: path.join(ENV.storageLocalPath, "recordings", ctx.userId), SCREENSHOT: path.join(ENV.storageLocalPath, "screenshots", ctx.userId) }
     const { abs, ok } = resolveDomainPath(roots, domain, filePath)
     if (!ok) throw new BizError(ErrorCode.FORBIDDEN, "非法路径")
 

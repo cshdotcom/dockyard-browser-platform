@@ -110,6 +110,15 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "storage.mode": { value: "local", category: "STORAGE", type: "string", description: "文件存储模式 local|s3" },
   "storage.quotaPerUserMb": { value: 2048, category: "STORAGE", type: "number", description: "单用户磁盘配额MB" },
   "storage.quotaPerGroupMb": { value: 20480, category: "STORAGE", type: "number", description: "用户组磁盘配额MB" },
+  // —— r33：存储配额体系全局基线（链：用户 > 用户组 > 全局；三级均可覆盖）——
+  "storage.featureEnabled": { value: true, category: "STORAGE", type: "boolean", description: "存储类功能总开关（关闭=全员禁用上传/录像落盘/截图入库；各层级可再精细覆盖录屏/截图/上传单项）" },
+  "storage.recordingEnabled": { value: true, category: "STORAGE", type: "boolean", description: "录像入库用户空间开关全局默认（用户/组可覆盖；关闭=录像不占个人配额、不可在文件管理查看）" },
+  "storage.screenshotEnabled": { value: true, category: "STORAGE", type: "boolean", description: "截图入库用户空间开关全局默认（用户/组可覆盖）" },
+  "storage.uploadEnabled": { value: true, category: "STORAGE", type: "boolean", description: "云盘上传开关全局默认（用户/组可覆盖；关闭=仅禁止新增上传，已有文件可下载）" },
+  "storage.watermarkPct": { value: 80, category: "STORAGE", type: "number", description: "存储配额水位预警（%，超过即站内信提醒；磁盘配额水位预警复用该值）" },
+  // —— r33：沙箱最大时长全局基线（链：用户 > 用户组 > 全局）——
+  "workspace.maxTtlMinutes": { value: 0, category: "GENERAL", type: "number", description: "单沙箱最大生存时长全局上限（分钟，0=不限；用户创建时可选时长≤该值；用户/组可收紧或放宽覆盖）" },
+  "workspace.allowUnlimitedTtl": { value: true, category: "GENERAL", type: "boolean", description: "是否允许用户选择「无限时长」沙箱全局默认（false=创建必选有限时长；用户/组可覆盖）" },
   "storage.retentionDays": { value: 30, category: "STORAGE", type: "number", description: "文件默认保留天数" },
   "storage.backupOnDelete": { value: false, category: "STORAGE", type: "boolean", description: "删除文件时备份开关" },
   "storage.virusScan": { value: false, category: "STORAGE", type: "boolean", description: "文件病毒扫描开关" },

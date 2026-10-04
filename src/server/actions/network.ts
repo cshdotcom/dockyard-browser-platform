@@ -238,6 +238,8 @@ const browserNodeInputSchema = z.object({
   baseUrl: z.string().min(1, "baseUrl 不能为空").max(300),
   // r28：公网展示地址（可选；展示/拼接用，不参与拨号 —— baseUrl 始终为平台实际拨号地址）
   publicUrl: z.string().max(300).optional().nullable(),
+  // r33：公网 CDP 接入地址（可选；工作区 CDP 面板对外展示，优先于 PUBLIC_BASE_URL 推导）
+  publicCdpUrl: z.string().max(300).optional().nullable(),
   labels: z.array(z.string().max(32)).max(16).optional().nullable(),
   weight: zPrecision("权重", 0.001, 100000),
   grayGroup: z.enum(["PROD", "TEST"]),
@@ -253,6 +255,7 @@ export async function createBrowserNodeAction(input: unknown): Promise<ActionRes
         name: p.name,
         baseUrl: p.baseUrl,
         publicUrl: p.publicUrl?.trim() || null,
+        publicCdpUrl: p.publicCdpUrl?.trim() || null,
         labels: (p.labels?.length ? p.labels : Prisma.DbNull) as Prisma.InputJsonValue,
         weight: Math.max(1, Math.round(p.weight)),
         grayGroup: p.grayGroup,
@@ -267,7 +270,7 @@ export async function createBrowserNodeAction(input: unknown): Promise<ActionRes
       resourceType: "BROWSER_NODE",
       resourceId: node.id,
       resourceName: node.name,
-      after: { name: node.name, baseUrl: node.baseUrl, publicUrl: node.publicUrl, grayGroup: node.grayGroup, weight: node.weight, enabled: node.enabled },
+      after: { name: node.name, baseUrl: node.baseUrl, publicUrl: node.publicUrl, publicCdpUrl: node.publicCdpUrl, grayGroup: node.grayGroup, weight: node.weight, enabled: node.enabled },
     })
     return { id: node.id }
   })
@@ -286,6 +289,7 @@ export async function updateBrowserNodeAction(input: unknown): Promise<ActionRes
         name: p.name,
         baseUrl: p.baseUrl,
         publicUrl: p.publicUrl?.trim() || null,
+        publicCdpUrl: p.publicCdpUrl?.trim() || null,
         labels: (p.labels?.length ? p.labels : Prisma.DbNull) as Prisma.InputJsonValue,
         weight: Math.max(1, Math.round(p.weight)),
         grayGroup: p.grayGroup,
@@ -301,7 +305,7 @@ export async function updateBrowserNodeAction(input: unknown): Promise<ActionRes
       resourceId: node.id,
       resourceName: node.name,
       before: { name: existing.name, baseUrl: existing.baseUrl, grayGroup: existing.grayGroup, weight: existing.weight, enabled: existing.enabled },
-      after: { name: node.name, baseUrl: node.baseUrl, publicUrl: node.publicUrl, grayGroup: node.grayGroup, weight: node.weight, enabled: node.enabled },
+      after: { name: node.name, baseUrl: node.baseUrl, publicUrl: node.publicUrl, publicCdpUrl: node.publicCdpUrl, grayGroup: node.grayGroup, weight: node.weight, enabled: node.enabled },
     })
     return { id: node.id }
   })

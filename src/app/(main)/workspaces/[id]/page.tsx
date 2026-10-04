@@ -57,9 +57,15 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
 
   // 公网 CDP 网关端点（PUBLIC_BASE_URL 等环境变量配置后展示，内网穿透/域名部署场景）
   // 外部工具（Puppeteer/Playwright/自定义脚本）应使用该端点，而非内部 ws://browser-internal 地址
-  const publicCdpEndpoint = ENV.publicBaseUrl
-    ? `${ENV.publicBaseUrl}/api/cdp/command`
-    : ""
+  // r33：优先展示浏览器节点级公网 CDP 地址（管理员在「网络 → 浏览器节点」逐节点填写）
+  const browserNodeCdp = ws.browserNodeId
+    ? await db.browserNode.findUnique({ where: { id: ws.browserNodeId }, select: { name: true, publicCdpUrl: true } }).catch(() => null)
+    : null
+  const publicCdpEndpoint = browserNodeCdp?.publicCdpUrl?.trim()
+    ? browserNodeCdp.publicCdpUrl.trim()
+    : ENV.publicBaseUrl
+      ? `${ENV.publicBaseUrl}/api/cdp/command`
+      : ""
 
   // r14（22-c）：闲置超时四级策略链解析（生效值+来源徽章；锁定态按查看者角色豁免管理员）
   const idlePolicyWs = await resolveIdlePolicyForWorkspace(ws.id).catch(() => null)
@@ -117,6 +123,7 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
         shareDisabled: ws.shareDisabled === true,
         shareBlockedReason: shareControlBlockReason,
         crashCategory: ws.crashCategory,
+        freezeReason: ws.freezeReason,
         policyAllowInternalNetwork: ws.policyAllowInternalNetwork,
         policyAllowSecureLocationAccess: ws.policyAllowSecureLocationAccess,
         effectivePolicy: effBundle,

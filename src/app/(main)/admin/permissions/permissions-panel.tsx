@@ -14,8 +14,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Loader2, Save, Lock, Search, Globe2, UsersRound, UserRound, Boxes, X } from "lucide-react"
-import { listPermissionTargetsAction, setGlobalPermissionLocksAction, setUserPermissionLocksAction, setGroupPermissionLocksAction } from "@/server/actions/permissions-center"
+import { Loader2, Save, Lock, Search, Globe2, UsersRound, UserRound, Boxes, X, Layers } from "lucide-react"
+import { listPermissionTargetsAction, setGlobalPermissionLocksAction, setUserPermissionLocksAction, setGroupPermissionLocksAction, batchSetPermissionLocksAction } from "@/server/actions/permissions-center"
 
 // 锁键分类（30 项 → 8 组；展示分组）
 const LOCK_GROUPS: Array<{ title: string; keys: string[] }> = [
@@ -44,7 +44,7 @@ const LOCK_LABELS: Record<string, string> = {
   blockUploadScript: "上传脚本", blockImportTemplate: "导入模板",
 }
 
-type Scope = "global" | "group" | "user"
+type Scope = "global" | "group" | "user" | "batch"
 
 interface GroupTarget { id: string; name: string; locks: Record<string, boolean> }
 interface UserTarget { id: string; username: string; displayName: string | null; role: string; locks: Record<string, boolean> }
@@ -60,6 +60,58 @@ export function PermissionsCenterPanel() {
   const [targetId, setTargetId] = React.useState<string>("")
   const [draft, setDraft] = React.useState<Record<string, boolean>>({})
   const [onlyLocked, setOnlyLocked] = React.useState(false)
+
+  // —— r33：批量授权（多用户/组 + 权限三态矩阵）——
+  const [batchUserIds, setBatchUserIds] = React.useState<string[]>([])
+  const [batchGroupIds, setBatchGroupIds] = React.useState<string[]>([])
+  const [batchKw, setBatchKw] = React.useState("")
+  const [batchUpdates, setBatchUpdates] = React.useState<Record<string, boolean | null>>({})
+  const [batchMode, setBatchMode] = React.useState<"merge" | "replace">("merge")
+  const [batchNotify, setBatchNotify] = React.useState(true)
+  const [batchSaving, setBatchSaving] = React.useState(false)
+  const [batchShowAll, setBatchShowAll] = React.useState(false)
+
+  const toggleBatchUser = (id: string) => setBatchUserIds((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]))
+  const toggleBatchGroup = (id: string) => setBatchGroupIds((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]))
+  const setBatchKey = (k: string, v: boolean | null) => setBatchUpdates((u) => ({ ...u, [k]: v }))
+
+  // 一键开通「创建和操作实例沙箱」预设（解锁沙箱全生命周期能力）
+  const SANDBOX_GRANT_KEYS = ["blockCreateWorkspace", "blockModifyWorkspace", "blockBatchOps", "blockRestartInstance", "blockModifyResourceExpiry", "blockSwitchVncMode", "blockCustomVncResolution", "blockShareWorkspace", "blockRefreshVncKey"]
+  const applySandboxGrantPreset = () => {
+    setBatchUpdates((u) => {
+      const next = { ...u }
+      for (const k of SANDBOX_GRANT_KEYS) next[k] = false // 解锁
+      return next
+    })
+  }
+
+  const batchKwLower = batchKw.trim().toLowerCase()
+  const batchFilteredUsers = batchKwLower ? users.filter((u) => u.username.toLowerCase().includes(batchKwLower) || (u.displayName || "").toLowerCase().includes(batchKwLower)) : users
+  const batchSetCount = Object.entries(batchUpdates).filter(([, v]) => v !== null && v !== undefined).length
+  const batchUnlockCount = Object.entries(batchUpdates).filter(([, v]) => v === false).length
+
+  const runBatch = async () => {
+    if (batchUserIds.length === 0 && batchGroupIds.length === 0) { toast.error("请选择至少一个用户或用户组"); return }
+    if (batchSetCount === 0) { toast.error("请至少设置一项权限变更（解锁或锁定）"); return }
+    setBatchSaving(true)
+    try {
+      const res = await batchSetPermissionLocksAction({
+        userIds: batchUserIds,
+        groupIds: batchGroupIds,
+        updates: batchUpdates,
+        mode: batchMode,
+        notify: batchNotify,
+      })
+      if (res.code === 0 && res.data) {
+        toast.success(`批量授权完成：${res.data.userCount} 个用户 + ${res.data.groupCount} 个用户组${res.data.noticesSent > 0 ? `，${res.data.noticesSent} 位用户已收到开通通知` : ""}`)
+        void reload(kw || undefined)
+      } else {
+        toast.error(res.msg)
+      }
+    } finally {
+      setBatchSaving(false)
+    }
+  }
 
   const reload = React.useCallback(async (keyword?: string) => {
     setLoading(true)
@@ -153,6 +205,8 @@ export function PermissionsCenterPanel() {
                 <TabsTrigger value="global" className="gap-1.5"><Globe2 className="h-3.5 w-3.5" />全局</TabsTrigger>
                 <TabsTrigger value="group" className="gap-1.5"><UsersRound className="h-3.5 w-3.5" />用户组</TabsTrigger>
                 <TabsTrigger value="user" className="gap-1.5"><UserRound className="h-3.5 w-3.5" />用户</TabsTrigger>
+                {/* r33：批量授权（多用户/组 → 权限矩阵三态批量下发） */}
+                <TabsTrigger value="batch" className="gap-1.5"><Layers className="h-3.5 w-3.5" />批量授权</TabsTrigger>
               </TabsList>
             </Tabs>
 
@@ -198,10 +252,142 @@ export function PermissionsCenterPanel() {
             </div>
           </div>
 
-          {/* 三级矩阵 */}
+          {/* r33：批量授权面板（多用户/组多选 + 权限三态矩阵 + 合并模式） */}
+          {scope === "batch" && (
+            <div className="space-y-4">
+              <div className="grid gap-4 lg:grid-cols-2">
+                {/* 用户多选 */}
+                <div className="rounded-lg border p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold flex items-center gap-1.5"><UserRound className="h-3.5 w-3.5" /> 目标用户（可搜索多选）</span>
+                    <Badge variant="secondary">已选 {batchUserIds.length}</Badge>
+                  </div>
+                  <div className="relative">
+                    <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
+                    <Input value={batchKw} onChange={(e) => setBatchKw(e.target.value)} placeholder="搜索用户名/显示名…" className="h-8 pl-8" />
+                  </div>
+                  <div className="max-h-56 overflow-y-auto space-y-1">
+                    {batchFilteredUsers.map((u) => (
+                      <label key={u.id} className="flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/50 cursor-pointer">
+                        <input type="checkbox" checked={batchUserIds.includes(u.id)} onChange={() => toggleBatchUser(u.id)} className="accent-teal-500" />
+                        <span className="truncate">{u.displayName ? `${u.displayName}（${u.username}）` : u.username}</span>
+                        {u.locks["blockCreateWorkspace"] && <Badge variant="outline" className="text-[9px] px-1 text-amber-600 border-amber-300">创建被锁</Badge>}
+                      </label>
+                    ))}
+                    {batchFilteredUsers.length === 0 && <p className="py-4 text-center text-xs text-muted-foreground">无匹配用户（先在上方搜索过滤）</p>}
+                  </div>
+                  {batchUserIds.length > 0 && (
+                    <button className="text-[11px] text-muted-foreground underline" onClick={() => setBatchUserIds([])}>清空已选用户</button>
+                  )}
+                </div>
+                {/* 组多选 */}
+                <div className="rounded-lg border p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold flex items-center gap-1.5"><UsersRound className="h-3.5 w-3.5" /> 目标用户组（整组生效）</span>
+                    <Badge variant="secondary">已选 {batchGroupIds.length}</Badge>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto space-y-1">
+                    {groups.map((g) => (
+                      <label key={g.id} className="flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/50 cursor-pointer">
+                        <input type="checkbox" checked={batchGroupIds.includes(g.id)} onChange={() => toggleBatchGroup(g.id)} className="accent-teal-500" />
+                        <span className="truncate">{g.name}</span>
+                        {Object.values(g.locks).some(Boolean) && <Badge variant="outline" className="text-[9px] px-1">已锁 {Object.values(g.locks).filter(Boolean).length} 项</Badge>}
+                      </label>
+                    ))}
+                  </div>
+                  {batchGroupIds.length > 0 && (
+                    <button className="text-[11px] text-muted-foreground underline" onClick={() => setBatchGroupIds([])}>清空已选组</button>
+                  )}
+                </div>
+              </div>
+
+              {/* 权限矩阵（三态：不变/解锁/锁定） */}
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" variant="outline" onClick={applySandboxGrantPreset} title="解锁创建/重启/修改/批量操作/共享等沙箱全生命周期能力">
+                    一键开通「创建和操作实例沙箱」
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setBatchUpdates({})}>清空变更</Button>
+                  <button className="text-[11px] text-muted-foreground underline" onClick={() => setBatchShowAll(!batchShowAll)}>
+                    {batchShowAll ? "收起全部 30 项锁" : "展开全部 30 项锁（完整颗粒度）"}
+                  </button>
+                  <div className="ml-auto flex items-center gap-2">
+                    <Badge variant="secondary" className={batchUnlockCount > 0 ? "border-emerald-300 text-emerald-700 dark:text-emerald-400" : undefined}>解锁 {batchUnlockCount} 项</Badge>
+                    <Badge variant={batchSetCount - batchUnlockCount > 0 ? "destructive" : "secondary"}>锁定 {batchSetCount - batchUnlockCount} 项</Badge>
+                  </div>
+                </div>
+                <div className="grid gap-2 md:grid-cols-2">
+                  {(batchShowAll ? LOCK_GROUPS : [{ title: "沙箱操作（常用）", keys: SANDBOX_GRANT_KEYS }]).map((g) => (
+                    <div key={g.title} className="rounded-lg border p-3 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold">{g.title}</span>
+                        <span className="text-[10px] text-muted-foreground">{g.keys.length} 项</span>
+                      </div>
+                      {g.keys.map((k) => (
+                        <div key={k} className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-muted/40">
+                          <div className="min-w-0">
+                            <p className="text-sm truncate">{LOCK_LABELS[k] || k}</p>
+                            <p className="text-[10px] text-muted-foreground font-mono truncate">{k}</p>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            {([
+                              { v: null, label: "不变", cls: "text-muted-foreground" },
+                              { v: false, label: "解锁", cls: "text-emerald-600" },
+                              { v: true, label: "锁定", cls: "text-red-600" },
+                            ] as const).map((opt) => (
+                              <button
+                                key={String(opt.v)}
+                                type="button"
+                                onClick={() => setBatchKey(k, opt.v)}
+                                className={`h-6 rounded px-2 text-[11px] border transition-colors ${
+                                  (batchUpdates[k] === undefined ? null : batchUpdates[k]) === opt.v
+                                    ? "border-teal-500 bg-teal-50 dark:bg-teal-950/40 font-medium " + opt.cls
+                                    : "border-border hover:bg-muted/60 " + opt.cls
+                                }`}
+                              >
+                                {opt.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* 合并模式 + 通知 + 执行 */}
+              <div className="flex flex-wrap items-center gap-3 rounded-lg border p-3">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-muted-foreground">合并模式：</span>
+                  {(["merge", "replace"] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setBatchMode(m)}
+                      className={`h-7 rounded px-2 text-xs border transition-colors ${batchMode === m ? "border-teal-500 bg-teal-50 dark:bg-teal-950/40 font-medium text-teal-700 dark:text-teal-400" : "border-border hover:bg-muted/60 text-muted-foreground"}`}
+                      title={m === "merge" ? "在目标现有锁集合上叠加本次变更（仅改动提交的键）" : "以本次设置整体替换目标现有锁集合（未提交键视为解锁）"}
+                    >
+                      {m === "merge" ? "叠加合并（推荐）" : "整体替换"}
+                    </button>
+                  ))}
+                </div>
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                  <input type="checkbox" checked={batchNotify} onChange={(e) => setBatchNotify(e.target.checked)} className="accent-teal-500" />
+                  开通时发站内信告知用户
+                </label>
+                <Button size="sm" className="ml-auto bg-teal-600 hover:bg-teal-700" disabled={batchSaving || (batchUserIds.length === 0 && batchGroupIds.length === 0) || batchSetCount === 0} onClick={() => void runBatch()}>
+                  {batchSaving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Layers className="mr-1 h-3.5 w-3.5" />}
+                  执行批量授权（{batchUserIds.length + batchGroupIds.length} 个目标）
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* 三级矩阵（单目标模式） */}
           {loading ? (
             <div className="flex items-center justify-center py-10 text-muted-foreground text-sm"><Loader2 className="mr-2 h-4 w-4 animate-spin" />加载中…</div>
-          ) : scope !== "global" && !targetId ? (
+          ) : scope !== "batch" && scope !== "global" && !targetId ? (
             <div className="py-10 text-center text-sm text-muted-foreground">请先选择{scope === "group" ? "用户组" : "用户"}</div>
           ) : (
             <div className="grid gap-4 md:grid-cols-2">

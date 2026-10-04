@@ -111,6 +111,18 @@ const createGroupSchema = z.object({
   allowSecureLocationAccess: z.boolean().default(false), // 组级网络策略：允许访问容器内安全位置
   allowShare: z.boolean().default(true), // r13c：组级共享开关（false=组内成员默认禁止共享工作区）
   vncSessionMaxMinutes: z.number().int().min(0).max(43200).nullable().optional(), // 组级 VNC 连接总时长上限（分钟，null=继承全局，0=不限）
+  // —— r33：组级存储配额与沙箱最大时长基线 ——
+  storageQuotaMb: z.number().int().min(0).max(10_000_000).nullable().optional(), // null=继承全局
+  storagePolicy: z.object({
+    recording: z.boolean().nullable().optional(),
+    screenshot: z.boolean().nullable().optional(),
+    upload: z.boolean().nullable().optional(),
+    recordingMb: z.number().int().min(0).max(10_000_000).nullable().optional(),
+    screenshotMb: z.number().int().min(0).max(10_000_000).nullable().optional(),
+    fileMb: z.number().int().min(0).max(10_000_000).nullable().optional(),
+  }).nullable().optional(),
+  maxTtlMinutes: z.number().int().min(0).max(525600).nullable().optional(),
+  allowUnlimitedTtl: z.boolean().nullable().optional(),
 })
 
 export async function createGroupAction(input: unknown): Promise<ActionResult<{ id: string }>> {
@@ -141,6 +153,10 @@ export async function createGroupAction(input: unknown): Promise<ActionResult<{ 
         allowSecureLocationAccess: p.allowSecureLocationAccess,
         allowShare: p.allowShare,
         vncSessionMaxMinutes: p.vncSessionMaxMinutes ?? null,
+        storageQuotaMb: p.storageQuotaMb ?? null,
+        storagePolicy: p.storagePolicy ?? undefined,
+        maxTtlMinutes: p.maxTtlMinutes ?? null,
+        allowUnlimitedTtl: p.allowUnlimitedTtl ?? null,
         createdByUserId: ctx.userId,
       },
     })
@@ -201,6 +217,10 @@ export async function updateGroupAction(input: unknown): Promise<ActionResult<{ 
         allowSecureLocationAccess: p.allowSecureLocationAccess,
         allowShare: p.allowShare,
         vncSessionMaxMinutes: p.vncSessionMaxMinutes ?? null,
+        storageQuotaMb: p.storageQuotaMb ?? null,
+        storagePolicy: p.storagePolicy ? (p.storagePolicy as Prisma.InputJsonValue) : Prisma.DbNull,
+        maxTtlMinutes: p.maxTtlMinutes ?? null,
+        allowUnlimitedTtl: p.allowUnlimitedTtl ?? null,
       },
     })
 

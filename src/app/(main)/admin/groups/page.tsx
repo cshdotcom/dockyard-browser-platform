@@ -80,6 +80,11 @@ export default async function AdminGroupsPage() {
     allowShare: g.allowShare !== false,
     vncSessionMaxMinutes: g.vncSessionMaxMinutes ?? null,
     policy: (g.policy as Record<string, unknown> | null) || null,
+    // r33：组级存储配额 + 沙箱最大时长基线
+    storageQuotaMb: g.storageQuotaMb ?? null,
+    storagePolicy: (g.storagePolicy as AdminGroupNode["storagePolicy"]) || null,
+    maxTtlMinutes: g.maxTtlMinutes ?? null,
+    allowUnlimitedTtl: g.allowUnlimitedTtl ?? null,
     userCount: (membersByGroup.get(g.id) || []).length,
     proxyBindings: (proxiesByGroup.get(g.id) || []).map((p) => p.name),
     members: membersByGroup.get(g.id) || [],

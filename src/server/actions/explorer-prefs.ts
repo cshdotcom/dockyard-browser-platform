@@ -15,14 +15,14 @@ import { db } from "@/lib/db"
 
 export interface ExplorerFavorite {
   id: string
-  domain: "ROOT_FS" | "STORAGE" | "HOME"
+  domain: "ROOT_FS" | "STORAGE" | "HOME" | "RECORDING" | "SCREENSHOT"
   path: string
   title?: string
 }
 
 export interface ExplorerTabPref {
   id: string
-  domain: "ROOT_FS" | "STORAGE" | "HOME"
+  domain: "ROOT_FS" | "STORAGE" | "HOME" | "RECORDING" | "SCREENSHOT"
   path: string
 }
 
@@ -32,7 +32,7 @@ export interface FileExplorerPrefs {
   activeTabId?: string | null
 }
 
-const domainEnum = z.enum(["ROOT_FS", "STORAGE", "HOME"])
+const domainEnum = z.enum(["ROOT_FS", "STORAGE", "HOME", "RECORDING", "SCREENSHOT"])
 
 const prefsSchema = z.object({
   favorites: z.array(z.object({

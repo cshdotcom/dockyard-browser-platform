@@ -44,6 +44,12 @@ export interface AdminGroupNode {
   allowSecureLocationAccess: boolean
   allowShare: boolean
   policy: Record<string, unknown> | null
+  vncSessionMaxMinutes: number | null
+  // r33：组级存储配额 + 沙箱最大时长基线
+  storageQuotaMb: number | null
+  storagePolicy: { recording?: boolean | null; screenshot?: boolean | null; upload?: boolean | null; recordingMb?: number | null; screenshotMb?: number | null; fileMb?: number | null } | null
+  maxTtlMinutes: number | null
+  allowUnlimitedTtl: boolean | null
   userCount: number
   proxyBindings: string[]
   members: { userId: string; username: string }[]

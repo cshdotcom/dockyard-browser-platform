@@ -28,6 +28,7 @@ export interface BrowserNodeRow {
   name: string
   baseUrl: string
   publicUrl?: string | null
+  publicCdpUrl?: string | null
   labels: string[]
   weight: number
   status: string
@@ -91,7 +92,7 @@ export function BrowserNodesTable(props: Props) {
   // ---- 表单 ----
   const [formOpen, setFormOpen] = React.useState(false)
   const [editing, setEditing] = React.useState<BrowserNodeRow | null>(null)
-  const [form, setForm] = React.useState({ name: "", baseUrl: "", publicUrl: "", labels: "", weight: 1, grayGroup: "PROD", enabled: true })
+  const [form, setForm] = React.useState({ name: "", baseUrl: "", publicUrl: "", publicCdpUrl: "", labels: "", weight: 1, grayGroup: "PROD", enabled: true })
   const [formBusy, setFormBusy] = React.useState(false)
   // r28：环境推荐公网地址（NODE_PUBLIC_URL > PUBLIC_BASE_URL）；空 = 未配置域名
   const [envPublicHint] = React.useState(() => {
@@ -104,12 +105,12 @@ export function BrowserNodesTable(props: Props) {
 
   const openCreate = () => {
     setEditing(null)
-    setForm({ name: "", baseUrl: "http://", publicUrl: envPublicHint, labels: "", weight: 1, grayGroup: "PROD", enabled: true })
+    setForm({ name: "", baseUrl: "http://", publicUrl: envPublicHint, publicCdpUrl: "", labels: "", weight: 1, grayGroup: "PROD", enabled: true })
     setFormOpen(true)
   }
   const openEdit = (row: BrowserNodeRow) => {
     setEditing(row)
-    setForm({ name: row.name, baseUrl: row.baseUrl, publicUrl: row.publicUrl || "", labels: row.labels.join(", "), weight: row.weight, grayGroup: row.grayGroup, enabled: row.enabled })
+    setForm({ name: row.name, baseUrl: row.baseUrl, publicUrl: row.publicUrl || "", publicCdpUrl: row.publicCdpUrl || "", labels: row.labels.join(", "), weight: row.weight, grayGroup: row.grayGroup, enabled: row.enabled })
     setFormOpen(true)
   }
 
@@ -123,6 +124,7 @@ export function BrowserNodesTable(props: Props) {
         name: form.name.trim(),
         baseUrl: form.baseUrl.trim(),
         publicUrl: form.publicUrl.trim(),
+        publicCdpUrl: form.publicCdpUrl.trim(),
         labels: form.labels.split(/[,，\s]+/).filter(Boolean),
         weight: form.weight,
         grayGroup: form.grayGroup,
@@ -311,6 +313,14 @@ export function BrowserNodesTable(props: Props) {
               <p className="text-[11px] text-muted-foreground">
                 连接信息/对外展示优先使用该地址{envPublicHint ? `（已从环境变量推荐 ${envPublicHint}）` : "（未配置 NODE_PUBLIC_URL / PUBLIC_BASE_URL 环境变量，可手动填写）"}；
                 实际拨号始终走 baseUrl
+              </p>
+            </div>
+            {/* r33：公网 CDP 接入地址（每个浏览器节点独立填写；工作区 CDP 面板优先展示） */}
+            <div className="space-y-1.5">
+              <Label>公网 CDP 接入地址（可选）</Label>
+              <Input value={form.publicCdpUrl} onChange={(e) => setForm({ ...form, publicCdpUrl: e.target.value })} placeholder="wss://cdp.example.com 或 cdp.example.com:9222" />
+              <p className="text-[11px] text-muted-foreground">
+                外部工具（Puppeteer/Playwright）接入该节点沙箱的公网 CDP 端点；填写后工作区「CDP 控制」面板优先展示此地址（未填写时回退 PUBLIC_BASE_URL 网关推导）。仅展示用，不参与平台内部拨号
               </p>
             </div>
             <div className="space-y-1.5">

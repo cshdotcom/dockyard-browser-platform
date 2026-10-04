@@ -389,6 +389,22 @@ export async function startManualRecording(
   if (live) return { started: true, sessionId, mode: "embedded", reason: "已在录制中（幂等）" }
 
   const tuning = await recordingTuning()
+
+  // r33：存储配额执行链 —— 录像入库开关 + 剩余空间校验（录像计入用户存储配额）
+  {
+    const { resolveStoragePolicy, checkStorageQuota } = await import("./storage-quota")
+    const stPolicy = await resolveStoragePolicy(ws.userId)
+    if (!stPolicy.recordingAllowed) {
+      return { started: false, sessionId, mode: "embedded", reason: `管理员已禁用录像入库（${stPolicy.switchSourceLabel}）；录像将不占个人存储空间` }
+    }
+    // 剩余空间校验：按单段估算（fps × 分段时长近似码率）防开录即超额
+    const segEstBytes = Math.round((tuning.fps || 12) * tuning.segmentSec * 12 * 1024)
+    const stQuota = await checkStorageQuota(ws.userId, segEstBytes, "recording")
+    if (!stQuota.ok) {
+      return { started: false, sessionId, mode: "embedded", reason: stQuota.reason }
+    }
+  }
+
   const dir = recordingSessionDir(ws.userId, sessionId)
   if (!dir) return { started: false, sessionId, mode: "embedded", reason: "录像目录不可用" }
   await mkdir(dir, { recursive: true }).catch(() => null)
@@ -885,6 +901,10 @@ export async function ensureRecordingFileMeta(row: Record<string, unknown>): Pro
     } catch {
       /* 通知失败不阻塞录像链路 */
     }
+    // r33：录像入库后触发存储水位预警（异步去重；录像计入用户存储配额）
+    void import("./storage-quota")
+      .then((m) => m.notifyStorageWatermark(userId))
+      .catch(() => null)
   }
   return { fileMetaId: meta.id, notified }
 }

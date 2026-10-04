@@ -42,6 +42,8 @@ export interface RecordingRow {
   downloadCount: number
   hasFile: boolean
   fileReady: boolean // COMPLETED 且有 storageKey
+  fileMetaId: string | null // r33：对应云盘 FileMeta（「更多→在文件管理中打开」深链 /files?focus=<id>）
+  fileName: string | null // r33：云盘内文件名（录像分段入库名）
 }
 
 export interface RecordingStats {
@@ -115,6 +117,13 @@ export async function listRecordingsAction(input: unknown): Promise<ActionResult
     const segBySession = new Map<string, number>()
     for (const s of sessionAgg) segBySession.set(s.sessionId, (segBySession.get(s.sessionId) || 0) + 1)
 
+    // r33：关联云盘 FileMeta（深链定位 /files?focus=<id>；按 storageKey 批量查询）
+    const storageKeys = rows.map((r) => r.storageKey).filter(Boolean) as string[]
+    const fileMetas = storageKeys.length
+      ? await db.fileMeta.findMany({ where: { storageKey: { in: storageKeys } }, select: { id: true, storageKey: true, fileName: true } })
+      : []
+    const fileMetaByKey = new Map(fileMetas.map((f) => [f.storageKey, f]))
+
     const mapped: RecordingRow[] = rows.map((r) => ({
       id: r.id,
       workspaceName: r.workspaceName,
@@ -137,6 +146,8 @@ export async function listRecordingsAction(input: unknown): Promise<ActionResult
       downloadCount: r.downloadCount,
       hasFile: !!r.storageKey,
       fileReady: r.status === "COMPLETED" && !!r.storageKey,
+      fileMetaId: (r.storageKey ? fileMetaByKey.get(r.storageKey)?.id ?? null : null),
+      fileName: (r.storageKey ? fileMetaByKey.get(r.storageKey)?.fileName ?? null : null),
     }))
 
     const quotaGb = Math.max(0, await getConfigNumber("vnc.recordingQuotaGb", 5))
@@ -188,6 +199,12 @@ export async function myRecordingsAction(input: unknown): Promise<ActionResult<{
     })
     const segBySession = new Map<string, number>()
     for (const r of rows) segBySession.set(r.sessionId, (segBySession.get(r.sessionId) || 0) + 1)
+    // r33：关联云盘 FileMeta（「更多→在文件管理中打开」深链）
+    const storageKeys2 = rows.map((r) => r.storageKey).filter(Boolean) as string[]
+    const fileMetas2 = storageKeys2.length
+      ? await db.fileMeta.findMany({ where: { storageKey: { in: storageKeys2 }, userId: ctx.userId }, select: { id: true, storageKey: true, fileName: true } })
+      : []
+    const fileMetaByKey2 = new Map(fileMetas2.map((f) => [f.storageKey, f]))
     return {
       rows: rows.map((r) => ({
         id: r.id, workspaceName: r.workspaceName, workspaceUuid: r.workspaceUuid, username: r.username,
@@ -196,6 +213,8 @@ export async function myRecordingsAction(input: unknown): Promise<ActionResult<{
         durationSec: r.durationSec, sizeBytes: r.sizeBytes, resolution: r.resolution, fps: r.fps,
         policySource: r.policySource, note: r.note, viewCount: r.viewCount, downloadCount: r.downloadCount,
         hasFile: !!r.storageKey, fileReady: r.status === "COMPLETED" && !!r.storageKey,
+        fileMetaId: r.storageKey ? fileMetaByKey2.get(r.storageKey)?.id ?? null : null,
+        fileName: r.storageKey ? fileMetaByKey2.get(r.storageKey)?.fileName ?? null : null,
       })),
       usage: { segments: usage.segments, totalBytes: usage.totalBytes, totalDurationSec: usage.totalDurationSec, quotaGb: usage.quotaGb, oldestAt: usage.oldestAt?.toISOString() || null },
       retentionDays: Math.max(0, await getConfigNumber("vnc.recordingRetentionDays", 90)),

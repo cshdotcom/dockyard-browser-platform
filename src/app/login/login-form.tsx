@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { useRouter, useSearchParams } from "next/navigation"
+import { useSearchParams } from "next/navigation"
 import { signIn } from "next-auth/react"
 import { toast } from "sonner"
 import { Loader2, ShieldCheck } from "lucide-react"
@@ -27,7 +27,6 @@ type PreLoginResp = {
 }
 
 export function LoginForm({ from, allowRegister }: { from?: string; allowRegister: boolean }) {
-  const router = useRouter()
   const searchParams = useSearchParams()
   const [tab, setTab] = React.useState<"password" | "email">("password")
 
@@ -64,8 +63,13 @@ export function LoginForm({ from, allowRegister }: { from?: string; allowRegiste
   }, [])
 
   // 完成登录：用 ticket 建立正式会话
+  // r33 修复「登录要点很多次才成功 / 提示成功却无反应」：
+  //   根因① NextAuth signIn(redirect:false) 写会话 cookie 与客户端软导航存在竞态 —— router.push 撞上
+  //         未落定的 cookie + RSC 缓存会静默失败，页面停在登录页（用户感知=点了很多次才进）；
+  //   根因② from 参数可能指向 /login 自身或外站 → 成功后原地循环。
+  //   修复：会话落定校验（最多2次×400ms）+ 硬导航 window.location.assign（整页加载，cookie 必然随请求生效）
   const finishLogin = React.useCallback(
-    async (loginTicket: string, opts?: { totp?: string; trustDevice?: boolean }) => {
+    async (loginTicket: string, opts?: { totp?: string; trustDevice?: boolean; redirect?: string }) => {
       const res = await signIn("credentials", {
         ticket: loginTicket,
         totp: opts?.totp || "",
@@ -78,12 +82,32 @@ export function LoginForm({ from, allowRegister }: { from?: string; allowRegiste
         setTotp("")
         return
       }
+      // 目的地净化：仅站内相对路径；登录页自身/外站一律回落仪表盘
+      const raw = opts?.redirect || searchParams.get("from") || from || "/dashboard"
+      let dest = raw && raw.startsWith("/") && !raw.startsWith("//") ? raw : "/dashboard"
+      if (dest === "/login" || dest.startsWith("/login?")) dest = "/dashboard"
+      dest = dest.replace(/([?&])from=[^&]*/g, (_m, p) => p) // 防嵌套携带
+      // 会话落定校验：确保 cookie 真正写入后再跳转（消除竞态窗口）
+      let settled = false
+      for (let i = 0; i < 2; i++) {
+        try {
+          const s = await fetch("/api/auth/session", { cache: "no-store" })
+          if (s.ok) {
+            const j = (await s.json()) as { user?: unknown }
+            if (j?.user) { settled = true; break }
+          }
+        } catch { /* 网络抖动重试 */ }
+        await new Promise((r) => setTimeout(r, 400))
+      }
       toast.success("登录成功")
-      const dest = searchParams.get("from") || from || "/dashboard"
-      // push+refresh 同帧竞态会取消导航（历史 Bug：登录成功却停留登录页）；push 自带 RSC 拉取
-      router.push(dest)
+      if (!settled) {
+        // 兜底：直接整页跳转，由服务端 middleware 依据最新 cookie 裁决（已登录直达，未登录回登录页）
+        window.location.assign(dest)
+        return
+      }
+      window.location.assign(dest)
     },
-    [router, searchParams, from]
+    [searchParams, from]
   )
 
   // ---- 密码登录提交 ----
@@ -120,16 +144,12 @@ export function LoginForm({ from, allowRegister }: { from?: string; allowRegiste
         return
       }
       if (d.forceSetup && d.ticket) {
-        // 强制2FA策略：先进入系统完成设置
-        await finishLogin(d.ticket)
-        router.push("/account/security?force2fa=1")
+        // 强制2FA策略：先进入系统完成设置（r33：统一走 finishLogin 硬导航，避免双导航竞态）
+        await finishLogin(d.ticket, { redirect: "/account/security?force2fa=1" })
         return
       }
       if (d.ticket) {
-        await finishLogin(d.ticket)
-        if (d.mustChangePassword) {
-          router.push("/account/security?mustChange=1")
-        }
+        await finishLogin(d.ticket, { redirect: d.mustChangePassword ? "/account/security?mustChange=1" : undefined })
       }
     } catch {
       toast.error("网络异常，请重试")
@@ -182,8 +202,7 @@ export function LoginForm({ from, allowRegister }: { from?: string; allowRegiste
         return
       }
       if (d.forceSetup && d.ticket) {
-        await finishLogin(d.ticket)
-        router.push("/account/security?force2fa=1")
+        await finishLogin(d.ticket, { redirect: "/account/security?force2fa=1" })
         return
       }
       if (d.ticket) await finishLogin(d.ticket)

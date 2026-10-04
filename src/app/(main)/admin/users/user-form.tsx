@@ -21,7 +21,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { PrecisionInput } from "@/components/shared/confirm"
-import { createUserAction, updateUserAction, getUserIdlePolicyAction, setUserIdleTimeoutAction } from "@/server/actions/users"
+import { createUserAction, updateUserAction, getUserIdlePolicyAction, setUserIdleTimeoutAction, setUserStorageQuotaAction } from "@/server/actions/users"
 import type { AdminUserRow } from "./users-table"
 
 export interface GroupOption {
@@ -73,6 +73,27 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
   const [idleHint, setIdleHint] = React.useState<{ defaultMinutes: number; defaultSourceLabel: string; groupMinutes: number | null; globalDefault: number } | null>(null)
   const [idleLoading, setIdleLoading] = React.useState(false)
 
+  // —— r33：存储配额（三态：inherit=继承 / unlimited=0 不限 / limit=MB）+ 分类开关（inherit/on/off）+ 分类子配额 ——
+  const [stMode, setStMode] = React.useState<"inherit" | "unlimited" | "limit">("inherit")
+  const [stMb, setStMb] = React.useState(2048)
+  const [stRec, setStRec] = React.useState<"inherit" | "on" | "off">("inherit")
+  const [stShot, setStShot] = React.useState<"inherit" | "on" | "off">("inherit")
+  const [stUpload, setStUpload] = React.useState<"inherit" | "on" | "off">("inherit")
+  const [stAdvanced, setStAdvanced] = React.useState(false)
+  const [stRecMb, setStRecMb] = React.useState(0)
+  const [stShotMb, setStShotMb] = React.useState(0)
+  const [stFileMb, setStFileMb] = React.useState(0)
+  const [stInitial, setStInitial] = React.useState<{
+    quota: number | null
+    policy: AdminUserRow["storagePolicy"]
+  } | null>(null)
+
+  // —— r33：沙箱最大时长（三态：inherit=继承 / unlimited=0 不限 / limit=分钟 + 允许无限开关三态）——
+  const [ttlMode, setTtlMode] = React.useState<"inherit" | "unlimited" | "limit">("inherit")
+  const [ttlMinutes, setTtlMinutes] = React.useState(120)
+  const [ttlAllowUnlimited, setTtlAllowUnlimited] = React.useState<"inherit" | "yes" | "no">("inherit")
+  const [ttlInitial, setTtlInitial] = React.useState<{ max: number | null; allow: boolean | null } | null>(null)
+
   React.useEffect(() => {
     if (!open) return
     if (mode === "edit" && user) {
@@ -103,6 +124,22 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
       setIdleMinutes(60)
       setIdleLocked(false)
       setIdleLoading(true)
+      // r33：存储/时长回显（行数据携带）
+      const sp = user.storagePolicy || null
+      setStMode(user.storageQuotaMb == null ? "inherit" : user.storageQuotaMb === 0 ? "unlimited" : "limit")
+      setStMb(user.storageQuotaMb && user.storageQuotaMb > 0 ? user.storageQuotaMb : 2048)
+      setStRec(sp?.recording == null ? "inherit" : sp.recording ? "on" : "off")
+      setStShot(sp?.screenshot == null ? "inherit" : sp.screenshot ? "on" : "off")
+      setStUpload(sp?.upload == null ? "inherit" : sp.upload ? "on" : "off")
+      setStAdvanced(!!(sp?.recordingMb || sp?.screenshotMb || sp?.fileMb))
+      setStRecMb(sp?.recordingMb || 0)
+      setStShotMb(sp?.screenshotMb || 0)
+      setStFileMb(sp?.fileMb || 0)
+      setStInitial({ quota: user.storageQuotaMb, policy: sp })
+      setTtlMode(user.maxTtlMinutes == null ? "inherit" : user.maxTtlMinutes === 0 ? "unlimited" : "limit")
+      setTtlMinutes(user.maxTtlMinutes && user.maxTtlMinutes > 0 ? user.maxTtlMinutes : 120)
+      setTtlAllowUnlimited(user.allowUnlimitedTtl == null ? "inherit" : user.allowUnlimitedTtl ? "yes" : "no")
+      setTtlInitial({ max: user.maxTtlMinutes, allow: user.allowUnlimitedTtl })
       getUserIdlePolicyAction({ id: user.id })
         .then((res) => {
           if (res.code === 0 && res.data) {
@@ -142,6 +179,20 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
       setIdleLocked(false)
       setIdleInitial(null)
       setIdleHint(null)
+      setStMode("inherit")
+      setStMb(2048)
+      setStRec("inherit")
+      setStShot("inherit")
+      setStUpload("inherit")
+      setStAdvanced(false)
+      setStRecMb(0)
+      setStShotMb(0)
+      setStFileMb(0)
+      setStInitial(null)
+      setTtlMode("inherit")
+      setTtlMinutes(120)
+      setTtlAllowUnlimited("inherit")
+      setTtlInitial(null)
     }
   }, [open, mode, user])
 
@@ -220,6 +271,37 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
           const idleRes = await setUserIdleTimeoutAction({ id: targetId, minutes: idleMinutesValue, locked: idleLocked })
           if (idleRes.code !== 0) {
             toast.warning(`闲置超时策略保存失败：${idleRes.msg}（其余字段已保存）`)
+          }
+        }
+        // r33：存储配额 + 沙箱最大时长（创建：非默认才落库；编辑：与初值比对变化才落库）
+        const stQuotaValue: number | null = stMode === "inherit" ? null : stMode === "unlimited" ? 0 : Math.max(1, Math.round(stMb))
+        const stPolicyValue: AdminUserRow["storagePolicy"] =
+          stRec === "inherit" && stShot === "inherit" && stUpload === "inherit" && !stAdvanced
+            ? null
+            : {
+                ...(stRec !== "inherit" ? { recording: stRec === "on" } : {}),
+                ...(stShot !== "inherit" ? { screenshot: stShot === "on" } : {}),
+                ...(stUpload !== "inherit" ? { upload: stUpload === "on" } : {}),
+                ...(stAdvanced && stRecMb > 0 ? { recordingMb: Math.round(stRecMb) } : {}),
+                ...(stAdvanced && stShotMb > 0 ? { screenshotMb: Math.round(stShotMb) } : {}),
+                ...(stAdvanced && stFileMb > 0 ? { fileMb: Math.round(stFileMb) } : {}),
+              }
+        const ttlValue: number | null = ttlMode === "inherit" ? null : ttlMode === "unlimited" ? 0 : Math.max(1, Math.round(ttlMinutes))
+        const ttlAllowValue: boolean | null = ttlAllowUnlimited === "inherit" ? null : ttlAllowUnlimited === "yes"
+        const stChanged =
+          mode === "create"
+            ? stQuotaValue !== null || stPolicyValue !== null || ttlValue !== null || ttlAllowValue !== null
+            : !stInitial || stQuotaValue !== stInitial.quota || JSON.stringify(stPolicyValue) !== JSON.stringify(stInitial.policy) || ttlValue !== ttlInitial?.max || ttlAllowValue !== ttlInitial?.allow
+        if (targetId && stChanged) {
+          const stRes = await setUserStorageQuotaAction({
+            id: targetId,
+            storageQuotaMb: stQuotaValue,
+            storagePolicy: stPolicyValue,
+            maxTtlMinutes: ttlValue,
+            allowUnlimitedTtl: ttlAllowValue,
+          })
+          if (stRes.code !== 0) {
+            toast.warning(`存储配额/时长策略保存失败：${stRes.msg}（其余字段已保存）`)
           }
         }
         toast.success(mode === "create" ? "用户创建成功" : "用户已更新")
@@ -398,6 +480,113 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
               {idleHint.groupMinutes == null && <span className="ml-1">（组未设置，全局默认 {idleHint.globalDefault > 0 ? `${Math.round(idleHint.globalDefault)} 分钟` : "无限"}）</span>}
             </p>
           )}
+        </div>
+
+        {/* r33：存储配额分配（用户级覆盖：总配额三态 + 录屏/截图/上传开关 + 分类子配额） */}
+        <div className="space-y-3 rounded-md border p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">存储配额（录像+截图+云盘统一计量）</p>
+              <p className="text-xs text-muted-foreground">null=继承组/全局；配额内写入实时校验，超额拒绝并站内信提醒</p>
+            </div>
+          </div>
+          <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label className="text-xs">总配额</Label>
+              <Select value={stMode} onValueChange={(v) => setStMode(v as "inherit" | "unlimited" | "limit")}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">继承用户组/全局</SelectItem>
+                  <SelectItem value="unlimited">不限（0）</SelectItem>
+                  <SelectItem value="limit">限定（MB）</SelectItem>
+                </SelectContent>
+              </Select>
+              {stMode === "limit" && (
+                <div className="space-y-1">
+                  <PrecisionInput value={stMb} onChange={(v) => setStMb(Math.max(1, Math.round(v)))} min={1} max={10000000} suffix="MB" />
+                  <p className="text-[10px] text-muted-foreground">当前用量 {mode === "edit" ? `${user?.storageUsageMb ?? 0}MB` : "—"}（保存后在用户列表可见）</p>
+                </div>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label className="text-xs">功能开关（三态覆盖）</Label>
+              <div className="grid grid-cols-3 gap-2">
+                {([
+                  { label: "录像", v: stRec, set: setStRec },
+                  { label: "截图", v: stShot, set: setStShot },
+                  { label: "上传", v: stUpload, set: setStUpload },
+                ] as const).map((it) => (
+                  <Select key={it.label} value={it.v} onValueChange={(v) => it.set(v as "inherit" | "on" | "off")}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="inherit">{it.label}·继承</SelectItem>
+                      <SelectItem value="on">{it.label}·允许</SelectItem>
+                      <SelectItem value="off">{it.label}·禁止</SelectItem>
+                    </SelectContent>
+                  </Select>
+                ))}
+              </div>
+              <button type="button" className="text-[11px] text-muted-foreground underline" onClick={() => setStAdvanced(!stAdvanced)}>
+                {stAdvanced ? "收起分类子配额" : "展开分类子配额（精细颗粒分配）"}
+              </button>
+              {stAdvanced && (
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="space-y-1">
+                    <Label className="text-[10px]">录像限 MB</Label>
+                    <PrecisionInput value={stRecMb} onChange={(v) => setStRecMb(Math.max(0, Math.round(v)))} min={0} max={10000000} suffix="MB" />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-[10px]">截图限 MB</Label>
+                    <PrecisionInput value={stShotMb} onChange={(v) => setStShotMb(Math.max(0, Math.round(v)))} min={0} max={10000000} suffix="MB" />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-[10px]">云盘限 MB</Label>
+                    <PrecisionInput value={stFileMb} onChange={(v) => setStFileMb(Math.max(0, Math.round(v)))} min={0} max={10000000} suffix="MB" />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* r33：沙箱最大时长（用户创建沙箱的可选时长上限 + 是否允许无限时长） */}
+        <div className="space-y-3 rounded-md border p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">沙箱最大时长</p>
+              <p className="text-xs text-muted-foreground">该用户创建工作区时可选的生存时长（TTL）上限；关闭「无限时长」后创建必选有限时长</p>
+            </div>
+          </div>
+          <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label className="text-xs">时长上限</Label>
+              <Select value={ttlMode} onValueChange={(v) => setTtlMode(v as "inherit" | "unlimited" | "limit")}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">继承用户组/全局</SelectItem>
+                  <SelectItem value="unlimited">不限（0）</SelectItem>
+                  <SelectItem value="limit">限定（分钟）</SelectItem>
+                </SelectContent>
+              </Select>
+              {ttlMode === "limit" && (
+                <PrecisionInput value={ttlMinutes} onChange={(v) => setTtlMinutes(Math.max(1, Math.round(v)))} min={1} max={525600} suffix="分" />
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">允许「无限时长」沙箱</Label>
+              <Select value={ttlAllowUnlimited} onValueChange={(v) => setTtlAllowUnlimited(v as "inherit" | "yes" | "no")}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">继承用户组/全局</SelectItem>
+                  <SelectItem value="yes">允许选择无限时长</SelectItem>
+                  <SelectItem value="no">禁止（必须选有限时长）</SelectItem>
+                </SelectContent>
+              </Select>
+              {ttlAllowUnlimited === "no" && ttlMode === "inherit" && (
+                <p className="text-[10px] text-amber-600">未设上限且禁无限时，将按全局兜底 30 天封顶</p>
+              )}
+            </div>
+          </div>
         </div>
 
         <DialogFooter>

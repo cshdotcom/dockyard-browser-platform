@@ -1140,3 +1140,30 @@ Work Log:
 Stage Summary:
 - 启动崩溃根因修复（用户最高优先级报障）成功合入 r31 主线；通知清除/录屏截图云盘化/重建按钮/节点公网地址全部并入
 - 分支 feat/r28-local-fixes 保留完整本地批次备查
+
+---
+Task ID: r33
+Agent: main
+Task: R33 大批次 —— 用户报障修复（登录多次点击/重建404/NoVNC ERROR/未知容器/分辨率）+ 存储配额体系 + 闲置回收归还 + 沙箱最大时长链 + 批量授权 + CDP 公网地址 + 录像深链 + 站内信多选清除 + 管理界面多用户筛选
+
+Work Log:
+- 【登录修复】finishLogin 重写：会话落定校验（2×400ms）+ window.location.assign 硬导航 + 目的地净化（/login 自身/外站回落 dashboard）+ forceSetup/mustChange 路径统一（根因：NextAuth cookie 写入与 router.push 软导航竞态 → "点很多次才成功"）；Agent Browser 实证一次点击直达 /dashboard
+- 【Docker 404 根因修复】lib/external/docker.ts ensureImagePresent()：创建前 GET /images/<ref>/json，404 → POST /images/create 自动拉取（5min 超时）→ 复查；createIsolatedBrowserContainer/createContainer 全接入；错误信息带 Docker 响应体 message（"重建会话失败: HTTP 404"根因=节点镜像缺失）
+- 【RESTART_FAILED/未知容器】forceRestartWorkspace 失败态附可操作指引（镜像缺失/环境检查提示）+ freezeReason 留痕；admin workspaces 容器列按状态语义化（容器已回收·可归还 / 容器异常·可重建）
+- 【NoVNC ERROR 态】helmport-viewer 遮罩展示 crashCategory/freezeReason 原因 + 可操作建议（回收→重启动/管理员归还）；HelmPortWorkspace 透传 freezeReason
+- 【分辨率修复】真·适配缩放：live 态舞台视口高度约束（calc(100dvh-14.5rem)）+ ResizeObserver 实时计算 fitScale=min(舞台宽/帧宽, 舞台高/帧高) 双向等比（可放大可缩小无拉伸）；状态栏显示 分辨率×缩放%；移动端保持宽度适配
+- 【存储配额体系】schema：User/Group.storageQuotaMb + storagePolicy（稀疏 JSON：recording/screenshot/upload 开关 + 分类子配额）+ BrowserNode.publicCdpUrl；lib/storage-quota.ts（三级链解析/用量聚合/写入校验/水位通知/总览视图）；执行链路：upload-explorer（开关+总配额+分类配额+站内信拒绝留痕）、screenshot route（开关+真实字节校验）、startManualRecording（开关+段估算空间校验）、ensureRecordingFileMeta（入库后水位预警）；config 新增 8 键
+- 【后台分配】users.ts setUserStorageQuotaAction（总配额三态+分类开关+分类子配额+TTL+无限开关，组管理员限本组）+ batchAssignStorageQuotaAction（override/inherit/add 三模式，500 上限）+ 用户站内信感知通知；groups.ts create/update 全字段；user-form 存储配额+沙箱最大时长双区块（三态 Select + 精细颗粒子配额展开）；group-form 组基线双区块；users-table 存储用量/配额列（进度条+分类禁用徽章）+ 批量分配存储配额弹窗+按钮
+- 【用户侧可视化】profile「存储与配额」卡（总进度+录像/截图/云盘三分类明细+开关徽章+沙箱最大时长+闲置回收策略卡）；dashboard「我的存储与配额」卡（总用量+三分占比+直达链接）
+- 【录像深链】/files 三域（HOME/RECORDING/SCREENSHOT 只读）；?focus=<FileMetaId> → 域+路径+文件名解析 → 面板定位选中+ring 高亮+滚动可见+「定位」徽章；RecordingRow.fileMetaId/fileName（列表批量 join FileMeta）；my-recordings「更多」菜单（在文件管理中打开/复制文件名/查看存储用量）；files 页统计四卡（云盘/文件数/录像/截图）
+- 【闲置回收归还】restoreReclaimedWorkspaceAction（仅归还不拉起→STOPPED / 归还并拉起→RUNNING coreRestart）+ 站内信通知 + ADMIN_RECLAIM_RESTORE 审计；batchWorkspaceAction 新增 RESTORE_RECLAIM 批量归还；admin workspaces-table 状态筛选「★ 闲置回收（可归还）」+ 行菜单两项归还 + 批量归还双按钮；RECLAIMED 服务端筛选（DESTROYED+crashCategory 三类）
+- 【沙箱最大时长链】lib/ttl-policy.ts（用户>组>全局 maxTtlMinutes + allowUnlimitedTtl 开关链 + validateTtlAgainstPolicy 管理员豁免 + 表单可选项推导）；createWorkspaceAction/updateWorkspaceAction 强制校验（默认值也过链）；用户创建弹窗 TTL 上限约束+禁无限提示+前置校验；管理员/组表单三态配置；个人中心/仪表盘展示
+- 【批量授权】permissions-center batchSetPermissionLocksAction（多用户+多组 × 30 项锁三态 true/false/null，merge/replace 双模式，开通站内信感知通知 SANDBOX_GRANT_KEYS 8 键）；权限中心新「批量授权」页签（用户可搜索多选+组多选+一键开通「创建和操作实例沙箱」预设+完整 30 项三态矩阵展开）
+- 【浏览器节点公网 CDP 地址】network.ts create/updateBrowserNodeAction publicCdpUrl；browser-nodes-table 表单输入+提示；工作区详情 CdpPanel 优先展示节点级地址（区分 平台网关/本节点专属地址 两种来源）
+- 【站内信多选清除】notifications DELETE 新增 many 模式（ids 批量，200 上限）；app-shell 铃铛「多选」模式（复选框+全选/清空+清除所选(N)+退出多选）
+- 【管理界面多用户筛选】users-table UserMultiFilter 弹层（搜索+勾选多用户→服务端 ids 过滤）+ users page where.id in
+- 【质量门】prisma db push+generate（seed 151→159 项配置）；tsc 29=基线 29 零新增；eslint 0/0；build 全绿（44s）；QA 冒烟 23/23（策略链/配额执行/TTL 校验/HTTP many 清除/深链 200）；Agent Browser 端到端 8 场景实证（登录一次直达/三域文件/批量授权页签/归还视图/个人中心存储卡/用户表存储列）；dev+bridge 3005 健康恢复
+
+Stage Summary:
+- R33 全部交付：4 大报障根因修复（登录/404/ERROR 态/分辨率）+ 12 项新功能（存储配额体系全链路/闲置回收归还/TTL 时长链/批量授权/CDP 节点公网地址/录像深链/通知多选/多用户筛选）
+- 质量门全绿：tsc 基线零新增 + lint 0/0 + build 成功 + QA 23/23 + 浏览器实证

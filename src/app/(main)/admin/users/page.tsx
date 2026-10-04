@@ -33,6 +33,9 @@ export default async function AdminUsersPage({
   if (f.frozen) where.frozen = f.frozen === "true"
   if (f.twoFactor) where.twoFactorEnabled = f.twoFactor === "true"
   if (f.locked === "true") where.lockedUntil = { gt: new Date() }
+  // r33：多用户筛选（管理员界面勾选多个用户 → ids 过滤）
+  const idsFilter = (f.ids || "").split(",").map((s) => s.trim()).filter(Boolean)
+  if (idsFilter.length > 0) where.id = { in: idsFilter }
   if (f.createdFrom || f.createdTo) {
     where.createdAt = {
       ...(f.createdFrom ? { gte: new Date(f.createdFrom) } : {}),
@@ -74,6 +77,11 @@ export default async function AdminUsersPage({
         lastLoginAt: true,
         lastLoginIp: true,
         createdAt: true,
+        // r33：存储配额 + 沙箱最大时长
+        storageQuotaMb: true,
+        storagePolicy: true,
+        maxTtlMinutes: true,
+        allowUnlimitedTtl: true,
       },
     }),
     db.user.count({ where }),
@@ -113,6 +121,12 @@ export default async function AdminUsersPage({
   // 当前页用户生效网络策略（批量解析：沙箱覆盖 > 用户覆盖 > 组继承 > 全局默认；用户列表按用户维度）
   const netPolicies = await resolveNetworkPoliciesBatch(userIds.map((uid) => ({ userId: uid })))
 
+  // r33：当前页用户存储用量（FileMeta 统一口径：录像+截图+云盘）
+  const storageUsageRows = userIds.length
+    ? await db.fileMeta.groupBy({ by: ["userId"], where: { userId: { in: userIds }, deletedAt: null, purgedAt: null, category: { not: "AVATAR" } }, _sum: { size: true } })
+    : []
+  const storageUsageMbByUser = new Map(storageUsageRows.map((r) => [r.userId, Math.round(((r._sum.size || 0) / (1024 * 1024)) * 10) / 10]))
+
   const list: AdminUserRow[] = rows.map((u) => ({
     id: u.id,
     username: u.username,
@@ -138,6 +152,11 @@ export default async function AdminUsersPage({
     allowSecureLocationAccess: u.allowSecureLocationAccess,
     shareAllowed: u.shareAllowed ?? null,
     netPolicy: netPolicies.get(u.id) || null,
+    storageQuotaMb: u.storageQuotaMb ?? null,
+    storagePolicy: (u.storagePolicy as AdminUserRow["storagePolicy"]) || null,
+    maxTtlMinutes: u.maxTtlMinutes ?? null,
+    allowUnlimitedTtl: u.allowUnlimitedTtl ?? null,
+    storageUsageMb: storageUsageMbByUser.get(u.id) ?? 0,
   }))
 
   return (

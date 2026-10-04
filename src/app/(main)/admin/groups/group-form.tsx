@@ -46,6 +46,11 @@ interface GroupFormDialogProps {
     allowShare: boolean
     vncSessionMaxMinutes: number | null
     tags: string[]
+    // r33：组级存储配额 + 沙箱最大时长基线
+    storageQuotaMb: number | null
+    storagePolicy: { recording?: boolean | null; screenshot?: boolean | null; upload?: boolean | null; recordingMb?: number | null; screenshotMb?: number | null; fileMb?: number | null } | null
+    maxTtlMinutes: number | null
+    allowUnlimitedTtl: boolean | null
   } | null
   defaultParentId?: string | null
   allNodes: GroupTreeNodeInfo[]
@@ -123,6 +128,16 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
   const [idleAffected, setIdleAffected] = React.useState<number | null>(null)
   const [idleLoading, setIdleLoading] = React.useState(false)
 
+  // r33：组级存储配额 + 沙箱最大时长（成员基线；成员用户级可再覆盖）
+  const [stMode, setStMode] = React.useState<"inherit" | "unlimited" | "limit">("inherit")
+  const [stMb, setStMb] = React.useState(5120)
+  const [stRec, setStRec] = React.useState<"inherit" | "on" | "off">("inherit")
+  const [stShot, setStShot] = React.useState<"inherit" | "on" | "off">("inherit")
+  const [stUpload, setStUpload] = React.useState<"inherit" | "on" | "off">("inherit")
+  const [ttlMode, setTtlMode] = React.useState<"inherit" | "unlimited" | "limit">("inherit")
+  const [ttlMinutes, setTtlMinutes] = React.useState(240)
+  const [ttlAllowUnlimited, setTtlAllowUnlimited] = React.useState<"inherit" | "yes" | "no">("inherit")
+
   React.useEffect(() => {
     if (!open) return
     if (mode === "edit" && group) {
@@ -162,6 +177,16 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       setIdleMinutes(60)
       setIdleLocked(false)
       setIdleLoading(true)
+      // r33：组级存储/时长回显
+      const sp = group.storagePolicy || null
+      setStMode(group.storageQuotaMb == null ? "inherit" : group.storageQuotaMb === 0 ? "unlimited" : "limit")
+      setStMb(group.storageQuotaMb && group.storageQuotaMb > 0 ? group.storageQuotaMb : 5120)
+      setStRec(sp?.recording == null ? "inherit" : sp.recording ? "on" : "off")
+      setStShot(sp?.screenshot == null ? "inherit" : sp.screenshot ? "on" : "off")
+      setStUpload(sp?.upload == null ? "inherit" : sp.upload ? "on" : "off")
+      setTtlMode(group.maxTtlMinutes == null ? "inherit" : group.maxTtlMinutes === 0 ? "unlimited" : "limit")
+      setTtlMinutes(group.maxTtlMinutes && group.maxTtlMinutes > 0 ? group.maxTtlMinutes : 240)
+      setTtlAllowUnlimited(group.allowUnlimitedTtl == null ? "inherit" : group.allowUnlimitedTtl ? "yes" : "no")
       getGroupIdlePolicyAction({ id: group.id })
         .then((res) => {
           if (res.code === 0 && res.data) {
@@ -200,6 +225,14 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       setIdleLocked(false)
       setIdleInitial(null)
       setIdleAffected(null)
+      setStMode("inherit")
+      setStMb(5120)
+      setStRec("inherit")
+      setStShot("inherit")
+      setStUpload("inherit")
+      setTtlMode("inherit")
+      setTtlMinutes(240)
+      setTtlAllowUnlimited("inherit")
     }
   }, [open, mode, group])
 
@@ -229,6 +262,18 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       tags,
       quota: quotaEnabled ? { sessions: qSessions, novncSessions: qNovnc, diskMb: qDisk, proxyBandwidthMb: qBandwidth } : undefined,
       reservedQuota: reservedEnabled ? { sessions: rSessions, novncSessions: rNovnc } : undefined,
+      // r33：组级存储配额 + 沙箱最大时长
+      storageQuotaMb: stMode === "inherit" ? null : stMode === "unlimited" ? 0 : Math.max(1, Math.round(stMb)),
+      storagePolicy:
+        stRec === "inherit" && stShot === "inherit" && stUpload === "inherit"
+          ? null
+          : {
+              ...(stRec !== "inherit" ? { recording: stRec === "on" } : {}),
+              ...(stShot !== "inherit" ? { screenshot: stShot === "on" } : {}),
+              ...(stUpload !== "inherit" ? { upload: stUpload === "on" } : {}),
+            },
+      maxTtlMinutes: ttlMode === "inherit" ? null : ttlMode === "unlimited" ? 0 : Math.max(1, Math.round(ttlMinutes)),
+      allowUnlimitedTtl: ttlAllowUnlimited === "inherit" ? null : ttlAllowUnlimited === "yes",
     }
 
     setBusy(true)
@@ -470,6 +515,76 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
               </div>
             </div>
           )}
+        </div>
+
+        {/* r33：组级存储配额基线（成员统一口径：录像+截图+云盘；成员用户级可覆盖） */}
+        <div className="space-y-3 rounded-md border p-3">
+          <p className="text-sm font-medium">存储配额（组基线）</p>
+          <p className="text-xs text-muted-foreground">组内成员默认生效；成员用户级设置可覆盖本值</p>
+          <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label className="text-xs">总配额</Label>
+              <Select value={stMode} onValueChange={(v) => setStMode(v as "inherit" | "unlimited" | "limit")}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">继承全局默认</SelectItem>
+                  <SelectItem value="unlimited">不限（0）</SelectItem>
+                  <SelectItem value="limit">限定（MB）</SelectItem>
+                </SelectContent>
+              </Select>
+              {stMode === "limit" && <PrecisionInput value={stMb} onChange={(v) => setStMb(Math.max(1, Math.round(v)))} min={1} max={10000000} suffix="MB" />}
+            </div>
+            <div className="space-y-2">
+              <Label className="text-xs">功能开关（三态）</Label>
+              <div className="grid grid-cols-3 gap-2">
+                {([
+                  { label: "录像", v: stRec, set: setStRec },
+                  { label: "截图", v: stShot, set: setStShot },
+                  { label: "上传", v: stUpload, set: setStUpload },
+                ] as const).map((it) => (
+                  <Select key={it.label} value={it.v} onValueChange={(v) => it.set(v as "inherit" | "on" | "off")}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="inherit">{it.label}·继承</SelectItem>
+                      <SelectItem value="on">{it.label}·允许</SelectItem>
+                      <SelectItem value="off">{it.label}·禁止</SelectItem>
+                    </SelectContent>
+                  </Select>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* r33：组级沙箱最大时长基线 */}
+        <div className="space-y-3 rounded-md border p-3">
+          <p className="text-sm font-medium">沙箱最大时长（组基线）</p>
+          <p className="text-xs text-muted-foreground">组内成员创建工作区时可选时长上限；「无限时长」开关管控是否必须选有限时长</p>
+          <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label className="text-xs">时长上限</Label>
+              <Select value={ttlMode} onValueChange={(v) => setTtlMode(v as "inherit" | "unlimited" | "limit")}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">继承全局默认</SelectItem>
+                  <SelectItem value="unlimited">不限（0）</SelectItem>
+                  <SelectItem value="limit">限定（分钟）</SelectItem>
+                </SelectContent>
+              </Select>
+              {ttlMode === "limit" && <PrecisionInput value={ttlMinutes} onChange={(v) => setTtlMinutes(Math.max(1, Math.round(v)))} min={1} max={525600} suffix="分" />}
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">允许「无限时长」</Label>
+              <Select value={ttlAllowUnlimited} onValueChange={(v) => setTtlAllowUnlimited(v as "inherit" | "yes" | "no")}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">继承全局默认</SelectItem>
+                  <SelectItem value="yes">允许</SelectItem>
+                  <SelectItem value="no">禁止（必选有限时长）</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
         </div>
 
         <DialogFooter>

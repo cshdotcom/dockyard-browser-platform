@@ -4,14 +4,16 @@
 // 用户仅可查看/回放/下载（不可删除 —— 审计完整性；删除与回收站归管理后台）
 
 import { useState, useTransition, useRef, useMemo } from "react"
+import { useRouter } from "next/navigation"
 import { playbackRecordingAction, type RecordingRow, type PlaybackTicketInfo } from "@/server/actions/recordings"
 import { WatermarkOverlay, PlaybackSpeedBar } from "@/components/recordings/watermark-overlay"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { MultiSelectPopover, type MultiOption } from "@/components/shared/multi-select-popover"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { toast } from "sonner"
-import { Play, Download, Info, MonitorPlay } from "lucide-react"
+import { Play, Download, Info, MonitorPlay, MoreHorizontal, FolderOpen, Copy, FileVideo } from "lucide-react"
 
 const STATUS_MAP: Record<string, "default" | "secondary" | "destructive" | "outline" | "success"> = {
   RECORDING: "success",
@@ -33,6 +35,7 @@ export function MyRecordingsPanel({ rows, keyword, wsIds, workspaces, quotaPct }
   workspaces: WsFilterItem[]
   quotaPct: number | null
 }) {
+  const router = useRouter()
   const [pending, startTransition] = useTransition()
   const [playRow, setPlayRow] = useState<RecordingRow | null>(null)
   const [playUrl, setPlayUrl] = useState<string | null>(null)
@@ -139,6 +142,37 @@ export function MyRecordingsPanel({ rows, keyword, wsIds, workspaces, quotaPct }
           <Download className="h-4 w-4 text-blue-600" />
         </Button>
       )}
+      {/* r33：更多菜单 —— 录像「点击更多」打开文件管理对应文件（计入个人存储配额的云盘文件） */}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="sm" title="更多" disabled={!r.fileMetaId && !r.fileReady}>
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-60">
+          {r.fileMetaId ? (
+            <DropdownMenuItem onClick={() => router.push(`/files?focus=${r.fileMetaId}`)}>
+              <FolderOpen className="h-4 w-4 mr-2" /> 在文件管理中打开
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem onClick={() => router.push("/files")}>
+              <FolderOpen className="h-4 w-4 mr-2" /> 打开我的文件
+            </DropdownMenuItem>
+          )}
+          {r.fileName && (
+            <DropdownMenuItem
+              onClick={() => {
+                void navigator.clipboard?.writeText(r.fileName || "").then(() => toast.success("文件名已复制"))
+              }}
+            >
+              <Copy className="h-4 w-4 mr-2" /> 复制文件名
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuItem onClick={() => router.push("/account/profile")}>
+            <FileVideo className="h-4 w-4 mr-2" /> 查看存储用量
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   )
 

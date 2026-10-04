@@ -47,6 +47,7 @@ export interface WorkspaceDetailData {
   shareDisabled: boolean
   shareBlockedReason: string
   crashCategory: string | null
+  freezeReason: string | null
   policyAllowInternalNetwork: boolean | null
   policyAllowSecureLocationAccess: boolean | null
   effectivePolicy: {
@@ -336,6 +337,7 @@ function VncPanel({ workspace, canOperate, vncBridge }: { workspace: WorkspaceDe
       <HelmPortViewer
         workspace={{
           id: workspace.id, uuid: workspace.uuid, name: workspace.name, status: workspace.status,
+          crashCategory: workspace.crashCategory ?? null, freezeReason: workspace.freezeReason ?? null,
           novncSessionId: workspace.novncSessionId, ownerName: workspace.ownerName,
           mySharePermission: workspace.mySharePermission, isOwner: workspace.isOwner, isAdmin: workspace.isAdmin,
         }}
@@ -606,9 +608,15 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
         <CardContent className="space-y-3 text-sm">
           {publicCdpEndpoint && (
             <div className="rounded-md border border-teal-200 bg-teal-50 dark:bg-teal-950/30 p-2.5">
-              <div className="text-xs text-muted-foreground mb-1">公网网关端点（外部工具接入用）</div>
+              <div className="text-xs text-muted-foreground mb-1">
+                公网 CDP 接入端点（外部工具接入用{publicCdpEndpoint.startsWith("http") ? " · 平台网关" : " · 本节点专属地址"}）
+              </div>
               <code className="text-xs font-mono break-all">{publicCdpEndpoint}</code>
-              <p className="text-[11px] text-muted-foreground mt-1">内网穿透/域名部署场景：Puppeteer/Playwright/自定义脚本经此端点鉴权转发，无需访问内部网络</p>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                {publicCdpEndpoint.startsWith("http")
+                  ? "内网穿透/域名部署场景：Puppeteer/Playwright/自定义脚本经此端点鉴权转发，无需访问内部网络"
+                  : "管理员为该沙箱所在浏览器节点配置的公网 CDP 地址；鉴权与管控沿用平台策略（网关黑名单/限流仍生效）"}
+              </p>
             </div>
           )}
           {/* r28：部署答疑卡 —— 直接回答"到底要穿透哪部分"（内置形态零穿透；仅外部分离浏览器需平台可达 9222） */}

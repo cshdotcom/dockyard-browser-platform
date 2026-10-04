@@ -65,6 +65,8 @@ interface Props {
   currentUserId: string
   /** r14（22-c）：闲置超时策略（创建表单默认值 + 锁定态） */
   idlePolicy: { locked: boolean; minutes: number; sourceLabel: string; lockSourceLabel: string }
+  /** r33：沙箱最大时长策略（创建时可选上限；无限时长开关管控） */
+  ttlPolicy?: { maxMinutes: number; allowUnlimited: boolean; sourceLabel: string }
 }
 
 export function WorkspacesTable(props: Props) {
@@ -341,7 +343,7 @@ export function WorkspacesTable(props: Props) {
         }
       />
 
-      <CreateDialog open={createOpen} onOpenChange={setCreateOpen} templates={props.templates} snapshots={props.snapshots} proxyNodes={props.proxyNodes} idlePolicy={props.idlePolicy} />
+      <CreateDialog open={createOpen} onOpenChange={setCreateOpen} templates={props.templates} snapshots={props.snapshots} proxyNodes={props.proxyNodes} idlePolicy={props.idlePolicy} ttlPolicy={props.ttlPolicy} />
 
       <ConfirmDialog
         open={!!deleteTarget}
@@ -410,7 +412,7 @@ function BatchBar({ ids, onDone }: { ids: string[]; onDone: () => void }) {
 
 // ---- 创建工作区弹窗 ----
 function CreateDialog({
-  open, onOpenChange, templates, snapshots, proxyNodes, idlePolicy,
+  open, onOpenChange, templates, snapshots, proxyNodes, idlePolicy, ttlPolicy,
 }: {
   open: boolean
   onOpenChange: (v: boolean) => void
@@ -419,6 +421,8 @@ function CreateDialog({
   proxyNodes: { id: string; name: string; type: string; status: string }[]
   /** r14（22-c）：闲置超时策略（locked=表单只读；minutes=策略链解析默认值） */
   idlePolicy: { locked: boolean; minutes: number; sourceLabel: string; lockSourceLabel: string }
+  /** r33：沙箱最大时长策略（可选上限；无限时长开关管控） */
+  ttlPolicy?: { maxMinutes: number; allowUnlimited: boolean; sourceLabel: string }
 }) {
   const router = useRouter()
   const [form, setForm] = React.useState({
@@ -436,6 +440,15 @@ function CreateDialog({
 
   const submit = async () => {
     if (!form.name.trim()) { toast.error("请输入工作区名称"); return }
+    // r33：时长策略前置校验（服务端同样强制；前端提前给出友好提示）
+    if (ttlPolicy && !ttlPolicy.allowUnlimited && form.ttlMinutes <= 0) {
+      toast.error(`管理员已禁止「无限时长」沙箱${ttlPolicy.maxMinutes > 0 ? `（最长 ${ttlPolicy.maxMinutes} 分钟）` : ""}，请填写有限时长`)
+      return
+    }
+    if (ttlPolicy && ttlPolicy.maxMinutes > 0 && form.ttlMinutes > ttlPolicy.maxMinutes) {
+      toast.error(`时长超出上限：最长 ${ttlPolicy.maxMinutes} 分钟（${ttlPolicy.sourceLabel}）`)
+      return
+    }
     setBusy(true)
     try {
       const res = await createWorkspaceAction({
@@ -538,8 +551,21 @@ function CreateDialog({
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label>硬 TTL（分钟，0 不限）</Label>
-              <PrecisionInput value={form.ttlMinutes} onChange={(v) => setForm({ ...form, ttlMinutes: v })} min={0} max={525600} suffix="min" />
+              <Label>硬 TTL（分钟{ttlPolicy?.allowUnlimited ? "，0 不限" : "，必填有限时长"}）</Label>
+              <PrecisionInput
+                value={form.ttlMinutes}
+                onChange={(v) => setForm({ ...form, ttlMinutes: ttlPolicy && ttlPolicy.maxMinutes > 0 ? Math.min(Math.max(0, Math.round(v)), ttlPolicy.maxMinutes) : Math.max(0, Math.round(v)) })}
+                min={0}
+                max={ttlPolicy && ttlPolicy.maxMinutes > 0 ? ttlPolicy.maxMinutes : 525600}
+                suffix="min"
+              />
+              {ttlPolicy && (ttlPolicy.maxMinutes > 0 || !ttlPolicy.allowUnlimited) && (
+                <p className="text-[11px] text-muted-foreground">
+                  管理员为{ttlPolicy.sourceLabel === "用户级" ? "你" : "你的组"}配置的上限：
+                  {ttlPolicy.maxMinutes > 0 ? `${ttlPolicy.maxMinutes} 分钟` : "未设上限"}
+                  {!ttlPolicy.allowUnlimited && "；已禁止选择「无限时长」"}
+                </p>
+              )}
             </div>
             <div className="space-y-1.5">
               <Label>闲置超时（分钟）</Label>

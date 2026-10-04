@@ -42,6 +42,9 @@ export interface HelmPortWorkspace {
   uuid: string
   name: string
   status: string
+  /** r33：错误/回收原因（ERROR/DESTROYED 态在遮罩中直接给出可操作解释） */
+  crashCategory?: string | null
+  freezeReason?: string | null
   novncSessionId: string | null
   ownerName: string
   mySharePermission: string | null // VIEW | OPERATE | null
@@ -217,11 +220,33 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
   const pendingResizeRef = React.useRef<string | null>(null) // 用户发起的切换请求（结果 toast 用）
   const appliedPresetRef = React.useRef<string | null>(null) // 连接后已自动应用的偏好（避免重复下发）
 
+  // —— r33：真·适配缩放（双向等比）：修复「显示分辨率有问题」 ——
+  // 旧实现 max-w-full h-auto 只缩不小、高方向无约束 → 窄窗/高分屏出现溢出或模糊。
+  // 新实现：桌面端 live 态给舞台固定视口高度，ResizeObserver 实时计算
+  //   scale = min(舞台宽/帧宽, 舞台高/帧高)（可放大可缩小，严格等比无拉伸）；
+  //   移动端保持宽度适配（页面滚动）。
+  const [stageBox, setStageBox] = React.useState<{ w: number; h: number } | null>(null)
+  const fitScale = React.useMemo(() => {
+    if (!stageBox || !desktop || desktop.width < 1 || desktop.height < 1) return null
+    const s = Math.min(stageBox.w / desktop.width, stageBox.h / desktop.height)
+    return Number.isFinite(s) && s > 0.02 ? s : null
+  }, [stageBox, desktop])
+
   // —— 企业级控制坞（亮色侧栏：小箭头开合 + 可拖动停靠 + 移动端底部抽屉）——
   const [dockOpen, setDockOpen] = React.useState(true)
   const [dockSide, setDockSide] = React.useState<"left" | "right">("right")
   const [dockTab, setDockTab] = React.useState<"display" | "input" | "clipboard">("display")
   const [isMobile, setIsMobile] = React.useState(false)
+  React.useEffect(() => {
+    if (phase !== "live" || isMobile || fullscreen) { setStageBox(null); return }
+    const el = stageRef.current
+    if (!el) return
+    const measure = () => setStageBox({ w: el.clientWidth, h: el.clientHeight })
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [phase, isMobile, fullscreen])
   const dragRef = React.useRef<{ startX: number; moved: boolean } | null>(null)
 
   // —— 输入法（IME）：本地组合捕获 → Unicode keysym 注入 ——
@@ -1034,6 +1059,13 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
           <span className="inline-flex items-center gap-1 font-mono text-teal-700">
             <Monitor className="h-3 w-3" />
             {desktop ? `${desktop.width}×${desktop.height} · ${desktop.screens.length} 显示器` : "分辨率待协商"}
+            {phase === "live" && desktop && (
+              <span className="text-slate-400" title="当前显示缩放（严格等比，无拉伸）">
+                · 显示 {phase === "live" && scaleFit && !isMobile && !fullscreen && fitScale
+                  ? `${Math.round(fitScale * 100)}%（适配）`
+                  : scaleFit ? "宽度适配" : "1:1 原始像素"}
+              </span>
+            )}
           </span>
           {manualRec.active && (
             <span className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 font-medium text-red-600" title="手动录屏进行中（VNC 工具栏发起）">
@@ -1065,16 +1097,22 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
           className={cn("relative overflow-hidden rounded-xl border border-slate-300 bg-[#070b0e] outline-none transition-shadow select-none",
             phase === "live" ? "shadow-[0_2px_20px_-6px_rgba(13,148,136,0.35)] cursor-default" : "",
             isMobile ? "w-full" : cn("flex-1 min-w-0", !dockOpen && "w-full"),
+            phase === "live" && !isMobile && !fullscreen ? "h-[calc(100dvh-14.5rem)] min-h-[420px]" : "", // r33：live 态舞台高度约束（双向适配缩放前提）
             fullscreen ? "flex h-screen w-screen items-center justify-center" : "")}>
-          {/* 画布：自适应缩放或 1:1 */}
-          <div className={cn("flex w-full items-center justify-center overflow-auto", phase === "live" ? "min-h-0" : "min-h-[340px] sm:min-h-[420px] md:min-h-[520px]")}>
+          {/* 画布：r33 真·适配缩放 —— 桌面端 JS 等比双向缩放（可放大可缩小，无拉伸）；移动端宽度适配；1:1 原始尺寸可滚动 */}
+          <div className={cn("flex items-center justify-center overflow-auto w-full", phase === "live" ? (isMobile ? "min-h-0" : "h-full min-h-0") : "min-h-[340px] sm:min-h-[420px] md:min-h-[520px]")}>
             <canvas
               ref={canvasRef}
               width={1280}
               height={800}
+              style={
+                phase === "live" && scaleFit && !isMobile && !fullscreen && fitScale
+                  ? { width: Math.round(desktop!.width * fitScale) + "px", height: Math.round(desktop!.height * fitScale) + "px" }
+                  : undefined
+              }
               className={cn(
                 "block",
-                phase === "live" && scaleFit ? "max-w-full h-auto" : "",
+                phase === "live" && scaleFit && (isMobile || fullscreen || !fitScale) ? "max-w-full h-auto" : "",
                 phase !== "live" ? "invisible absolute" : "",
               )}
             />
@@ -1115,7 +1153,17 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
                       <Radio className="h-4 w-4 mr-1.5" /> 立即接入
                     </Button>
                   ) : (
-                    <Badge variant="outline" className="border-slate-600 text-slate-400">会话未运行（{status}）</Badge>
+                    <div className="space-y-2 text-center">
+                      {/* r33：错误/回收态给出可操作解释（NoVNC 完整 ERROR 报障增强） */}
+                      <Badge variant="outline" className="border-amber-500/50 text-amber-300">会话未运行（{status}）</Badge>
+                      {(workspace.crashCategory || workspace.freezeReason) && (
+                        <p className="max-w-md px-4 text-[11px] leading-relaxed text-slate-400">
+                          原因：{workspace.crashCategory || workspace.freezeReason}
+                          {status === "DESTROYED" && " —— 会话已被闲置/到期回收，工作区配置与 Profile 已保留，可返回工作区列表重新启动；如需找回可联系管理员在后台「归还」。"}
+                          {status === "ERROR" && " —— 上次拉起失败（常见于节点镜像缺失/资源不足），可稍后在工作区列表重试重建。"}
+                        </p>
+                      )}
+                    </div>
                   )}
                 </>
               )}
