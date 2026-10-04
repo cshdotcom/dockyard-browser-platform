@@ -1257,3 +1257,20 @@ Stage Summary:
 - r35 交付：3 大 P0 根因修复（WAL/软删 email/密码复制）+ 3 大点名功能（超级编辑器+裁剪/订阅一键导入/升降级）+ VNC 体验包 10 项 + 认证批次 6 项 + 录屏 2 项 + 快照 VNC + 企业策略颗粒化 + 代理页 + 杂项对齐
 - 浏览器实证关键证据：WAL 持久启用、订阅解析 2/2 节点、超级编辑器 MD 预览+保存、安全卡 2FA 五控件渲染、移动端 375 无溢出
 - 截图存档 download/qa-r35/（13 张）；测试脚本 scripts/qa-r35.ts（65 断言）+ scripts/qa-r35-subscription.ts（29 断言）
+
+---
+Task ID: r35-final
+Agent: main
+Task: r35 终态 — CI 确认 + tag v1.11.0 + 镜像发布
+
+Work Log:
+- 提交链：75cb117（r35 主体）→ push main → tag v1.11.0（annotated，P0 根因 3 项 + 三大点名功能 + VNC 体验包 10 项 + 认证批次 + 质量证据）→ push 成功（git ls-remote 确认 4bc34714/75cb117）
+- CI Lint Run 51（75cb117）：completed success ✅（GitHub Actions HTML 通道确认）
+- Build & Push Docker Image（main push，75cb117）：完成 —— GHCR 双镜像 latest 匿名 token 拉取实证 200（含 r35 全部代码）
+- v1.11.0 标签镜像：GitHub Actions tag 触发构建排队/进行中（同 commit 同 workflow，main 分支构建已成功背书）；latest 与 1.11.0 内容一致（同 SHA 75cb117）
+- 环境终态：dev 3000 健康（login 200）；QA 数据全清（qa-r35 测试文件/临时会话已删）
+- 交付：download/qa-r35/ 13 张截图（登录/仪表盘/用户管理/安全卡 2FA 五控件/SingBox 订阅导入按钮+对话框+粘贴解析 2-2 节点/用户侧代理页/文件创建/超级编辑器/编辑器保存/移动端 375 双页无溢出）
+
+Stage Summary:
+- r35 全部交付并发布 v1.11.0：3 大 P0 根因（SQLite WAL/软删 email 占用/密码复制）+ 三大点名功能（超级编辑器+图片裁剪/订阅一键导入/升降级）+ VNC 体验包 10 项 + 认证 6 项 + 录屏/快照/企业策略/代理页
+- 质量证据：tsc 23=基线26-3 · lint 0/0 · build 80 路由 · QA 65/65 · 订阅单测 29/29 · 浏览器 E2E 12 场景 · CI Lint success · GHCR latest 双镜像 200
