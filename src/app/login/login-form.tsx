@@ -158,20 +158,31 @@ export function LoginForm({ from, allowRegister }: { from?: string; allowRegiste
     }
   }
 
-  // ---- 邮箱验证码登录 ----
+  // ---- 邮箱验证码登录（r35：发送前需人机验证 —— 41006 时自动拉取验证码并重试） ----
   const sendEmailCode = async () => {
     if (!email.trim() || countdown > 0) return
     setBusy(true)
     try {
-      const res = await fetch("/api/auth/email-code", {
+      const doSend = () => fetch("/api/auth/email-code", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email.trim().toLowerCase(), purpose: "LOGIN" }),
+        body: JSON.stringify({
+          email: email.trim().toLowerCase(), purpose: "LOGIN",
+          captchaId: captcha?.id, captchaCode: captchaCode || undefined,
+        }),
       })
-      const json = (await res.json()) as { code: number; msg: string }
+      let json = (await (await doSend()).json()) as { code: number; msg: string; data?: { captchaRequired?: boolean } }
+      if (json.code === 41006 || json.data?.captchaRequired) {
+        // 需要人机验证：拉取图形验证码 → 用户填完再点发送
+        await loadCaptcha()
+        toast.info("请先完成图形验证码后再发送邮箱验证码")
+        return
+      }
       if (json.code === 0) {
         toast.success(json.msg)
         setCountdown(60)
+        // 验证码一次性使用：发送成功后清理，下次发送重新拉取
+        setCaptchaCode("")
       } else {
         toast.error(json.msg)
       }

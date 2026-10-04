@@ -11,6 +11,7 @@
 // PostgreSQL 部署的自动初始化（db push + 种子 + 审计触发器）见 docker/start.sh。
 // ============================================================
 import { PrismaClient } from "@prisma/client"
+import { runStartupDbMaintenance } from "./db-maintenance"
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
@@ -45,10 +46,21 @@ function createPrismaClient(): PrismaClient {
     }
     return new PostgresPrismaClient({ log: prismaLogLevels() }) as unknown as PrismaClient
   }
+  // r35：SQLite 连接调优 —— file: URL 注入 connection_limit（WAL 下多读并行）与
+  // socket_timeout（秒；默认 5s 过短，慢盘/大事务下 P1008 误杀 → 页面/看门狗连锁卡死）
+  const rawUrl = process.env.DATABASE_URL || "file:./db/custom.db"
+  const tunedUrl = rawUrl.startsWith("file:") && !rawUrl.includes("connection_limit")
+    ? `${rawUrl}${rawUrl.includes("?") ? "&" : "?"}connection_limit=8&socket_timeout=20`
+    : rawUrl
   return new PrismaClient({
+    datasources: { db: { url: tunedUrl } },
     log: prismaLogLevels(),
   })
 }
+
+// ============================================================
+// r35 说明：SQLite WAL 持久化切换 + 启动错误记录清理在 baseClient 落定后执行（见下）
+// ============================================================
 
 // ============================================================
 // r30：查询日志水位治理 —— 生产默认只记 error/warn
@@ -64,6 +76,18 @@ function prismaLogLevels(): ("query" | "error" | "warn")[] {
 }
 
 const baseClient = globalForPrisma.prisma ?? createPrismaClient()
+
+// ============================================================
+// r35：SQLite WAL 持久化切换 + 启动错误记录清理 —— 用户生产日志实锤根因修复
+//   journal=delete 模式写事务排他锁阻塞全部读连接 → slow-query 1~5s 堆积 →
+//   Prisma P1008 Socket timeout → JWT 会话错误 / CDP 与多屏控制被判卡死反复重启。
+//   runStartupDbMaintenance 内含：WAL 持久化切换（读写并发解耦）+ 过期会话/
+//   验证码/孤儿2FA凭据清理 + 软删用户唯一字段释放（“已删除用户邮箱仍被
+//   占用导致无法绑定”根因）。全部静默失败，绝不阻塞启动。
+// ============================================================
+if (databaseProvider() === "sqlite" && !globalForPrisma.prisma) {
+  void runStartupDbMaintenance(baseClient).catch(() => { /* 维护失败静默 */ })
+}
 
 // ============================================================
 // r23：log.slowQueryMs 真实生效 —— 慢查询观测扩展

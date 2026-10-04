@@ -37,13 +37,14 @@ export async function createSnapshotAction(input: unknown): Promise<ActionResult
 
     const ws = await db.browserWorkspace.findFirst({ where: { id: p.workspaceId, deletedAt: null } })
     if (!ws || ws.userId !== ctx.userId) throw bizError(ErrorCode.NOT_FOUND, "工作区不存在或无权访问")
-    if (ws.mode !== "cdp_light") {
-      throw bizError(ErrorCode.PARAM_ERROR, "仅 CDP 轻量模式工作区支持导出配置快照")
+    if (ws.mode !== "cdp_light" && ws.mode !== "novnc_full") {
+      throw bizError(ErrorCode.PARAM_ERROR, "不支持的工作区模式")
     }
-    if (ws.status !== "RUNNING") {
-      throw bizError(ErrorCode.RESOURCE_IN_USE, `工作区当前状态为 ${ws.status}，仅运行中可创建快照`)
+    // r35：快照支持 VNC 沙箱（Profile 目录两模式同构：storage/profiles/<userId>/<profileKey>）
+    // 放开 RUNNING 限制：Profile 在磁盘持久化，非运行态也可归档（除外已销毁）
+    if (ws.status === "DESTROYED") {
+      throw bizError(ErrorCode.RESOURCE_IN_USE, "工作区已销毁，Profile 目录已回收")
     }
-    if (!ws.browserSessionId) throw bizError(ErrorCode.RESOURCE_IN_USE, "工作区缺少 浏览器会话标识，无法导出")
 
     // 打包导出浏览器 Profile → archiveKey
     // r24：内嵌形态真实归档——从 hardeningJson 取 profileKey 推导 Profile 目录
@@ -53,7 +54,7 @@ export async function createSnapshotAction(input: unknown): Promise<ActionResult
     const profileKey = (hardening.profileKey as string) || ws.profileSnapshotId || ""
     const { ENV } = await import("@/lib/env")
     const profileDir = profileKey ? `${ENV.storageLocalPath.replace(/\/$/, "")}/profiles/${ws.userId}/${profileKey}` : undefined
-    const exported = await exportProfile(ws.browserSessionId, { profileDir, archivePrefix: `ws-${ws.uuid.slice(0, 8)}` })
+    const exported = await exportProfile(ws.browserSessionId || `ws-${ws.uuid.slice(0, 12)}`, { profileDir, archivePrefix: `ws-${ws.uuid.slice(0, 8)}` })
     if (!exported) throw bizError(ErrorCode.EXTERNAL_SERVICE, "浏览器 Profile 导出失败，请稍后重试")
 
     // 真实导出按归档实际字节数统计；模拟导出使用估算大小

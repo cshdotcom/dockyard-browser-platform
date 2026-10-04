@@ -3,7 +3,7 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { Server, Plus, Loader2, Play, Square, Trash2, Copy, FlaskConical, FileJson, HardDrive, RefreshCw, History, Upload, Boxes, Activity } from "lucide-react"
+import { Server, Plus, Loader2, Play, Square, Trash2, Copy, FlaskConical, FileJson, HardDrive, RefreshCw, History, Upload, Boxes, Activity, Download } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -21,6 +21,7 @@ import {
   rollbackSingboxConfigAction, batchSingboxAction, copySingboxAction, exportSingboxConfigAction, importSingboxAction,
 } from "@/server/actions/singbox"
 import { cn } from "@/lib/utils"
+import { SubscriptionImportDialog } from "./subscription-import-dialog"
 
 export interface SingboxRow {
   id: string; name: string; remark: string; tags: string[]; status: string
@@ -47,6 +48,7 @@ export function SingboxManager(props: Props) {
   const [detail, setDetail] = React.useState<SingboxRow | null>(null)
   const [confirmDestroy, setConfirmDestroy] = React.useState<SingboxRow | null>(null)
   const [importOpen, setImportOpen] = React.useState(false)
+  const [subImportOpen, setSubImportOpen] = React.useState(false)
   const [busyId, setBusyId] = React.useState<string | null>(null)
   const [selectedIds, setSelectedIds] = React.useState<string[]>([])
   const [batchResult, setBatchResult] = React.useState<{ ok: number; fail: number; failures: { name: string; reason: string }[] } | null>(null)
@@ -196,9 +198,12 @@ export function SingboxManager(props: Props) {
         <StatCard title="实例总数" value={props.total} icon={<HardDrive className="h-4 w-4" />} />
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <Button size="sm" onClick={() => setCreateOpen(true)}>
           <Plus className="h-4 w-4 mr-1" /> 新建实例
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => setSubImportOpen(true)} title="订阅链接一键导入：兼容 Base64/明文/Clash YAML，模拟真实客户端解析">
+          <Download className="h-4 w-4 mr-1" /> 订阅一键导入
         </Button>
         <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
           <Upload className="h-4 w-4 mr-1" /> 导入配置JSON
@@ -250,6 +255,7 @@ export function SingboxManager(props: Props) {
       <CreateInstanceDialog open={createOpen} onOpenChange={setCreateOpen} hosts={props.hosts} onDone={() => router.refresh()} />
       <InstanceDetailDialog instance={detail} onClose={() => setDetail(null)} onDone={() => router.refresh()} />
       <ImportDialog open={importOpen} onOpenChange={setImportOpen} onDone={() => router.refresh()} />
+      <SubscriptionImportDialog open={subImportOpen} onOpenChange={setSubImportOpen} />
 
       <ConfirmDialog
         open={!!confirmDestroy}

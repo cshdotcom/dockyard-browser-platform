@@ -451,7 +451,7 @@ export async function manualRecordingStatusAction(input: unknown): Promise<Actio
 export async function manualRecordingControlAction(input: unknown): Promise<ActionResult<{ active: boolean; sessionId: string | null; message: string }>> {
   return actionHandler(async () => {
     const ctx = await requireAuth()
-    const p = zodValidate(z.object({ workspaceId: zId, op: z.enum(["start", "stop"]) }), input)
+    const p = zodValidate(z.object({ workspaceId: zId, op: z.enum(["start", "stop"]), maxMinutes: z.number().int().min(0).max(720).optional() }), input)
     const ws = await db.browserWorkspace.findFirst({
       where: { id: p.workspaceId, deletedAt: null },
       select: { id: true, uuid: true, name: true, userId: true, groupId: true, novncSessionId: true, containerRef: true, hardeningJson: true, status: true },
@@ -466,6 +466,9 @@ export async function manualRecordingControlAction(input: unknown): Promise<Acti
 
     const { startManualRecording, stopManualRecording, manualRecordingStatus, manualSessionId } = await import("@/lib/recording")
     if (p.op === "start") {
+      // r35：定时录屏 —— maxMinutes（0=不限；上限取策略 vnc.recordingMaxMinutes 与 12h 的最小值）
+      const p2 = p as { op: string; maxMinutes?: number }
+      const maxTimer = Math.max(0, Math.min(Number(p2.maxMinutes || 0), 720))
       // 用户端可见性关闭时不允许用户自己发起（管理员不受限）
       if (ctx.role === "USER") {
         const visible = await getConfigBool("vnc.recordingUserVisible", true)
@@ -476,7 +479,7 @@ export async function manualRecordingControlAction(input: unknown): Promise<Acti
           id: ws.id, uuid: ws.uuid, name: ws.name, userId: ws.userId,
           novncSessionId: ws.novncSessionId, containerRef: ws.containerRef, resolution,
         },
-        { operatorUserId: ctx.userId, operatorName: ctx.username },
+        { operatorUserId: ctx.userId, operatorName: ctx.username, maxMinutes: maxTimer || undefined },
       )
       if (!r.started) throw new Error(r.reason || "录屏启动失败")
       return {

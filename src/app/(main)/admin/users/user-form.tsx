@@ -4,7 +4,8 @@
 // r14（22-c）：沙箱闲置超时策略（继承组/无限/自定义分钟 + 锁定开关；编辑时拉取当前策略回显）
 
 import * as React from "react"
-import { Loader2 } from "lucide-react"
+import { Loader2, ShieldAlert, Upload, UserCircle2 } from "lucide-react"
+import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { useRouter } from "next/navigation"
 import {
@@ -93,6 +94,13 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
   const [ttlMinutes, setTtlMinutes] = React.useState(120)
   const [ttlAllowUnlimited, setTtlAllowUnlimited] = React.useState<"inherit" | "yes" | "no">("inherit")
   const [ttlInitial, setTtlInitial] = React.useState<{ max: number | null; allow: boolean | null } | null>(null)
+  // r35：强制 2FA 三态（inherit=继承组/全局 / force=强制 / off=不强制）+ 管理员头像编辑
+  const [force2fa, setForce2fa] = React.useState<"inherit" | "force" | "off">("inherit")
+  const [force2faInitial, setForce2faInitial] = React.useState<"inherit" | "force" | "off">("inherit")
+  const avatarInputRef = React.useRef<HTMLInputElement>(null)
+  const [avatarBusy, setAvatarBusy] = React.useState(false)
+  // r35：用户级企业策略覆盖 JSON
+  const [policyOverrides, setPolicyOverrides] = React.useState("")
 
   React.useEffect(() => {
     if (!open) return
@@ -140,6 +148,12 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
       setTtlMinutes(user.maxTtlMinutes && user.maxTtlMinutes > 0 ? user.maxTtlMinutes : 120)
       setTtlAllowUnlimited(user.allowUnlimitedTtl == null ? "inherit" : user.allowUnlimitedTtl ? "yes" : "no")
       setTtlInitial({ max: user.maxTtlMinutes, allow: user.allowUnlimitedTtl })
+      // r35：强制 2FA 回显
+      const f2faInit: "inherit" | "force" | "off" = user.force2faSetup ? "force" : "off"
+      setForce2fa(f2faInit)
+      setForce2faInitial(f2faInit)
+      // r35：策略覆盖回显
+      setPolicyOverrides(user.managedPolicyOverrides ? (() => { try { return JSON.stringify(JSON.parse(user.managedPolicyOverrides), null, 2) } catch { return user.managedPolicyOverrides } })() : "")
       getUserIdlePolicyAction({ id: user.id })
         .then((res) => {
           if (res.code === 0 && res.data) {
@@ -258,6 +272,10 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
               groupIds: groupIds.length > 0 ? groupIds : undefined,
               quota,
               password: password || undefined,
+              // r35：强制 2FA 三态（变化才提交：force=true / off=false）
+              force2faSetup: force2fa !== force2faInitial ? force2fa === "force" : undefined,
+              // r35：企业策略覆盖 JSON（变化才提交）
+              ...(policyOverrides.trim() !== (user!.managedPolicyOverrides ? (() => { try { return JSON.stringify(JSON.parse(user!.managedPolicyOverrides!)) } catch { return "" } })() : "") ? { managedPolicyOverrides: policyOverrides.trim() } : {}),
             })
 
       if (res.code === 0) {
@@ -376,6 +394,102 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
             </div>
           )}
         </div>
+
+        {/* r35：强制 2FA 三态（用户级覆盖） + 头像编辑 */}
+        {mode === "edit" && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label className="flex items-center gap-1.5">
+                <ShieldAlert className="h-3.5 w-3.5 text-amber-500" /> 强制 2FA（多因素验证）
+              </Label>
+              <div className="flex items-center gap-1.5">
+                {([
+                  { v: "inherit", t: "继承组/全局" },
+                  { v: "force", t: "强制绑定" },
+                  { v: "off", t: "不强制" },
+                ] as const).map((o) => (
+                  <button key={o.v} type="button"
+                    onClick={() => setForce2fa(o.v)}
+                    className={cn(
+                      "flex-1 rounded-md border px-2 py-1.5 text-xs transition-colors",
+                      force2fa === o.v ? "border-primary bg-primary text-primary-foreground" : "hover:bg-accent",
+                    )}
+                    title={o.v === "force" ? "未绑定 2FA 前无法使用任何功能（仅可访问安全设置绑定）" : o.v === "off" ? "解除用户级强制，回落组/全局策略" : "跟随用户组与全局策略"}
+                  >
+                    {o.t}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                当前实际绑定状态：{user?.twoFactorEnabled ? <span className="text-teal-600">已绑定 TOTP</span> : <span className="text-amber-600">未绑定</span>}
+                {force2fa === "force" && !user?.twoFactorEnabled && <span className="text-red-500"> · 强制后该用户将被限制访问直到完成绑定</span>}
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="flex items-center gap-1.5"><UserCircle2 className="h-3.5 w-3.5" /> 用户头像</Label>
+              <div className="flex items-center gap-2 rounded-md border p-2">
+                { }
+                <img
+                  src={`/api/avatar?userId=${user?.id}&v=${user?.hasAvatar ? Date.now() : 0}`}
+                  alt="头像"
+                  className="h-10 w-10 rounded-full border object-cover"
+                />
+                <div className="flex flex-1 flex-wrap gap-1.5">
+                  <Button type="button" size="sm" variant="outline" className="h-7 gap-1" onClick={() => avatarInputRef.current?.click()} disabled={avatarBusy}>
+                    {avatarBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />} 上传头像
+                  </Button>
+                  <Button type="button" size="sm" variant="ghost" className="h-7" disabled={avatarBusy} onClick={async () => {
+                    if (!user) return
+                    setAvatarBusy(true)
+                    try {
+                      const res = await fetch(`/api/avatar?userId=${user.id}`, { method: "DELETE" })
+                      const json = await res.json().catch(() => ({ code: 1, msg: "响应解析失败" }))
+                      if (json.code === 0) toast.success("已恢复默认头像")
+                      else toast.error(json.msg || "删除失败")
+                    } finally { setAvatarBusy(false) }
+                  }}>恢复默认</Button>
+                </div>
+                <input ref={avatarInputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden"
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0]
+                    e.target.value = ""
+                    if (!f || !user) return
+                    setAvatarBusy(true)
+                    try {
+                      const form = new FormData()
+                      form.append("file", f)
+                      form.append("targetUserId", user.id)
+                      const res = await fetch("/api/avatar", { method: "POST", body: form })
+                      const json = await res.json().catch(() => ({ code: 1, msg: "响应解析失败" }))
+                      if (json.code === 0) toast.success("头像已更新（256×256 居中裁剪）")
+                      else toast.error(json.msg || "上传失败")
+                    } finally { setAvatarBusy(false) }
+                  }}
+                />
+              </div>
+              <p className="text-[11px] text-muted-foreground">管理员可替用户上传头像（自动裁剪 256×256 WebP；PNG/JPEG/WebP/GIF ≤ 5MB）</p>
+            </div>
+          </div>
+        )}
+
+        {/* r35：用户级 Chromium 企业策略覆盖（合并优先级：用户 > 用户组 > 模板） */}
+        {mode === "edit" && (
+          <div className="space-y-1.5">
+            <Label className="flex items-center gap-1.5">
+              <ShieldAlert className="h-3.5 w-3.5 text-teal-600" /> 企业策略覆盖（Chromium Managed Policy）
+            </Label>
+            <textarea
+              value={policyOverrides}
+              onChange={(e) => setPolicyOverrides(e.target.value)}
+              placeholder='{\n  "DefaultSearchProviderEnabled": false,\n  "DnsOverHttpsMode": "off",\n  "DeveloperToolsAvailability": 2\n}'
+              className="min-h-[110px] w-full rounded-md border bg-background p-2 font-mono text-xs"
+              spellCheck={false}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              JSON 键值（用户级最高优先）。可用键：搜索引擎套件/DNS(DoH)/DevTools 控制台/下载/无痕/密码管理等 40+ 项。非法键将被忽略并审计。
+            </p>
+          </div>
+        )}
 
         {/* 所属组多选 */}
         <div className="space-y-1.5">

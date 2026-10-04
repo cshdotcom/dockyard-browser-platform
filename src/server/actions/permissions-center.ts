@@ -140,6 +140,7 @@ export async function listPermissionTargetsAction(input: unknown): Promise<Actio
 const SANDBOX_GRANT_KEYS: PermissionLockKey[] = [
   "blockCreateWorkspace", "blockModifyWorkspace", "blockBatchOps", "blockModifyResourceExpiry",
   "blockSwitchVncMode", "blockCustomVncResolution", "blockShareWorkspace", "blockRefreshVncKey",
+  "blockRestartInstance",
 ]
 
 export async function batchSetPermissionLocksAction(input: unknown): Promise<ActionResult<{

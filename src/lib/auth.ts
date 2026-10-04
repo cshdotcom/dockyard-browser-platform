@@ -14,10 +14,12 @@ import { sendMail, remoteLoginAlertTemplate } from "./email"
 
 export interface TicketClaims {
   sub: string // userId
-  typ: "LOGIN" | "2FA" | "FORCE_SETUP"
+  typ: "LOGIN" | "2FA" | "FORCE_SETUP" | "IMPERSONATE"
   remember: boolean
   jti: string
   exp: number
+  impBy?: string // r35：模拟登录发起人（SUPER_ADMIN userId）
+  impName?: string // 发起人用户名
 }
 
 // 简易 JWT 签发/校验（ticket 用，HMAC-SHA256）
@@ -44,10 +46,10 @@ function verify(ticket: string): TicketClaims | null {
   }
 }
 
-export function issueLoginTicket(userId: string, typ: TicketClaims["typ"], remember: boolean): { ticket: string; jti: string } {
+export function issueLoginTicket(userId: string, typ: TicketClaims["typ"], remember: boolean, extra?: { impBy?: string; impName?: string }): { ticket: string; jti: string } {
   const jti = crypto.randomUUID()
   const exp = Math.floor(Date.now() / 1000) + 300 // ticket 5分钟有效
-  return { ticket: sign({ sub: userId, typ, remember, jti, exp }), jti }
+  return { ticket: sign({ sub: userId, typ, remember, jti, exp, ...(extra || {}) }), jti }
 }
 
 export function verifyLoginTicket(ticket: string): TicketClaims | null {
@@ -316,10 +318,17 @@ export const authOptions: NextAuthOptions = {
           sessionHash,
           jti,
           force2faSetup: claims.typ === "FORCE_SETUP",
+          // r35：模拟登录发起人（会话标记 → 顶部横幅）
+          ...(claims.typ === "IMPERSONATE" && claims.impBy ? {
+            impersonatorId: claims.impBy,
+            impersonatorName: claims.impName || "super-admin",
+          } : {}),
         } as unknown as {
           id: string
           name: string
           email: string | null
+          impersonatorId?: string
+          impersonatorName?: string
         }
       },
     }),
@@ -335,6 +344,8 @@ export const authOptions: NextAuthOptions = {
           jti: string
           force2faSetup: boolean
           displayName?: string | null
+          impersonatorId?: string
+          impersonatorName?: string
         }
         token.uid = u.id
         token.role = u.role
@@ -343,6 +354,11 @@ export const authOptions: NextAuthOptions = {
         token.jti = u.jti
         token.force2faSetup = u.force2faSetup
         token.displayName = u.displayName
+        // r35：模拟登录标记（impersonate ticket 携带发起人）
+        if (u.impersonatorId) {
+          token.impersonatorId = u.impersonatorId
+          token.impersonatorName = u.impersonatorName || "super-admin"
+        }
       }
       return token
     },
@@ -391,6 +407,9 @@ export const authOptions: NextAuthOptions = {
       ;(session.user as Record<string, unknown>).loginSessionId = sid
       ;(session.user as Record<string, unknown>).sessionValid = valid
       ;(session.user as Record<string, unknown>).needs2faSetup = needs2faSetup && valid
+      // r35：模拟登录信息（AppShell 顶部横幅提示 + 退出模拟）
+      ;(session.user as Record<string, unknown>).impersonatorId = token.impersonatorId as string | undefined
+      ;(session.user as Record<string, unknown>).impersonatorName = token.impersonatorName as string | undefined
       return session
     },
   },

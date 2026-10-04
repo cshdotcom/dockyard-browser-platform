@@ -4,7 +4,7 @@ import { z } from "zod"
 import crypto from "crypto"
 import { Prisma } from "@prisma/client"
 import { db } from "@/lib/db"
-import { requireAuth, checkSessionQuota, userGroupIds, requireWritableMode, requirePermission, requireAdmin } from "@/lib/permissions"
+import { requireAuth, checkSessionQuota, userGroupIds, requireWritableMode, requirePermission, requireAdmin, isPermissionLocked } from "@/lib/permissions"
 import { actionHandler, type ActionResult } from "@/lib/api"
 import { writeAudit } from "@/lib/audit"
 import { encrypt, decrypt, randomHex } from "@/lib/crypto"
@@ -79,6 +79,38 @@ async function resolveExitGuard(templateConfig: Record<string, unknown>): Promis
 }
 
 // 模板级 Chromium 企业策略项（目录校验不过 → 静默忽略并审计告警）
+// r35：用户/组级 Chromium 企业策略覆盖（合并优先级：用户 > 用户组 > 模板 extraManagedPolicy；
+// 安全键 SECURITY_OWNED_KEYS 在 buildChromiumManagedPolicy 后置注入不可被覆盖 —— 网络锁定永不失效）
+async function resolveUserPolicyOverrides(userId: string): Promise<Record<string, unknown>> {
+  try {
+    const user = await db.user.findUnique({ where: { id: userId }, select: { managedPolicyOverrides: true } })
+    const groupRows = await db.groupUser.findMany({ where: { userId }, select: { groupId: true } })
+    const groups = groupRows.length > 0
+      ? await db.group.findMany({ where: { id: { in: groupRows.map((g) => g.groupId) }, enabled: true }, select: { managedPolicyOverrides: true } })
+      : []
+    const merged: Record<string, unknown> = {}
+    // 组级（多组按创建顺序合并，后组覆盖前组 —— 与配额链"取首个非空"相比策略取并集覆盖，安全键不受影响）
+    for (const g of groups) {
+      if (!g.managedPolicyOverrides) continue
+      try { Object.assign(merged, JSON.parse(g.managedPolicyOverrides)) } catch { /* 组级 JSON 损坏静默忽略 */ }
+    }
+    // 用户级（最高优先）
+    if (user?.managedPolicyOverrides) {
+      try { Object.assign(merged, JSON.parse(user.managedPolicyOverrides)) } catch { /* 用户级 JSON 损坏静默忽略 */ }
+    }
+    const { validateExtraPolicies } = await import("@/lib/chromium-policies")
+    const v = validateExtraPolicies(merged)
+    if (!v.ok) {
+      await writeAudit({
+        operationType: "WORKSPACE_POLICY_INVALID", resourceType: "USER", resourceId: userId,
+        severity: "WARN", extra: { errors: v.errors, action: "用户/组级策略覆盖校验未过 → 已忽略注入" },
+      }).catch(() => null)
+      return {}
+    }
+    return merged
+  } catch { return {} }
+}
+
 async function resolveTemplatePolicies(templateId?: string | null): Promise<{ policyJson: Record<string, unknown> | null; exitGuardConfig: Record<string, unknown> }> {
   if (!templateId) return { policyJson: null, exitGuardConfig: {} }
   const tpl = await db.browserTemplate.findFirst({ where: { id: templateId, deletedAt: null }, select: { configJson: true } })
@@ -177,6 +209,10 @@ const createSchema = z.object({
   idleTimeoutMinutes: zPrecision("闲置超时", 0, 1440).optional().default(60), // 0=无限（永不闲置回收）
   resolution: z.string().optional().default("1920x1080"),
   tags: z.string().optional().default(""),
+  // r35：网页模式（kiosk）—— Chromium --kiosk 启动指定 URL（无浏览器控制栏）；
+  // 权限：全局 security.allowWebKiosk + 用户/组权限锁 blockWebKiosk（授予才可创建）
+  kioskMode: z.boolean().optional().default(false),
+  kioskStartUrl: z.string().max(2048).optional().nullable(),
 })
 
 // ---- 创建工作区（幂等 + 配额 + 预留水位 + 风控 + 行为画像）----
@@ -208,6 +244,13 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
 
     // 代理节点权限校验
     if (p.proxyNodeId) await checkProxyAccess(ctx.userId, p.proxyNodeId)
+
+    // r35：网页模式权限（全局开关 + 用户级权限锁；授予才可创建）
+    if (p.kioskMode) {
+      const allow = (await getConfigBool("security.allowWebKiosk", false)) && !(await isPermissionLocked(ctx.userId, "blockWebKiosk"))
+      if (!allow) throw new Error("网页模式未开放（需管理员在安全配置开启且未对该用户/组禁用）")
+      if (!/^https?:\/\//i.test(p.kioskStartUrl || "")) throw new Error("网页模式必须指定 http/https 起始 URL")
+    }
 
     // r14（22-c）：闲置超时四级策略链解析（沙箱>用户>组>全局）
     // 表单默认值=策略链解析值（页面传入）；锁定态普通用户传入值被忽略并静默采用解析值（审计留痕）
@@ -300,7 +343,8 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
       // r27：录像策略四级链 + 防退出档位 + 模板策略项（创建链路一次解析）
       const rec = await resolveRecordingBundle(ctx.userId)
       const tplPol = await resolveTemplatePolicies(p.templateId)
-      const exitGuard = await resolveExitGuard(tplPol.exitGuardConfig)
+      // r35：网页模式（kiosk）—— 沙箱级 exitGuard 强制 kiosk 档（--kiosk --noerrdialogs --disable-infobars）
+      const exitGuard = p.kioskMode ? "kiosk" as const : await resolveExitGuard(tplPol.exitGuardConfig)
       // r29-a：17 项硬件权限四级链（创建链路一次解析 → Managed Preferences 注入 + 硬化快照）
       const hw = await resolveHardwarePolicy(ctx.userId).catch(() => null)
       const hwManaged = hw ? hardwareManagedPolicies(hw.policy) : null
@@ -314,7 +358,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         profileKey,
         cpuLimit: (templateConfig.cpuLimit as number) || undefined,
         memLimitMb: (templateConfig.memLimitMb as number) || undefined,
-        startUrl: (templateConfig.startUrl as string) || undefined,
+        startUrl: p.kioskMode ? (p.kioskStartUrl || undefined) : ((templateConfig.startUrl as string) || undefined),
         labels: { "dockyard.owner": ctx.userId, "dockyard.profile-key": profileKey },
         networkPolicy: netPolicy,
         // r24-c/d/e：偏好输入法/布局随会话应用；VNC X 剪贴板透传受全局开关管控；
@@ -330,7 +374,7 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         // r27：录像 + 防退出 + 模板策略项
         recording: rec.policy.enabled ? { enabled: true, ...rec.tuning, maxSec: rec.tuning.maxMinutes > 0 ? rec.tuning.maxMinutes * 60 : 0 } : undefined,
         exitGuard,
-        extraManagedPolicy: tplPol.policyJson,
+        extraManagedPolicy: { ...(tplPol.policyJson || {}), ...(await resolveUserPolicyOverrides(ctx.userId)) }, // r35：用户/组级覆盖合并（优先级 用户>组>模板）
         // r29-a：硬件权限策略键（四级链；安全层高于模板）
         hardwareManagedPolicy: hwManaged,
       })
@@ -344,6 +388,8 @@ export async function createWorkspaceAction(input: unknown): Promise<ActionResul
         data: {
           name: p.name,
           mode: "novnc_full",
+          kioskMode: p.kioskMode,
+          kioskStartUrl: p.kioskMode ? (p.kioskStartUrl || null) : null,
           status: "RUNNING",
           uuid: wsUuid, // r24-e：与沙箱专属 Linux 用户命名同源（创建前已传给会话引擎）
           startedAt: new Date(),
@@ -446,7 +492,8 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
       // r27：录像策略（含沙箱级覆盖）+ 防退出/模板策略项（重建链路同步刷新）
       const rec = await resolveRecordingBundle(ws.userId, ws.id)
       const tplPol = await resolveTemplatePolicies(ws.templateId)
-      const exitGuard = await resolveExitGuard(tplPol.exitGuardConfig)
+      // r35：网页模式（kiosk）沙箱重建保持 kiosk 档 + 起始 URL
+      const exitGuard = ws.kioskMode ? "kiosk" as const : await resolveExitGuard(tplPol.exitGuardConfig)
       // r29-a：硬件权限四级链（含沙箱级覆盖，重建链路同步刷新）
       const hwRe = await resolveHardwarePolicy(ws.userId, ws.id).catch(() => null)
       const hwReManaged = hwRe ? hardwareManagedPolicies(hwRe.policy) : null
@@ -458,6 +505,7 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
           ttlMinutes: ws.ttlMinutes || undefined,
           profileMount: ws.profileSnapshotId ? `snapshots/${ws.profileSnapshotId}` : undefined,
           userId: ws.userId,
+          startUrl: ws.kioskMode ? (ws.kioskStartUrl || undefined) : undefined,
           profileKey,
           workspaceId: ws.id, // CRX/网络/域名/端点/文件策略按沙箱级解析注入
           labels: { "dockyard.owner": ws.userId, "dockyard.profile-key": profileKey },
@@ -474,7 +522,7 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
           // r27：录像 + 防退出 + 模板策略项
           recording: rec.policy.enabled ? { enabled: true, ...rec.tuning, maxSec: rec.tuning.maxMinutes > 0 ? rec.tuning.maxMinutes * 60 : 0 } : undefined,
           exitGuard,
-          extraManagedPolicy: tplPol.policyJson,
+          extraManagedPolicy: { ...(tplPol.policyJson || {}), ...(await resolveUserPolicyOverrides(ws.userId)) }, // r35：用户/组级覆盖合并（优先级 用户>组>模板）
           // r29-a：硬件权限策略键（含沙箱级覆盖）
           hardwareManagedPolicy: hwReManaged,
         })
@@ -525,6 +573,127 @@ export async function startWorkspaceAction(input: unknown): Promise<ActionResult
       before: { status: ws.status }, after: { status: "RUNNING" },
     })
     return null
+  })
+}
+
+// ---- r35：VNC↔CDP 模式升降级（数据保留）----
+// 用户诉求："支持 VNC↔CDP 互相升降级且保留数据"。
+// 数据通道：内嵌沙箱 Profile 持久化于 storage/profiles/<userId>/<profileKey>（两模式同构）。
+// 升降级流程：
+//   ① 当前 Profile 目录 tar 归档 → BrowserProfileSnapshot + FileMeta（入档可追溯）
+//   ② 归档解包到新 profileKey 目录（<snapshotId>）→ 下一模式以该 profileKey 启动即真实恢复
+//   ③ 销毁旧模式会话 → 更新 mode/profileSnapshotId → 自动以新模式拉起
+// 权限：所有者/管理员 + OPERATE（写入模式）；审计 WORKSPACE_MODE_SWITCH。
+export async function switchWorkspaceModeAction(input: unknown): Promise<ActionResult<{ id: string; mode: string; restarted: boolean }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    await requireWritableMode()
+    await requirePermission(ctx.userId, "blockRestartInstance", "实例操作已被权限锁禁止")
+    const p = zodValidate(z.object({ id: z.string(), targetMode: z.enum(["cdp_light", "novnc_full"]) }), input)
+
+    const ws = await db.browserWorkspace.findFirst({ where: { id: p.id, deletedAt: null } })
+    if (!ws) throw new Error("工作区不存在")
+    if (ctx.userId !== ws.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作该工作区")
+    if (ws.mode === p.targetMode) throw new Error(`工作区已处于 ${p.targetMode === "novnc_full" ? "VNC 完整模式" : "CDP 轻量模式"}`)
+    if (ws.status === "FROZEN") throw new Error("工作区已被管理员离线冻结封存，冻结期间禁止切换模式")
+
+    // ①② 数据迁移：当前 Profile 归档 → 快照记录 → 解包到新 profileKey 目录
+    const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
+    const srcProfileKey = (prevHardening.profileKey as string) || ws.profileSnapshotId || ""
+    const storageRoot = ENV.storageLocalPath.replace(/\/$/, "")
+    const profileDir = srcProfileKey ? `${storageRoot}/profiles/${ws.userId}/${srcProfileKey}` : ""
+    let migrated = false
+    let newProfileKey = ""
+    const { spawnSync } = await import("child_process")
+    const { access, mkdir, stat } = await import("fs/promises")
+    const { join } = await import("path")
+    try {
+      if (profileDir) await access(profileDir)
+      if (profileDir && ws.status !== "DESTROYED") {
+        // 归档（压缩级别速度优先 —— 升降级交互场景）
+        const snapId = crypto.randomUUID().replace(/-/g, "").slice(0, 16)
+        const archiveKey = `mig-${ws.uuid.slice(0, 8)}-${Date.now()}-${snapId}.tar.gz`
+        const snapsDir = join(storageRoot, "snapshots")
+        await mkdir(snapsDir, { recursive: true })
+        const archivePath = join(snapsDir, archiveKey)
+        const r = spawnSync("tar", ["-czf", archivePath, "-C", profileDir, "."], { timeout: 120_000 })
+        if (r.status === 0) {
+          const st = await stat(archivePath)
+          // 解包到新 profileKey 目录（下一模式启动挂载同一 Profile 数据）
+          newProfileKey = snapId
+          const destDir = join(storageRoot, "profiles", ws.userId, newProfileKey)
+          await mkdir(destDir, { recursive: true })
+          const r2 = spawnSync("tar", ["-xzf", archivePath, "-C", destDir], { timeout: 120_000 })
+          if (r2.status === 0) migrated = true
+        }
+        if (migrated) {
+          await db.fileMeta.create({
+            data: {
+              fileName: `模式切换归档-${ws.name}.tar.gz`,
+              storageKey: archiveKey,
+              size: (await stat(archivePath)).size,
+              mime: "application/gzip",
+              category: "SNAPSHOT",
+              userId: ws.userId,
+              workspaceId: ws.id,
+              createdByUserId: ctx.userId,
+            },
+          }).catch(() => {})
+          await db.browserProfileSnapshot.create({
+            data: {
+              name: `模式切换归档（${ws.mode === "novnc_full" ? "VNC→CDP" : "CDP→VNC"}）`,
+              scope: "PRIVATE",
+              userId: ws.userId,
+              workspaceId: ws.id,
+              sizeBytes: (await stat(archivePath)).size,
+              storageKey: archiveKey,
+              createdByUserId: ctx.userId,
+            },
+          }).catch(() => {})
+        }
+      }
+    } catch {
+      // Profile 目录缺失（首次/演示形态）→ 无数据可迁移，直接切换（不阻断）
+    }
+
+    // ③ 销毁旧会话 → 切 mode → 自动拉起
+    if (ws.status === "RUNNING" || ws.status === "CREATING") {
+      if (ws.mode === "cdp_light" && ws.browserSessionId) await destroySession(ws.browserSessionId).catch(() => {})
+      if (ws.mode === "novnc_full" && ws.novncSessionId) await destroyNovncSession(ws.novncSessionId, ws.containerRef).catch(() => {})
+    }
+    const runtimeDelta = ws.startedAt ? Math.max(0, Math.floor((Date.now() - ws.startedAt.getTime()) / 1000)) : 0
+    await db.browserWorkspace.update({
+      where: { id: ws.id },
+      data: {
+        mode: p.targetMode,
+        status: "STOPPED",
+        browserSessionId: null,
+        cdpUrl: null,
+        novncSessionId: null,
+        startedAt: null,
+        runtimeAccumSec: { increment: runtimeDelta },
+        ...(migrated && newProfileKey ? {
+          profileSnapshotId: newProfileKey,
+          hardeningJson: { ...prevHardening, profileKey: newProfileKey, migratedFrom: ws.mode, migratedAt: new Date().toISOString() } as unknown as Prisma.InputJsonValue,
+        } : {}),
+      },
+    })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_MODE_SWITCH",
+      resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
+      ownerUserId: ws.userId, createdByUserId: ws.createdByUserId,
+      before: { mode: ws.mode }, after: { mode: p.targetMode, profileMigrated: migrated, snapshotKey: newProfileKey || null },
+      severity: "WARN",
+    })
+    await trackBehavior(ctx.userId, "CREATE").catch(() => {})
+
+    // 自动以新模式拉起（原为运行态才拉起；停止态仅切换保持 STOPPED）
+    let restarted = false
+    if (ws.status === "RUNNING") {
+      const startRes = await startWorkspaceAction({ id: ws.id })
+      restarted = startRes.code === 0
+    }
+    return { id: ws.id, mode: p.targetMode, restarted }
   })
 }
 

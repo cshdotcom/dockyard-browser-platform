@@ -21,10 +21,12 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { MultiSelectPopover } from "@/components/shared/multi-select-popover"
 import { getFileExplorerPrefsAction, saveFileExplorerPrefsAction, type ExplorerFavorite, type ExplorerTabPref } from "@/server/actions/explorer-prefs"
+import { SuperEditor } from "./super-editor"
+import { ImageCropperDialog } from "./image-cropper"
 import {
   Folder, File, FileText, Image as ImageIcon, Video, Music, Archive, Binary,
   ChevronLeft, ChevronRight, Trash2, RotateCcw, Search, Download, Upload, Plus, Pencil,
-  Copy, MoveRight, PackageOpen, Share2, X, Loader2, Home, HardDrive, Server, Eye, Save, ChevronUp, ChevronDown, Clock,
+  Copy, MoveRight, PackageOpen, Share2, X, Loader2, Home, HardDrive, Server, Eye, Save, ChevronUp, ChevronDown, Clock, Crop,
   Star, MoreVertical, FolderInput,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -60,49 +62,6 @@ const KIND_ICON: Record<string, React.ReactNode> = {
 }
 
 // ---- 轻量 Markdown 渲染（标题/粗斜/行内代码/代码块/列表/引用/链接/分隔线） ----
-function renderMarkdown(src: string): string {
-  const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-  const lines = esc(src).split("\n")
-  const out: string[] = []
-  let inCode = false
-  let inList = false
-  for (const raw of lines) {
-    if (/^```/.test(raw)) {
-      if (inList) { out.push("</ul>"); inList = false }
-      out.push(inCode ? "</code></pre>" : '<pre class="bg-muted rounded p-3 overflow-x-auto text-xs"><code>')
-      inCode = !inCode
-      continue
-    }
-    if (inCode) { out.push(raw); continue }
-    const line = raw
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*(.+?)\*/g, "<em>$1</em>")
-      .replace(/`(.+?)`/g, '<code class="bg-muted px-1 rounded text-xs">$1</code>')
-      .replace(/\[(.+?)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" class="text-primary underline">$1</a>')
-    if (/^---+$/.test(line.trim())) { if (inList) { out.push("</ul>"); inList = false }; out.push('<hr class="my-3 border-border"/>'); continue }
-    const h = /^(#{1,4})\s+(.*)$/.exec(line)
-    if (h) {
-      if (inList) { out.push("</ul>"); inList = false }
-      const size = ["text-xl", "text-lg", "text-base", "text-sm"][h[1].length - 1]
-      out.push(`<div class="${size} font-semibold mt-3 mb-1">${h[2]}</div>`)
-      continue
-    }
-    if (/^[*-]\s+/.test(line)) {
-      if (!inList) { out.push('<ul class="list-disc pl-5 my-1 space-y-0.5">'); inList = true }
-      out.push(`<li>${line.replace(/^[*-]\s+/, "")}</li>`)
-      continue
-    }
-    if (inList) { out.push("</ul>"); inList = false }
-    if (line.trim().startsWith("&gt;")) {
-      out.push(`<blockquote class="border-l-2 border-primary/40 pl-3 text-muted-foreground my-1">${line.trim().slice(4)}</blockquote>`)
-      continue
-    }
-    out.push(`<p class="my-1">${line || "&nbsp;"}</p>`)
-  }
-  if (inList) out.push("</ul>")
-  if (inCode) out.push("</code></pre>")
-  return out.join("\n")
-}
 
 interface EditorState {
   domain: Domain
@@ -357,6 +316,7 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
   }, [focusHit])
 
   const [preview, setPreview] = useState<FileEntry | null>(null)
+  const [cropTarget, setCropTarget] = useState<FileEntry | null>(null)
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [searchState, setSearchState] = useState<SearchState>({ open: false, keyword: "", recursive: true, content: false, hits: [], tookMs: 0, truncated: false, searched: false })
   const [createOpen, setCreateOpen] = useState(false)
@@ -550,16 +510,6 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
       content: res.data.content, truncated: res.data.truncated, dirty: false,
       mode: "edit", isHtml: /\.html?$/i.test(e.name) || /\.md$/i.test(e.name),
     })
-  }
-
-  const saveEditor = async () => {
-    if (!editor) return
-    const res = await writeFileAction({ domain, path: editor.path, content: editor.content })
-    if (res.code === 0) {
-      toast.success(`已保存（${fmtBytes(res.data?.size || 0)}）`)
-      setEditor({ ...editor, dirty: false })
-      void reload()
-    } else toast.error(res.msg || "保存失败")
   }
 
   const openPreview = (e: FileEntry) => {
@@ -1073,46 +1023,25 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
         </div>
       )}
 
-      {/* ====== 编辑器弹窗 ====== */}
+      {/* ====== 超级编辑器弹窗（r35：行号+工具栏+可视化+查找替换） ====== */}
       {editor && (
         <Dialog open onOpenChange={(v) => { if (!v) { if (!editor.dirty || confirm("有未保存修改，确定关闭？")) setEditor(null) } }}>
-          <DialogContent className="max-w-5xl max-h-[90vh] flex flex-col">
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2 text-base">
-                <Pencil className="h-4 w-4" />{editor.name}
-                {editor.truncated && <span className="text-xs text-amber-500">（超过 2MB 已截断显示）</span>}
-                {editor.dirty && <span className="text-xs text-red-500">●未保存</span>}
-              </DialogTitle>
-            </DialogHeader>
-            {editor.isHtml && (
-              <Tabs value={editor.mode} onValueChange={(v) => setEditor({ ...editor, mode: v as "edit" | "preview" })}>
-                <TabsList>
-                  <TabsTrigger value="edit">编辑</TabsTrigger>
-                  <TabsTrigger value="preview">预览</TabsTrigger>
-                </TabsList>
-              </Tabs>
-            )}
-            <div className="flex-1 min-h-0">
-              {editor.mode === "edit" || !editor.isHtml ? (
-                <textarea
-                  value={editor.content}
-                  onChange={(ev) => setEditor({ ...editor, content: ev.target.value, dirty: true })}
-                  className="w-full h-[52vh] font-mono text-xs p-3 rounded border bg-background resize-none focus:outline-none focus:ring-1 focus:ring-primary"
-                  spellCheck={false}
-                />
-              ) : /\.html?$/i.test(editor.name) ? (
-                <iframe srcDoc={editor.content} sandbox="allow-same-origin" className="w-full h-[52vh] rounded border bg-white" title="HTML 预览" />
-              ) : (
-                <div className="h-[52vh] overflow-y-auto p-4 rounded border bg-background">
-                  <div className="max-w-none text-sm" dangerouslySetInnerHTML={{ __html: renderMarkdown(editor.content) }} />
-                </div>
-              )}
-            </div>
-            <DialogFooter>
-              <span className="text-xs text-muted-foreground mr-auto">{fmtBytes(new Blob([editor.content]).size)}</span>
-              {editor.mode === "preview" && <Button variant="outline" size="sm" onClick={() => setEditor({ ...editor, mode: "edit" })}>返回编辑</Button>}
-              <Button size="sm" className="gap-1.5" onClick={() => void saveEditor()} disabled={!editor.dirty}><Save className="h-3.5 w-3.5" />保存</Button>
-            </DialogFooter>
+          <DialogContent className="max-w-6xl h-[88vh] flex flex-col p-0 gap-0 overflow-hidden [&>button]:absolute [&>button]:right-4 [&>button]:top-4 [&>button]:z-20">
+            <SuperEditor
+              name={editor.name}
+              content={editor.content}
+              truncated={editor.truncated}
+              readOnly={!canWrite}
+              onSave={async (content) => {
+                const res = await writeFileAction({ domain, path: editor.path, content })
+                if (res.code === 0) {
+                  toast.success(`已保存（${fmtBytes(res.data?.size || 0)}）`)
+                  setEditor({ ...editor, content, dirty: false })
+                  void reload()
+                } else toast.error(res.msg || "保存失败")
+              }}
+              onClose={() => { if (!editor.dirty || confirm("有未保存修改，确定关闭？")) setEditor(null) }}
+            />
           </DialogContent>
         </Dialog>
       )}
@@ -1124,7 +1053,6 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
             <DialogHeader><DialogTitle className="flex items-center gap-2 text-base">{KIND_ICON[preview.kind]}{preview.name}</DialogTitle></DialogHeader>
             <div className="flex items-center justify-center bg-black/5 rounded p-2 min-h-[200px]">
               {preview.kind === "image" && (
-                 
                 <img src={rawUrl(preview, "preview")} alt={preview.name} className="max-h-[64vh] max-w-full object-contain" />
               )}
               {preview.kind === "video" && <video src={rawUrl(preview, "preview")} controls className="max-h-[64vh] w-full" />}
@@ -1133,10 +1061,28 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
             </div>
             <DialogFooter>
               <span className="text-xs text-muted-foreground mr-auto">{fmtBytes(preview.size)}</span>
+              {preview.kind === "image" && canWrite && domain !== "RECORDING" && domain !== "SCREENSHOT" && (
+                <Button variant="outline" size="sm" className="gap-1.5" onClick={() => { setCropTarget(preview); setPreview(null) }} title="在线裁剪并保存为新文件">
+                  <Crop className="h-3.5 w-3.5" />在线裁剪
+                </Button>
+              )}
               <a href={rawUrl(preview, "download")} className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-3 text-sm hover:bg-primary/90"><Download className="h-3.5 w-3.5" />下载</a>
             </DialogFooter>
           </DialogContent>
         </Dialog>
+      )}
+
+      {/* ====== 图片在线裁剪弹窗（r35） ====== */}
+      {cropTarget && (
+        <ImageCropperDialog
+          open
+          onOpenChange={(v) => { if (!v) setCropTarget(null) }}
+          imageUrl={rawUrl(cropTarget, "preview")}
+          fileName={cropTarget.name}
+          domain={domain}
+          dir={curPath}
+          onDone={() => { setCropTarget(null); void reload() }}
+        />
       )}
 
       {/* ====== 新建弹窗 ====== */}

@@ -2,13 +2,14 @@
 // 配置通过容器环境变量 DY_SINGBOX_CONFIG 注入 sing-box 容器，不落地磁盘
 
 export interface SingboxOutbound {
-  type: "vless" | "vmess" | "trojan" | "socks" | "http" | "direct" | "block"
+  type: "vless" | "vmess" | "trojan" | "socks" | "http" | "shadowsocks" | "direct" | "block"
   tag: string
   server?: string
   serverPort?: number
   uuid?: string
   userId?: string
   password?: string
+  method?: string // shadowsocks 加密方法
   security?: string
   transport?: {
     type: "tcp" | "ws" | "grpc"
@@ -84,6 +85,7 @@ export function assembleSingboxConfig(form: SingboxFormConfig): Record<string, u
     if (o.password) ob.password = o.password
     if (o.security) ob.security = o.security
     if (o.flow) ob.flow = o.flow
+    if (o.method) ob.method = o.method
     if (o.transport) {
       const tr: Record<string, unknown> = { type: o.transport.type }
       if (o.transport.path) tr.path = o.transport.path

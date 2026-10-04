@@ -39,11 +39,14 @@ export const MCP_OPERATIONS: McpOpDef[] = [
     description: "批量创建浏览器工作区",
     batch: true,
     perm: TOKEN_PERM.WRITE,
-    schema: { namePrefix: "string", count: "number(1-100)", mode: "cdp_light|novnc_full", proxyNodeId: "string?", ttlMinutes: "number?" },
+    schema: { namePrefix: "string", count: "number(1-100)", mode: "cdp_light|novnc_full", proxyNodeId: "string?", ttlMinutes: "number?", kioskMode: "boolean?（网页模式：纯网页内容显示，需管理员授权）", kioskStartUrl: "string?（网页模式起始 URL，http/https）" },
     async execute(ctx, params, targets) {
       const count = Math.min(Number(params.count || targets.length || 1), 100)
       const namePrefix = String(params.namePrefix || "mcp-ws")
       const mode = params.mode === "novnc_full" ? "novnc_full" : "cdp_light"
+      // r35：网页模式（kiosk）—— MCP/API 创建通道（需 security.allowWebKiosk 授权链）
+      const kioskMode = mode === "novnc_full" && params.kioskMode === true
+      const kioskStartUrl = typeof params.kioskStartUrl === "string" ? params.kioskStartUrl.slice(0, 2048) : null
       let success = 0
       const failures: { target: string; reason: string }[] = []
       for (let i = 0; i < count; i++) {
@@ -55,6 +58,8 @@ export const MCP_OPERATIONS: McpOpDef[] = [
             proxyNodeId: params.proxyNodeId || null,
             ttlMinutes: Number(params.ttlMinutes || 0),
             idleTimeoutMinutes: 60,
+            kioskMode,
+            kioskStartUrl,
           })
           if (res.code === 0) success++
           else failures.push({ target: `${i + 1}`, reason: res.msg })

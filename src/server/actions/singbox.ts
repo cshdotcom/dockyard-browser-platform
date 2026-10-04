@@ -13,6 +13,7 @@ import { createContainer, startContainer, stopContainer, removeContainer, inspec
 import { raiseAlert } from "@/lib/alerts"
 import { moveToRecycle } from "@/lib/recycle"
 import { trackBehavior } from "@/lib/risk"
+import { parseSubscriptionContent, assertPublicSubscriptionUrl, type ParsedNode } from "@/lib/subscription-parser"
 
 // ============================================================
 // Sing-Box 实例编排 Server Actions
@@ -22,13 +23,14 @@ import { trackBehavior } from "@/lib/risk"
 // ============================================================
 
 const outboundSchema = z.object({
-  type: z.enum(["vless", "vmess", "trojan", "socks", "http"]),
+  type: z.enum(["vless", "vmess", "trojan", "socks", "http", "shadowsocks"]),
   tag: z.string().min(1).max(64),
   server: z.string().max(255).optional().default(""),
   serverPort: z.coerce.number().int().min(1).max(65535).optional(),
   uuid: z.string().max(64).optional(),
   userId: z.string().max(64).optional(),
   password: z.string().max(128).optional(),
+  method: z.string().max(64).optional(),
   security: z.string().max(32).optional(),
   flow: z.string().max(64).optional(),
   transport: z.object({
@@ -486,6 +488,131 @@ export async function importSingboxAction(input: unknown): Promise<ActionResult<
       routeRules: [], dns: { servers: (parsed.configJson as { dns?: { servers?: unknown[] } }).dns?.servers || [{ tag: "local", address: "local" }] },
     })
     return { id: result.data?.id || "" }
+  })
+}
+
+// ---- r35：订阅一键导入（用户点名：完全模拟真实客户端解析）----
+// 两步流：① parseSubscriptionAction 拉取+解析预览（不创建）② importSubscriptionAction 一键创建实例
+
+export async function parseSubscriptionAction(input: unknown): Promise<ActionResult<{
+  format: string; total: number; failed: number
+  nodes: Array<{ tag: string; type: string; server: string; serverPort: number; name: string }>
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAdmin()
+    const { url, content } = zodValidate(z.object({
+      url: z.string().max(2048).optional().default(""),
+      content: z.string().max(2 * 1024 * 1024).optional().default(""),
+    }), input)
+
+    let text = content || ""
+    let sourceLabel = "粘贴内容"
+    if (url) {
+      const u = assertPublicSubscriptionUrl(url) // SSRF 防护：拒绝内网/回环/元数据
+      if (!rateLimit(`sub-fetch:${ctx.userId}`, 10, 60_000).allowed) throw new Error("订阅拉取过于频繁（每分钟 10 次）")
+      const res = await fetch(u.toString(), {
+        signal: AbortSignal.timeout(15_000),
+        headers: {
+          "User-Agent": "DockyardPlatform/1.0 (singbox-subscriber; compatible clash-verge v2rayN)",
+          Accept: "*/*",
+        },
+        redirect: "follow",
+      }).catch((e: Error) => { throw new Error(`订阅拉取失败：${e.message}`) })
+      if (!res.ok) throw new Error(`订阅源返回 HTTP ${res.status}`)
+      const ct = res.headers.get("content-type") || ""
+      if (ct.includes("text/html") && !content) throw new Error("订阅地址返回的是网页而非订阅内容（请检查链接是否为订阅直链）")
+      text = (await res.text()).slice(0, 2 * 1024 * 1024)
+      sourceLabel = url.slice(0, 120)
+    }
+    if (!text.trim()) throw new Error("订阅内容为空")
+
+    const result = parseSubscriptionContent(text)
+    if (result.nodes.length === 0) {
+      throw new Error(`未解析到任何节点（格式 ${result.format}）；支持：base64 订阅 / 明文 URI 列表 / Clash YAML`)
+    }
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "SINGBOX_SUBSCRIPTION_PARSE",
+      resourceType: "SINGBOX", resourceName: sourceLabel,
+      after: { format: result.format, total: result.total, parsed: result.nodes.length, failed: result.failed },
+    })
+    return {
+      format: result.format, total: result.total, failed: result.failed,
+      nodes: result.nodes.map((n: ParsedNode) => ({
+        tag: n.outbound.tag, type: n.outbound.type,
+        server: n.outbound.server || "", serverPort: n.outbound.serverPort || 0, name: n.name,
+      })),
+    }
+  })
+}
+
+export async function importSubscriptionAction(input: unknown): Promise<ActionResult<{ id: string; imported: number; skipped: number }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAdmin()
+    await requireWritableMode()
+    const p = zodValidate(z.object({
+      url: z.string().max(2048).optional().default(""),
+      content: z.string().max(2 * 1024 * 1024).optional().default(""),
+      name: z.string().min(1).max(64),
+      cpuLimit: z.coerce.number().min(0.1).max(16).optional().default(1),
+      memLimitMb: z.coerce.number().int().min(64).max(8192).optional().default(512),
+      inboundPort: z.coerce.number().int().min(1024).max(65535).optional().default(1080),
+      defaultOutbound: z.string().max(64).optional().default(""),
+      mode: z.enum(["proxy", "direct", "rule"]).optional().default("rule"),
+      selectedTags: z.array(z.string().max(64)).max(200).optional(),
+    }), input)
+
+    let text = p.content || ""
+    if (p.url) {
+      const u = assertPublicSubscriptionUrl(p.url)
+      const res = await fetch(u.toString(), {
+        signal: AbortSignal.timeout(15_000),
+        headers: { "User-Agent": "DockyardPlatform/1.0 (singbox-subscriber; compatible clash-verge v2rayN)" },
+        redirect: "follow",
+      }).catch((e: Error) => { throw new Error(`订阅拉取失败：${e.message}`) })
+      if (!res.ok) throw new Error(`订阅源返回 HTTP ${res.status}`)
+      text = (await res.text()).slice(0, 2 * 1024 * 1024)
+    }
+    const result = parseSubscriptionContent(text)
+    if (result.nodes.length === 0) throw new Error("未解析到任何节点")
+
+    // 节点筛选（用户可勾选导入子集）
+    const picked = p.selectedTags?.length
+      ? result.nodes.filter((n) => p.selectedTags?.includes(n.outbound.tag))
+      : result.nodes
+    if (picked.length === 0) throw new Error("所选节点为空")
+    const outbounds = picked.map((n) => {
+      const o = { ...n.outbound } as Record<string, unknown>
+      // 组装器入参兼容：password 字段在 vmess 类型下名为 userId（结构化复用）
+      return o
+    })
+
+    // 路由模式：proxy=全局代理 / direct=全局直连 / rule=规则模式（geosite 简化）
+    const defaultOutbound = p.defaultOutbound || (p.mode === "direct" ? "direct" : outbounds[0]?.tag && p.mode === "proxy" ? (outbounds[0] as { tag: string }).tag : p.mode === "rule" ? "direct" : "direct")
+    const routeRules = p.mode === "rule"
+      ? [
+          { id: "r-cn-direct", priority: 1, outboundTag: "direct", domain: ["geosite:cn"] },
+          { id: "r-cn-ip-direct", priority: 2, outboundTag: "direct", ipCidr: ["geoip:cn", "geoip:private"] },
+        ]
+      : []
+
+    const hostId = (await db.hostNode.findFirst({ where: { deletedAt: null, enabled: true } }))?.id || ""
+    const createRes = await createSingboxAction({
+      name: p.name,
+      remark: `订阅导入（${p.url ? "链接" : "粘贴"} · ${result.format} · ${picked.length}/${result.total} 节点）`,
+      hostNodeId: hostId,
+      cpuLimit: p.cpuLimit, memLimitMb: p.memLimitMb, inboundPort: p.inboundPort,
+      outbounds: outbounds as never[],
+      defaultOutbound,
+      routeRules: routeRules as never[],
+      dns: { servers: [{ tag: "local", address: "local" }, { tag: "remote", address: "https://1.1.1.1/dns-query", detour: defaultOutbound !== "direct" ? defaultOutbound : undefined }] },
+    })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "SINGBOX_SUBSCRIPTION_IMPORT",
+      resourceType: "SINGBOX", resourceId: createRes.data?.id || "", resourceName: p.name,
+      after: { format: result.format, imported: picked.length, skipped: result.total - picked.length, mode: p.mode, source: (p.url || "pasted").slice(0, 200) },
+      severity: "WARN",
+    })
+    return { id: createRes.data?.id || "", imported: picked.length, skipped: result.total - picked.length }
   })
 }
 

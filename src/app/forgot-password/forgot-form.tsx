@@ -15,6 +15,14 @@ export function ForgotPasswordForm() {
   const [code, setCode] = React.useState("")
   const [newPassword, setNewPassword] = React.useState("")
   const [countdown, setCountdown] = React.useState(0)
+  // r35：发送邮箱验证码前的人机验证
+  const [captcha, setCaptcha] = React.useState<{ id: string; svg: string } | null>(null)
+  const [captchaCode, setCaptchaCode] = React.useState("")
+  const loadCaptcha = React.useCallback(async () => {
+    const res = await fetch("/api/auth/captcha")
+    const json = (await res.json()) as { data?: { captchaId: string; svg: string } }
+    if (json.data) setCaptcha({ id: json.data.captchaId, svg: json.data.svg })
+  }, [])
   const [busy, setBusy] = React.useState(false)
 
   React.useEffect(() => {
@@ -30,9 +38,17 @@ export function ForgotPasswordForm() {
       const res = await fetch("/api/auth/email-code", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email.trim().toLowerCase(), purpose: "RESET_PASSWORD" }),
+        body: JSON.stringify({
+          email: email.trim().toLowerCase(), purpose: "RESET_PASSWORD",
+          captchaId: captcha?.id, captchaCode: captchaCode || undefined,
+        }),
       })
-      const json = (await res.json()) as { code: number; msg: string }
+      const json = (await res.json()) as { code: number; msg: string; data?: { captchaRequired?: boolean } }
+      if (json.code === 41006 || json.data?.captchaRequired) {
+        await loadCaptcha()
+        toast.info("请先完成图形验证码后再发送邮箱验证码")
+        return
+      }
       if (json.code === 0) {
         toast.success(json.msg)
         setCountdown(60)
@@ -76,7 +92,13 @@ export function ForgotPasswordForm() {
           <Label>邮箱验证码</Label>
           <div className="flex gap-2">
             <Input value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="6位数字" className="font-mono" />
-            <Button type="button" variant="secondary" disabled={countdown > 0 || !email.trim()} onClick={sendCode}>
+{captcha && (
+            <div className="flex items-center gap-2">
+                <div className="rounded-md border overflow-hidden bg-white shrink-0" dangerouslySetInnerHTML={{ __html: captcha.svg }} onClick={() => void loadCaptcha()} title="点击刷新" />
+                <input value={captchaCode} onChange={(e) => setCaptchaCode(e.target.value)} placeholder="计算结果" className="h-9 w-24 rounded-md border bg-background px-2 text-sm" autoComplete="off" />
+              </div>
+            )}
+                        <Button type="button" variant="secondary" disabled={countdown > 0 || !email.trim()} onClick={sendCode}>
               {countdown > 0 ? `${countdown}s` : "获取验证码"}
             </Button>
           </div>

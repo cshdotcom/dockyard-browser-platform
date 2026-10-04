@@ -106,6 +106,7 @@ const createGroupSchema = z.object({
   quota: zQuota.optional(),
   reservedQuota: zQuota.optional(),
   force2fa: z.boolean().default(false),
+  managedPolicyOverrides: z.string().max(64 * 1024).optional(), // r35：组级 Chromium 企业策略覆盖 JSON（空=清除）
   tags: z.array(z.string().max(32)).max(20).default([]),
   allowInternalNetwork: z.boolean().default(false), // 组级网络策略：允许访问内网
   allowSecureLocationAccess: z.boolean().default(false), // 组级网络策略：允许访问容器内安全位置
@@ -148,6 +149,11 @@ export async function createGroupAction(input: unknown): Promise<ActionResult<{ 
         quota: p.quota ? { ...p.quota } : undefined,
         reservedQuota: p.reservedQuota ? { ...p.reservedQuota } : undefined,
         force2fa: p.force2fa,
+        managedPolicyOverrides: p.managedPolicyOverrides !== undefined ? (p.managedPolicyOverrides.trim() ? (() => {
+          const parsed: unknown = JSON.parse(p.managedPolicyOverrides!)
+          if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("组级策略覆盖必须是 JSON 键值对象")
+          return JSON.stringify(parsed) as unknown as Prisma.InputJsonValue
+        })() : null) : undefined,
         tags: p.tags.length > 0 ? p.tags : undefined,
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
@@ -212,6 +218,11 @@ export async function updateGroupAction(input: unknown): Promise<ActionResult<{ 
         quota: p.quota ? (cleanQuota(p.quota) as Prisma.InputJsonValue) : Prisma.DbNull,
         reservedQuota: p.reservedQuota ? (cleanQuota(p.reservedQuota) as Prisma.InputJsonValue) : Prisma.DbNull,
         force2fa: p.force2fa,
+        managedPolicyOverrides: p.managedPolicyOverrides !== undefined ? (p.managedPolicyOverrides.trim() ? (() => {
+          const parsed: unknown = JSON.parse(p.managedPolicyOverrides!)
+          if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("组级策略覆盖必须是 JSON 键值对象")
+          return JSON.stringify(parsed) as unknown as Prisma.InputJsonValue
+        })() : null) : undefined,
         tags: p.tags.length > 0 ? p.tags : Prisma.DbNull,
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,

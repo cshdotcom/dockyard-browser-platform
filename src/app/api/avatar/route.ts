@@ -38,6 +38,19 @@ export async function POST(req: NextRequest) {
   if (!(file instanceof File)) {
     return NextResponse.json({ code: 40001, msg: "缺少文件字段 file", traceId }, { status: 400 })
   }
+  // r35：管理员替指定用户上传头像（targetUserId 仅 ADMIN/SUPER_ADMIN 可用；审计分别记录操作者与目标）
+  const rawTarget = String(form?.get("targetUserId") || "").trim()
+  let targetUserId = ctx.userId
+  if (rawTarget && rawTarget !== ctx.userId) {
+    if (ctx.role !== "ADMIN" && ctx.role !== "SUPER_ADMIN") {
+      return NextResponse.json({ code: 40301, msg: "仅管理员可替他人上传头像", traceId }, { status: 403 })
+    }
+    const target = await db.user.findUnique({ where: { id: rawTarget }, select: { id: true, deletedAt: true } })
+    if (!target || target.deletedAt) {
+      return NextResponse.json({ code: 40401, msg: "目标用户不存在或已删除", traceId }, { status: 404 })
+    }
+    targetUserId = target.id
+  }
   if (file.size > MAX_SIZE) {
     return NextResponse.json({ code: 40001, msg: "头像文件超过 5MB 上限", traceId }, { status: 400 })
   }
@@ -64,27 +77,27 @@ export async function POST(req: NextRequest) {
   }
 
   // 写入用户独立空间（目录 = 用户 ID，天然隔离）
-  const dir = avatarDir(ctx.userId)
+  const dir = avatarDir(targetUserId)
   const path = join(dir, "avatar.webp")
   await mkdir(dir, { recursive: true })
   await writeFile(path, webp, { mode: 0o600 })
 
-  const relPath = `avatars/${ctx.userId}/avatar.webp`
+  const relPath = `avatars/${targetUserId}/avatar.webp`
   await db.user.update({
-    where: { id: ctx.userId },
+    where: { id: targetUserId },
     data: { avatarPath: relPath, avatarUpdatedAt: new Date() },
   })
   await writeAudit({
     operatorUserId: ctx.userId,
     operatorName: ctx.username,
-    operationType: "PROFILE_AVATAR_UPLOAD",
+    operationType: targetUserId === ctx.userId ? "PROFILE_AVATAR_UPLOAD" : "USER_AVATAR_ADMIN_SET",
     resourceType: "USER",
-    resourceId: ctx.userId,
+    resourceId: targetUserId,
     resourceName: ctx.username,
-    after: { bytes: webp.length, format: "webp", size: "256x256" },
+    after: { bytes: webp.length, format: "webp", size: "256x256", onBehalfOf: targetUserId !== ctx.userId },
   })
 
-  return NextResponse.json({ code: 0, msg: "头像已更新", data: { url: `/api/avatar?userId=${ctx.userId}`, size: webp.length }, traceId })
+  return NextResponse.json({ code: 0, msg: "头像已更新", data: { url: `/api/avatar?userId=${targetUserId}`, size: webp.length }, traceId })
 }
 
 export async function DELETE(req: NextRequest) {

@@ -10,6 +10,7 @@ import {
   Bell, Server, Network, Recycle, ShieldAlert, MessageSquareCode,
   ChevronLeft, Menu, LogOut, Search, UserCog, MonitorSmartphone,
   AlertTriangle, CheckCircle2, Loader2, ChevronRight, Sparkles, Video as VideoIcon, Camera as CameraIcon,
+  VenetianMask,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { UserAvatar } from "@/components/shared/user-avatar"
@@ -57,13 +58,15 @@ interface AppShellProps {
   maintenanceMessage: string
   /** 强制 2FA 门控：true 时非白名单页面被拦截并引导到账号安全页 */
   needs2faSetup?: boolean
+  /** r35：模拟登录发起人（超管模拟用户时顶部显示横幅，可一键退出模拟） */
+  impersonator?: { id: string; name: string } | null
   children: React.ReactNode
 }
 
 // 2FA 强制门控白名单：仅允许账号安全相关页面（引导开通 2FA 的唯一通道）
 const TWOFA_ALLOWED_PATHS = ["/account/security", "/account/sessions", "/account/profile"]
 
-export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenanceMessage, needs2faSetup = false, children }: AppShellProps) {
+export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenanceMessage, needs2faSetup = false, impersonator = null, children }: AppShellProps) {
   const pathname = usePathname()
   const router = useRouter()
   const [collapsed, setCollapsed] = React.useState(false)
@@ -90,6 +93,23 @@ export function AppShell({ user, menuGroups, unreadCount, maintenance, maintenan
       {maintenance && (
         <div className="bg-amber-500/90 text-white text-center text-sm py-1.5 px-4 sticky top-0 z-50">
           {maintenanceMessage}
+        </div>
+      )}
+      {/* r35：模拟登录横幅（超管以该用户身份浏览） */}
+      {impersonator && (
+        <div className="flex items-center justify-center gap-2 bg-purple-600/95 text-center text-sm py-1.5 px-4 sticky top-0 z-50 text-white">
+          <VenetianMask className="h-3.5 w-3.5" />
+          <span>
+            模拟会话中 —— 超管 <b>{impersonator.name}</b> 正以 <b>{user.displayName || user.username}</b> 的身份浏览；所有操作均已审计
+          </span>
+          <button
+            type="button"
+            className="ml-2 rounded bg-white/20 px-2 py-0.5 text-xs hover:bg-white/30"
+            onClick={() => { void signOut({ callbackUrl: "/admin/users?imp=done" }) }}
+            title="结束模拟会话，返回管理员登录"
+          >
+            退出模拟
+          </button>
         </div>
       )}
       {/* 强制 2FA 门控拦截卡：重定向完成前的即时视觉反馈 */}

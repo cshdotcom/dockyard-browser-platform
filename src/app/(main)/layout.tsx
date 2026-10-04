@@ -1,4 +1,6 @@
 import { redirect } from "next/navigation"
+import { getServerSession } from "next-auth"
+import { authOptions } from "@/lib/auth"
 import { db } from "@/lib/db"
 import { getAuthContext, needs2faSetup } from "@/lib/permissions"
 import { getConfigBool, getConfig } from "@/lib/config"
@@ -21,6 +23,15 @@ export default async function MainLayout({ children }: { children: React.ReactNo
   // 强制2FA策略：AppShell 客户端门控（非白名单页面拦截并引导到 /account/security）
   const needs2fa = await needs2faSetup()
 
+  // r35：模拟登录信息（JWT 标记 → AppShell 顶部横幅）
+  const sess = await getServerSession(authOptions).catch(() => null)
+  const impersonator = (sess?.user as { impersonatorId?: string; impersonatorName?: string } | undefined)?.impersonatorId
+    ? {
+      id: (sess!.user as { impersonatorId: string }).impersonatorId,
+      name: (sess!.user as { impersonatorName?: string }).impersonatorName || "super-admin",
+    }
+    : null
+
   const unread = await db.notice.count({ where: { userId: ctx.userId, readAt: null } })
   const me = await db.user.findUnique({ where: { id: ctx.userId }, select: { avatarPath: true } })
   const maintenance = await getConfigBool("maintenance.enabled", false)
@@ -41,6 +52,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         { key: "announcements", label: "平台公告", href: "/announcements", icon: <Megaphone className="h-4 w-4" /> },
         { key: "my-recordings", label: "我的记录（录像/截图）", href: "/recordings", icon: <Video className="h-4 w-4" /> },
         { key: "my-browsing", label: "我的浏览数据", href: "/browsing", icon: <History className="h-4 w-4" /> },
+        { key: "my-proxy", label: "代理 / 加速器", href: "/proxy", icon: <Network className="h-4 w-4" /> },
         { key: "my-files", label: "我的文件", href: "/files", icon: <FolderOpen className="h-4 w-4" /> },
       ],
     },
@@ -113,6 +125,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
       maintenance={maintenance}
       maintenanceMessage={maintenanceMessage}
       needs2faSetup={needs2fa}
+      impersonator={impersonator}
     >
       {children}
     </AppShell>

@@ -87,9 +87,9 @@ export default async function SnapshotsPage({
     }
   })
 
-  // 创建快照候选：自己 RUNNING 状态的 cdp_light 工作区
+  // r35：创建快照候选 —— 两模式均支持（VNC 快照已放开）；Profile 磁盘持久化非销毁态可导
   const runnableWorkspaces = await db.browserWorkspace.findMany({
-    where: { userId: ctx.userId, mode: "cdp_light", status: "RUNNING", deletedAt: null },
+    where: { userId: ctx.userId, mode: { in: ["cdp_light", "novnc_full"] }, status: { not: "DESTROYED" }, deletedAt: null },
     select: { id: true, name: true, status: true },
     orderBy: { createdAt: "desc" },
   })

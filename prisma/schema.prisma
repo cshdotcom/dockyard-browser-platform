@@ -31,6 +31,7 @@ model User {
   mustChangePassword  Boolean   @default(false)
   twoFactorEnabled    Boolean   @default(false)
   force2faSetup       Boolean   @default(false) // 强制2FA策略命中标记
+  managedPolicyOverrides String? // r35：用户级 Chromium 企业策略覆盖（JSON 键值；合并链：沙箱>用户>用户组>模板）
   lockedUntil         DateTime?
   failedLoginCount    Int       @default(0)
   preferences          Json? // { pageSize, theme, columns, sidebarCollapsed }
@@ -209,6 +210,7 @@ model Group {
   tags             Json? // ["标签"]
   webhookUrl       String?
   force2fa         Boolean  @default(false) // 组级强制2FA
+  managedPolicyOverrides String? // r35：组级 Chromium 企业策略覆盖（JSON 键值；合并链：沙箱>用户>用户组>模板）
   allowShare       Boolean  @default(true) // r13c：组级共享开关（false=组内成员默认禁止共享工作区；用户级可覆盖）
   allowInternalNetwork       Boolean  @default(false) // 组级：允许访问内网（成员默认继承）
   allowSecureLocationAccess  Boolean  @default(false) // 组级：允许访问容器内安全位置
@@ -668,6 +670,9 @@ model BrowserWorkspace {
   kbLayout           String?  // 偏好键盘布局（如 us/cn/de/fr…；空=跟随默认）
   // —— r27：VNC 会话录像沙箱级覆盖（"on"/"off"；null=继承 用户>组>全局 默认）——
   recordingOverride  String?
+  // —— r35：网页模式（kiosk 纯网页内容：Chromium --kiosk 启动指定 URL，无浏览器控制栏）——
+  kioskMode          Boolean   @default(false)
+  kioskStartUrl      String?
   // —— r28：回放安全沙箱级覆盖 { watermark: force|on|off, allowExport }（null=继承上层）——
   vncPlayback Json?
   // —— r29：17 项硬件权限沙箱级覆盖（稀疏 JSON；null=继承用户/组/全局）——

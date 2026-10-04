@@ -19,7 +19,7 @@ import {
   Anchor, Camera, Clipboard, ClipboardPaste, Expand, Minimize2, RefreshCw, Loader2,
   MousePointer2, Hand, ShieldCheck, Eye, TriangleAlert, Zap, Radio, Keyboard, ShipWheel, Monitor,
   Languages, Timer, GripVertical, Send, PanelRightClose, PanelRightOpen, Lock, ChevronsUp,
-  Crosshair, CircleDot, AppWindow,
+  Crosshair, CircleDot, AppWindow, Globe, Volume2, VolumeX, VolumeOff, EyeOff,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { MonitorBanner } from "@/components/vnc/monitor-banner"
@@ -194,9 +194,14 @@ export interface HelmPortServerPolicy {
   autoQuality: boolean // 服务端自适应画质（workspace.vncAutoQuality；false=手动画质）
 }
 
-export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPortWorkspace; serverPolicy?: HelmPortServerPolicy }) {
+export function HelmPortViewer({ workspace, serverPolicy, allowWebKiosk, allowVncAudio = true }: { workspace: HelmPortWorkspace; serverPolicy?: HelmPortServerPolicy; allowWebKiosk?: boolean; allowVncAudio?: boolean }) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
   const stageRef = React.useRef<HTMLDivElement | null>(null)
+  // r35：根容器 ref（全屏容器化 —— 全屏/沉浸后顶部功能栏与控制坞依然可见可用）
+  const rootRef = React.useRef<HTMLDivElement | null>(null)
+  // r35：物理键盘自动抓取（window 级捕获：沉浸/非沉浸一致，无需先点舞台聚焦）
+  const keyboardCaptureRef = React.useRef(false)
+  const shortcutRecordingRef = React.useRef(false)
   const rfbRef = React.useRef<HelmPortRfb | null>(null)
   const statsRef = React.useRef({ frameTimes: [] as number[], bytesIn: 0, bytesOut: 0, lastMsgAt: 0 })
   const retryRef = React.useRef({ count: 0, timer: null as ReturnType<typeof setTimeout> | null, manual: false })
@@ -211,6 +216,15 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
   const [stats, setStats] = React.useState({ fps: 0, kbps: 0, idle: 0 })
   const [fullscreen, setFullscreen] = React.useState(false)
   const [immersive, setImmersive] = React.useState(false) // 沉浸模式：全屏+指针锁定+键盘抓取（Esc 退出）
+  // r35：物理键盘自动抓取开关（默认开；live 后无需点击舞台即转发按键）
+  const [kbCapture, setKbCapture] = React.useState(false)
+  // r35：网页模式（纯网页内容显示：隐藏全部控制栏/坞/浮层，不弹任何弹窗；管理员允许时可用）
+  const [webOnly, setWebOnly] = React.useState(false)
+  // r35：HUD 角标可隐藏（"左上角 RFB 标识挡住内容"用户诉求）
+  const [hudOn, setHudOn] = React.useState(true)
+  // r35：远程声音回传（<audio> 流式播放 + 静音/音量控制）
+  const [audio, setAudio] = React.useState({ on: false, muted: false, volume: 0.8 })
+  const audioRef = React.useRef<HTMLAudioElement | null>(null)
   const [lastKeys, setLastKeys] = React.useState<string[]>([])
   const [clipboardText, setClipboardText] = React.useState("")
   const [clipboardReceived, setClipboardReceived] = React.useState("")
@@ -319,6 +333,8 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
       const savedLang = localStorage.getItem(`hp-ime-lang-${workspace.id}`)
       if (savedLang && IME_LANGS.some((l) => l.code === savedLang)) setImeLang(savedLang)
       const savedDock = localStorage.getItem("hp-dock-open")
+      const savedHud = localStorage.getItem(`hp-hud-${workspace.id}`)
+      if (savedHud !== null) setHudOn(savedHud === "1")
       if (savedDock === "0") setDockOpen(false)
     } catch { /* localStorage 不可用时静默降级 */ }
   }, [workspace.id])
@@ -601,13 +617,14 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
     return () => { stop = true; clearInterval(t) }
   }, [phase, readonly, workspace.id])
 
-  const toggleManualRecording = async () => {
+  // r35：定时录屏 —— maxMinutes（0=不限时长）；录制中点击=停止
+  const toggleManualRecording = async (maxMinutes = 0) => {
     if (manualRec.busy) return
     if (!canOperate || !manualRec.canControl) { toast.error("仅所有者/操作共享/管理员可控制录屏"); return }
     if (phase !== "live") { toast.error("请先接入远程桌面"); return }
     setManualRec((m) => ({ ...m, busy: true }))
     try {
-      const res = await manualRecordingControlAction({ workspaceId: workspace.id, op: manualRec.active ? "stop" : "start" })
+      const res = await manualRecordingControlAction({ workspaceId: workspace.id, op: manualRec.active ? "stop" : "start", ...(maxMinutes > 0 ? { maxMinutes } : {}) })
       if (res.code === 0 && res.data) {
         toast.success(res.data.message)
         setManualRec((m) => ({ ...m, active: res.data!.active, busy: false }))
@@ -640,7 +657,10 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
     return () => document.removeEventListener("fullscreenchange", onFs)
   }, [quality])
 
-  // r28：沉浸模式（全屏 + 指针锁定 + 键盘/鼠标抓取，等效本地云电脑体验）
+  // r35：沉浸模式重写 —— ①全屏对象从"舞台"改为"整个查看器根容器"（全屏后顶部功能栏/
+  // 控制坞/软键盘全部保留可见可用，修复"全屏只有画面、功能都消失"）②物理键盘 window 级
+  // 抓取（不再只依赖舞台聚焦 —— 修复"沉浸/非沉浸都不能自动抓取键盘"）③pointerlockchange
+  // 监听（Esc 解锁后 immersive 状态正确复位，修复状态错乱反复重启观感）
   const toggleImmersive = async () => {
     try {
       if (immersive) {
@@ -649,10 +669,11 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
         setImmersive(false)
         toast.success("已退出沉浸模式")
       } else {
-        if (!document.fullscreenElement) await (stageRef.current?.requestFullscreen?.() || stageRef.current?.requestFullscreen())
-        await (stageRef.current as HTMLElement | null)?.requestPointerLock?.()
+        if (!document.fullscreenElement) await rootRef.current?.requestFullscreen?.()
+        await stageRef.current?.requestPointerLock?.()
         setImmersive(true)
-        toast.success("沉浸模式：键盘与鼠标已抓取（按 Esc 退出）")
+        setKbCapture(true)
+        toast.success("沉浸模式：全屏容器 + 键鼠抓取（Esc 退出）")
       }
     } catch {
       toast.error("当前环境不允许沉浸模式")
@@ -662,9 +683,73 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
   const toggleFullscreen = async () => {
     try {
       if (document.fullscreenElement) await document.exitFullscreen()
-      else await stageRef.current?.requestFullscreen()
+      else await rootRef.current?.requestFullscreen()
     } catch { toast.error("当前环境不允许全屏") }
   }
+
+  // r35：指针锁状态监听 —— Esc 解锁时自动复位沉浸态（沉浸=全屏+锁指针，二者之一退出都算退出）
+  React.useEffect(() => {
+    const onPl = () => {
+      if (!document.pointerLockElement && immersive) setImmersive(false)
+    }
+    document.addEventListener("pointerlockchange", onPl)
+    return () => document.removeEventListener("pointerlockchange", onPl)
+  }, [immersive])
+
+  // r35：物理键盘 window 级自动抓取 —— live 即抓取（沉浸/非沉浸一致），焦点无关：
+  //   · 跳过：IME 组合中 / 本地输入框聚焦（地址栏搜索、快捷键录制、软键盘输入）
+  //   · Esc：沉浸模式退出用（不转发）；F11 保留本地全屏
+  //   · 网页模式（webOnly）下不抓取（"不接收打开其他功能的快捷键，保留复制等基本操作"）
+  React.useEffect(() => {
+    keyboardCaptureRef.current = kbCapture
+  }, [kbCapture])
+  React.useEffect(() => {
+    if (phase !== "live" || !canOperate || readonly || webOnly) {
+      setKbCapture(false)
+      return
+    }
+    // r35：连接成功后默认开启物理键盘自动抓取（用户诉求"电脑端要能够直接就自动抓取键盘和鼠标的按键"）
+    setKbCapture(true)
+    const isEditableTarget = (el: EventTarget | null) => {
+      const n = el as HTMLElement | null
+      if (!n || !n.tagName) return false
+      const t = n.tagName.toLowerCase()
+      return t === "input" || t === "textarea" || t === "select" || n.isContentEditable
+    }
+    const onWinKeyDown = (e: KeyboardEvent) => {
+      if (!keyboardCaptureRef.current) return
+      if (e.isComposing || composingRef.current) return
+      if (isEditableTarget(e.target)) return
+      if (shortcutRecordingRef.current) return
+      const keysym = keysymFor(e)
+      if (keysym !== null) {
+        // Esc 保留本地（退出沉浸/指针锁）；F11 保留本地全屏切换
+        if (e.key === "F11") return
+        e.preventDefault()
+        rfbRef.current?.sendKey(keysym, true)
+        const name = e.key === " " ? "Space" : e.key === "Enter" ? "Enter" : e.key.length === 1 ? e.key : e.key.replace("Arrow", "↑")
+        setLastKeys((k) => [...k.slice(-5), name])
+      }
+    }
+    const onWinKeyUp = (e: KeyboardEvent) => {
+      if (!keyboardCaptureRef.current) return
+      if (e.isComposing || composingRef.current) return
+      if (isEditableTarget(e.target)) return
+      if (shortcutRecordingRef.current) return
+      if (e.key === "F11") return
+      const keysym = keysymFor(e)
+      if (keysym !== null) {
+        e.preventDefault()
+        rfbRef.current?.sendKey(keysym, false)
+      }
+    }
+    window.addEventListener("keydown", onWinKeyDown, { capture: true })
+    window.addEventListener("keyup", onWinKeyUp, { capture: true })
+    return () => {
+      window.removeEventListener("keydown", onWinKeyDown, { capture: true } as EventListenerOptions)
+      window.removeEventListener("keyup", onWinKeyUp, { capture: true } as EventListenerOptions)
+    }
+  }, [phase, canOperate, readonly, webOnly])
 
   // ================= 输入：坐标映射 =================
   const toFbCoords = (clientX: number, clientY: number): { x: number; y: number } => {
@@ -680,8 +765,10 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
   }
 
   // ================= 输入：鼠标（桌面） =================
+  // r35：去掉 inputMode === "touch" 对鼠标事件的否决 —— 触屏设备外接鼠标（或触屏笔）
+  // 也能正常拖动/选择远程网页文本（用户诉求"鼠标模式都无法拖动、选择网页上的字符"）
   const onStageMouseDown = (e: React.MouseEvent) => {
-    if (phase !== "live" || !canOperate || inputMode === "touch") return
+    if (phase !== "live" || !canOperate) return
     e.preventDefault()
     const btn = e.button === 0 ? BTN_LEFT : e.button === 1 ? 2 : e.button === 2 ? BTN_RIGHT : 0
     buttonMaskRef.current |= btn
@@ -689,12 +776,12 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
     rfbRef.current?.sendPointer(x, y, buttonMaskRef.current)
   }
   const onStageMouseMove = (e: React.MouseEvent) => {
-    if (phase !== "live" || !canOperate || inputMode === "touch") return
+    if (phase !== "live" || !canOperate) return
     const { x, y } = toFbCoords(e.clientX, e.clientY)
     rfbRef.current?.sendPointer(x, y, buttonMaskRef.current)
   }
   const onStageMouseUp = (e: React.MouseEvent) => {
-    if (phase !== "live" || !canOperate || inputMode === "touch") return
+    if (phase !== "live" || !canOperate) return
     const btn = e.button === 0 ? BTN_LEFT : e.button === 1 ? 2 : e.button === 2 ? BTN_RIGHT : 0
     buttonMaskRef.current &= ~btn
     const { x, y } = toFbCoords(e.clientX, e.clientY)
@@ -1008,14 +1095,98 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
   const status = workspace.status
   const dockWidth = 288
 
-  return (
-    <div className="space-y-3">
-      {/* r29-b：知情模式监控横幅（静默特权对用户不可见；红点+一键切断） */}
-      <MonitorBanner workspaceId={workspace.id} />
+  // r35：远程声音回传 —— <audio> 流式播放（GET /api/vnc-proxy/audio 长流）+ 静音/音量
+  const toggleAudio = async () => {
+    if (audio.on) {
+      // 已开：点击 = 静音/取消静音；Shift+点击 = 关闭
+      if (audio.muted) { setAudio((a) => ({ ...a, muted: false })); if (audioRef.current) audioRef.current.muted = false; return }
+      // 单击在开启态默认静音；长按/shift 关闭 —— 简化：再点一次 = 静音切到关？行为：开→(点击)静音→(点击)恢复→右键关闭
+      setAudio((a) => ({ ...a, muted: true }))
+      if (audioRef.current) audioRef.current.muted = true
+      return
+    }
+    try {
+      const res = await fetch(`/api/vnc-proxy/audio?workspaceId=${workspace.id}`, { method: "POST" })
+      const json = await res.json().catch(() => ({ code: 1, msg: "响应解析失败" }))
+      if (json.code !== 0 || !json.data?.url) {
+        toast.error(json.msg || "该沙箱暂无音频能力（未启用 pulseaudio 音频设备）")
+        return
+      }
+      setAudio({ on: true, muted: false, volume: 0.8 })
+      requestAnimationFrame(() => {
+        const el = audioRef.current
+        if (el) {
+          el.src = json.data.url as string
+          el.volume = 0.8
+          el.muted = false
+          void el.play().catch(() => toast.error("浏览器阻止了自动播放：请再点一次声音按钮"))
+        }
+      })
+      toast.success("远程声音回传已开启")
+    } catch {
+      toast.error("音频通道建立失败")
+    }
+  }
+  const stopAudio = () => {
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = "" }
+    setAudio({ on: false, muted: false, volume: 0.8 })
+  }
 
-      {/* ===== 顶部亮色状态栏（企业级浅色主题） ===== */}
+  // r35：网页模式切换（纯网页内容显示：隐藏全部控制 UI；仅管理员 allowWebKiosk 时可用）
+  const enterWebOnly = () => {
+    setWebOnly(true)
+    setVirtualKbOpen(false)
+    toast.success("网页模式：仅显示网页内容（按 Esc 或右下角按钮退出）")
+  }
+  const exitWebOnly = () => {
+    setWebOnly(false)
+    if (audioRef.current) { audioRef.current.pause(); setAudio((a) => ({ ...a, on: false })) }
+  }
+
+  return (
+    <div
+      ref={rootRef}
+      onContextMenu={webOnly ? (e) => e.preventDefault() : undefined}
+      className={cn(
+        "space-y-3",
+        // r35：全屏容器化 —— 全屏/沉浸时整个查看器成为全屏元素（功能栏/控制坞/软键盘全部保留）
+        (fullscreen || immersive) && "fixed inset-0 z-50 flex flex-col space-y-2 overflow-hidden bg-slate-950 p-2 sm:p-3",
+        // r35：网页模式 —— 纯网页内容铺满，除极简退出按钮外无任何 UI
+        webOnly && "fixed inset-0 z-[60] m-0 overflow-hidden bg-black p-0",
+      )}
+      onKeyDown={webOnly ? (e) => { if (e.key === "Escape") exitWebOnly() } : undefined}>
+      {/* r35：远程声音回传元素（隐藏；src 由 toggleAudio 动态设置） */}
+      <audio ref={audioRef} preload="none" className="hidden" />
+
+      {/* r29-b：知情模式监控横幅（静默特权对用户不可见；红点+一键切断） */}
+      {!webOnly && !fullscreen && !immersive && <MonitorBanner workspaceId={workspace.id} />}
+
+      {/* ===== r35：网页模式（纯网页内容）—— 只有画面 + 极简退出按钮，无任何其他弹窗 ===== */}
+      {webOnly && (
+        <>
+          <div ref={stageRef} tabIndex={0} className="absolute inset-0 overflow-hidden bg-black outline-none"
+            onMouseDown={onStageMouseDown} onMouseMove={onStageMouseMove} onMouseUp={onStageMouseUp} onWheel={onStageWheel}
+            onTouchStart={onStageTouchStart} onTouchMove={onStageTouchMove} onTouchEnd={onStageTouchEnd}
+            onContextMenu={(e) => e.preventDefault()}>
+            <canvas ref={canvasRef} width={1280} height={800}
+              style={fitScale ? { width: "100%", height: "100%", objectFit: "contain" } : undefined}
+              className={cn("block h-full w-full", phase !== "live" && "invisible")} />
+            {phase !== "live" && (
+              <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">正在建立网页模式画面…</div>
+            )}
+          </div>
+          {/* 极简退出按钮（半透明、右下角、不遮内容；键盘 Esc 退出已绑定） */}
+          <button type="button" onClick={exitWebOnly}
+            className="absolute bottom-3 right-3 z-[70] rounded-full bg-slate-900/70 px-4 py-2 text-xs font-medium text-white backdrop-blur transition-opacity hover:opacity-100 sm:opacity-40"
+            title="退出网页模式（Esc）">
+            退出网页模式
+          </button>
+        </>
+      )}
+      {/* ===== 顶部亮色状态栏（r35：网页模式下整条隐藏；按钮行改横向滑动防溢出） ===== */}
+      {!webOnly && !fullscreen && !immersive ? (
       <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-nowrap items-center gap-2 overflow-x-auto pb-0.5 [scrollbar-width:thin]">
           <div className="flex items-center gap-2 pr-2 mr-1 border-r border-slate-200">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-teal-500 to-emerald-600 shadow-sm">
               <ShipWheel className="h-4 w-4 text-white" strokeWidth={2.4} />
@@ -1053,9 +1224,22 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
             {canOperate && (
               <Button size="sm" variant={manualRec.active ? "default" : "outline"}
                 className={cn("h-8 gap-1", manualRec.active && "bg-red-600 hover:bg-red-500 text-white")}
-                onClick={() => void toggleManualRecording()}
+                onClick={(e) => {
+                  // r35：定时录屏 —— Alt/右键点击可选定时时长；普通点击=不限时（或停止）
+                  if (!manualRec.active && (e.altKey || e.type === "contextmenu")) {
+                    const v = window.prompt("定时录屏：输入分钟数（5-720，留空或 0 = 不限时）", "30")
+                    if (v === null) return
+                    const mm = Math.max(0, Math.min(720, parseInt(v, 10) || 0))
+                    void toggleManualRecording(mm)
+                    return
+                  }
+                  void toggleManualRecording()
+                }}
+                onContextMenu={(e) => {
+                  if (!manualRec.active) { e.preventDefault(); return }
+                }}
                 disabled={manualRec.busy || phase !== "live"}
-                title={manualRec.active ? `手动录屏进行中（${manualRec.segments} 段）· 点击停止并入库` : "开始手动录屏（异步分段落盘，停止后自动入库可回放）"}>
+                title={manualRec.active ? `手动录屏进行中（${manualRec.segments} 段）· 点击停止并入库` : "开始手动录屏（点击=不限时 · Alt+点击=定时 5-720 分钟，停止后自动入库回放）"}>
                 {manualRec.busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CircleDot className={cn("h-3.5 w-3.5", manualRec.active && "animate-pulse")} />}
                 {!isMobile && <span>{manualRec.active ? "录制中" : "录屏"}</span>}
               </Button>
@@ -1075,6 +1259,25 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
               sendKey={(keysym, down) => rfbRef.current?.sendKey(keysym, down)}
               disabled={readonly || phase !== "live"}
             />
+            {/* r35：物理键盘自动抓取（开=本页按键直发远程，无需点击画面聚焦；输入框聚焦自动放行） */}
+            <Button size="sm" variant={kbCapture ? "default" : "outline"} className={cn("h-8 gap-1", isMobile && "px-2")} onClick={() => setKbCapture(!kbCapture)}
+              disabled={readonly || phase !== "live"} title="物理键盘自动抓取：开启后本页按键直接转发远程桌面（输入框聚焦时自动放行本地输入）">
+              <Keyboard className="h-3.5 w-3.5" />{!isMobile && <span className="ml-1">{kbCapture ? "抓键中" : "抓键"}</span>}
+            </Button>
+            {/* r35：远程声音回传（沙箱音频流 → 本地播放 + 静音/音量控制） */}
+            {canOperate && allowVncAudio && (
+              <Button size="sm" variant={audio.on ? "default" : "outline"} className={cn("h-8", isMobile && "px-2")} onClick={() => void toggleAudio()}
+                disabled={phase !== "live"} title={audio.on ? (audio.muted ? "声音回传中（已静音）· 点击取消静音" : "声音回传中 · 点击静音") : "开启远程声音回传（沙箱音频 → 本地播放）"}>
+                {audio.on && !audio.muted ? <Volume2 className="h-3.5 w-3.5" /> : audio.on ? <VolumeX className="h-3.5 w-3.5" /> : <VolumeOff className="h-3.5 w-3.5" />}
+              </Button>
+            )}
+            {/* r35：网页模式（管理员允许时可用：只显示网页内容，隐藏全部控制界面） */}
+            {allowWebKiosk && canOperate && (
+              <Button size="sm" variant="outline" className={cn("h-8 gap-1", isMobile && "px-2")} onClick={enterWebOnly}
+                disabled={phase !== "live"} title="网页模式：只显示网页内容不显示浏览器控制栏；期间不弹出任何其他界面（Esc 退出）">
+                <Globe className="h-3.5 w-3.5" />{!isMobile && <span className="ml-1">网页模式</span>}
+              </Button>
+            )}
             <Button size="sm" variant={immersive ? "default" : "outline"} className={cn("h-8 gap-1", isMobile && "hidden")} onClick={toggleImmersive} title="沉浸模式（全屏+键鼠抓取，Esc 退出）">
               <Crosshair className="h-3.5 w-3.5" />{immersive ? "沉浸中" : "沉浸"}
             </Button>
@@ -1114,9 +1317,41 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
           <span className="ml-auto font-mono text-slate-400">DEV-{deviceTag()}</span>
         </div>
       </div>
+      ) : null}
 
-      {/* ===== 主体：画布舞台 + 侧边控制坞 ===== */}
-      <div className={cn("relative", isMobile ? "" : "flex gap-3")}>
+      {/* ===== r35：全屏/沉浸紧凑功能栏（容器化全屏后功能完整保留） ===== */}
+      {!webOnly && (fullscreen || immersive) && (
+      <div className="flex flex-nowrap shrink-0 items-center gap-1.5 overflow-x-auto rounded-xl border border-slate-700/60 bg-slate-900/85 px-2 py-1.5 shadow-lg backdrop-blur [scrollbar-width:thin]">
+        <span className="shrink-0 text-xs font-semibold text-teal-400">HelmPort</span>
+        {statusPill()}
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          {phase === "live" || phase === "connecting" ? (
+            <Button size="sm" variant="outline" className="h-7 border-red-800 bg-red-950/50 text-red-300 hover:bg-red-900" onClick={disconnect}>断开</Button>
+          ) : (
+            <Button size="sm" className="h-7 bg-gradient-to-r from-teal-500 to-emerald-600 text-white" disabled={status !== "RUNNING" && status !== "IDLE"} onClick={() => connect()}>接入</Button>
+          )}
+          <Button size="sm" variant="outline" className="h-7" onClick={screenshot} title="截图（含归属水印）"><Camera className="h-3.5 w-3.5" /></Button>
+          {canOperate && (
+            <Button size="sm" variant={manualRec.active ? "default" : "outline"} className={cn("h-7 gap-1", manualRec.active && "bg-red-600 text-white hover:bg-red-500")} onClick={() => void toggleManualRecording()} disabled={manualRec.busy || phase !== "live"} title="手动录屏">
+              <CircleDot className={cn("h-3.5 w-3.5", manualRec.active && "animate-pulse")} />
+            </Button>
+          )}
+          <Button size="sm" variant={virtualKbOpen ? "default" : "outline"} className="h-7" onClick={() => setVirtualKbOpen(!virtualKbOpen)} disabled={readonly || (phase !== "live" && phase !== "connecting")} title="软键盘"><AppWindow className="h-3.5 w-3.5" /></Button>
+          <ImeSwitcher workspaceId={workspace.id} disabled={readonly || (phase !== "live" && phase !== "connecting")} />
+          <ShortcutPanel sendKey={(keysym, down) => rfbRef.current?.sendKey(keysym, down)} disabled={readonly || phase !== "live"} />
+          <Button size="sm" variant={immersive ? "default" : "outline"} className="h-7 gap-1" onClick={toggleImmersive} title="沉浸模式（Esc 退出）"><Crosshair className="h-3.5 w-3.5" />沉浸</Button>
+          <Button size="sm" variant="outline" className="h-7" onClick={toggleFullscreen} title="全屏">{fullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Expand className="h-3.5 w-3.5" />}</Button>
+          <Button size="sm" variant={kbCapture ? "default" : "outline"} className="h-7 gap-1" onClick={() => setKbCapture(!kbCapture)} title="物理键盘自动抓取（开=本页按键直发远程；输入框聚焦时自动放行）"><Keyboard className="h-3.5 w-3.5" />抓键</Button>
+          {allowWebKiosk && canOperate && (
+            <Button size="sm" variant="outline" className="h-7 gap-1" onClick={enterWebOnly} title="网页模式：只显示网页内容，隐藏全部控制界面（Esc 退出）"><Globe className="h-3.5 w-3.5" />网页</Button>
+          )}
+        </div>
+      </div>
+      )}
+
+      {/* ===== 主体：画布舞台 + 侧边控制坞（r35：网页模式隐藏） ===== */}
+      {!webOnly && (
+      <div className={cn("relative min-h-0 flex-1", isMobile ? "" : "flex gap-3")}>
         {/* ===== 画面舞台（远程桌面内容区） ===== */}
         <div ref={stageRef} tabIndex={0}
           onKeyDown={onStageKeyDown} onKeyUp={onStageKeyUp}
@@ -1130,7 +1365,10 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
             phase === "live" && !isMobile && !fullscreen ? "h-[calc(100dvh-14.5rem)] min-h-[420px]" : "", // r33：live 态舞台高度约束（双向适配缩放前提）
             fullscreen ? "flex h-screen w-screen items-center justify-center" : "")}>
           {/* 画布：r33 真·适配缩放 —— 桌面端 JS 等比双向缩放（可放大可缩小，无拉伸）；移动端宽度适配；1:1 原始尺寸可滚动 */}
-          <div className={cn("flex items-center justify-center overflow-auto w-full", phase === "live" ? (isMobile ? "min-h-0" : "h-full min-h-0") : "min-h-[340px] sm:min-h-[420px] md:min-h-[520px]")}>
+          {/* r35：1:1 溢出四向可达 —— 内容 m-auto（flex 居中在溢出时会剪掉上/左侧无法滚到；
+              m-auto 方案溢出时上下左右均可滚动，正常态依旧视觉居中） */}
+          <div className={cn("overflow-auto w-full", phase === "live" ? (isMobile ? "min-h-0 flex" : "h-full min-h-0 flex") : "min-h-[340px] sm:min-h-[420px] md:min-h-[520px] flex")}>
+            <div className="m-auto shrink-0">
             <canvas
               ref={canvasRef}
               width={1280}
@@ -1146,6 +1384,7 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
                 phase !== "live" ? "invisible absolute" : "",
               )}
             />
+            </div>
           </div>
 
           {/* 输入法捕获输入框（覆盖画布、透明、不拦截指针；本地 IME 组合 → Unicode 注入；
@@ -1238,12 +1477,24 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
             </div>
           )}
 
-          {/* 画布角标 HUD（深色小片，覆盖在远程画面上，非控制栏） */}
+          {/* 画布角标 HUD（深色小片，覆盖在远程画面上，非控制栏；r35 可一键隐藏防遮挡） */}
           {phase === "live" && (
             <>
-              <div className="pointer-events-none absolute left-2 top-2 rounded-md bg-slate-950/70 px-2 py-0.5 font-mono text-[10px] text-teal-300/80 backdrop-blur">
-                RFB · {workspace.uuid.slice(0, 8)} · {inputMode === "touch" ? "TOUCH" : "POINTER"}{serverName ? ` · ${serverName.slice(0, 24)}` : ""}
-              </div>
+              {hudOn && (
+                <div className="pointer-events-auto absolute left-2 top-2 flex items-center gap-1 rounded-md bg-slate-950/70 px-2 py-0.5 font-mono text-[10px] text-teal-300/80 backdrop-blur">
+                  <span className="pointer-events-none">RFB · {workspace.uuid.slice(0, 8)} · {inputMode === "touch" ? "TOUCH" : "POINTER"}{serverName ? ` · ${serverName.slice(0, 24)}` : ""}</span>
+                  <button type="button" onClick={() => { setHudOn(false); try { localStorage.setItem(`hp-hud-${workspace.id}`, "0") } catch {} }}
+                    className="rounded p-0.5 text-slate-400 hover:text-white" title="隐藏左上角标识（防遮挡网页内容；刷新后保持）">
+                    <EyeOff className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
+              {!hudOn && (
+                <button type="button" onClick={() => { setHudOn(true); try { localStorage.setItem(`hp-hud-${workspace.id}`, "1") } catch {} }}
+                  className="absolute left-2 top-2 rounded-md bg-slate-950/40 px-1.5 py-0.5 text-[10px] text-slate-500 opacity-40 hover:opacity-100" title="显示左上角状态标识">
+                  <Eye className="h-3 w-3" />
+                </button>
+              )}
               {imeComposing && (
                 <div className="pointer-events-none absolute left-2 top-8 rounded-md bg-teal-500/90 px-2 py-0.5 text-[10px] font-medium text-white shadow">
                   输入法组合中（{IME_LANGS.find((l) => l.code === imeLang)?.label || imeLang}）→ 上屏自动注入
@@ -1267,8 +1518,8 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
           )}
         </div>
 
-        {/* ===== r31：在线软键盘（展开时显示；桌面在舞台下方，移动端覆盖在底部抽屉上方）===== */}
-        {virtualKbOpen && (
+      {/* ===== r31：在线软键盘（r35：网页模式隐藏） ===== */}
+        {!webOnly && virtualKbOpen && (
           <div className={cn(isMobile ? "fixed inset-x-0 bottom-0 z-30 p-2 pb-[env(safe-area-inset-bottom)]" : "w-full")}>
             <VirtualKeyboard
               sendKey={(keysym, down) => rfbRef.current?.sendKey(keysym, down)}
@@ -1531,6 +1782,7 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
           </aside>
         )}
       </div>
+      )}
     </div>
   )
 }

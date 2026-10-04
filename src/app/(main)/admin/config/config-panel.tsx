@@ -7,7 +7,7 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Save, RotateCcw, History, Wrench, Lock, ShieldAlert, Mail, Siren, ShieldBan, ListChecks, ChevronDown, Search, X, ChevronRight, Plus, Trash2 } from "lucide-react"
+import { Loader2, Save, RotateCcw, History, Wrench, Lock, ShieldAlert, Mail, Siren, ShieldBan, ListChecks, ChevronDown, Search, X, ChevronRight, Plus, Trash2, ShieldCheck } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -102,7 +102,11 @@ const ALERT_CARD_KEYS = new Set([
 // 安全防护卡托管的键（不再重复渲染通用行）
 const SECURITY_CARD_KEYS = new Set([
   "security.ipBanEnabled", "security.ipBanThreshold", "security.ipBanWindowMinutes", "security.ipBanMinutes",
-  "security.ipBanApiCountEnabled", "security.ipBanAlertEnabled", "security.force2faAdminExempt",
+  "security.ipBanApiCountEnabled", "security.ipBanAlertEnabled",
+  // r35：2FA 强制策略三键 + 人机验证两键 → 统一进安全防护卡（"策略管理 2FA 功能项"显性按钮）
+  "security.globalForce2fa", "security.force2faAdminExempt", "security.groupInheritForce2fa",
+  "security.captchaAfterFailures", "security.captchaOnEmailCode",
+  "security.allowWebKiosk", "security.allowVncAudio",
 ])
 
 function jsonPreview(v: unknown, max = 90): string {
@@ -977,8 +981,10 @@ function AlertCard({ canEdit, values, dirtyKeys, busyKey, setLocal, saveItems }:
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="INFO">INFO（全部）</SelectItem>
+                <SelectItem value="WARNING">WARNING</SelectItem>
                 <SelectItem value="ERROR">ERROR</SelectItem>
-                <SelectItem value="CRITICAL">CRITICAL</SelectItem>
+                <SelectItem value="CRITICAL">CRITICAL（仅致命）</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -1243,13 +1249,61 @@ function SecurityCard({ canEdit, values, dirtyKeys, busyKey, setLocal, saveItems
         </div>
       </div>
 
-      <div className="rounded-md border bg-card p-3">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0 space-y-1">
-            <p className="text-sm font-medium">强制 2FA 管理员豁免（security.force2faAdminExempt）</p>
-            <p className="text-xs text-muted-foreground">开启后管理员（SUPER_ADMIN/ADMIN）不受强制 2FA 门控；普通用户门控不受影响。</p>
+      <div className="rounded-md border bg-card p-3 space-y-3">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4 text-amber-500" />
+          <p className="text-sm font-semibold">多因素验证（2FA）强制策略</p>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <div className="flex items-start justify-between gap-3 rounded-md border p-2.5">
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-sm font-medium">全局强制绑定 2FA</p>
+              <p className="text-[11px] text-muted-foreground leading-snug">所有用户登录后未绑定 2FA 将被门控（仅可访问账号安全页完成绑定）。粒度：全局 &lt; 用户组 &lt; 用户表单 &lt; 2FA 管控菜单。</p>
+            </div>
+            <Switch checked={values["security.globalForce2fa"] === true} onCheckedChange={(b) => setLocal("security.globalForce2fa", b)} disabled={!canEdit} aria-label="全局强制2FA" />
           </div>
-          <Switch checked={exempt2fa} onCheckedChange={(b) => setLocal("security.force2faAdminExempt", b)} disabled={!canEdit} aria-label="2FA管理员豁免" />
+          <div className="flex items-start justify-between gap-3 rounded-md border p-2.5">
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-sm font-medium">用户组继承强制 2FA</p>
+              <p className="text-[11px] text-muted-foreground leading-snug">用户组的"组级强制2FA"开关对成员生效（组管理表单可按组覆盖）。</p>
+            </div>
+            <Switch checked={values["security.groupInheritForce2fa"] === true} onCheckedChange={(b) => setLocal("security.groupInheritForce2fa", b)} disabled={!canEdit} aria-label="组继承强制2FA" />
+          </div>
+          <div className="flex items-start justify-between gap-3 rounded-md border p-2.5">
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-sm font-medium">强制 2FA 管理员豁免</p>
+              <p className="text-[11px] text-muted-foreground leading-snug">SUPER_ADMIN/ADMIN 不受门控（保障应急通道；普通用户不受影响）。</p>
+            </div>
+            <Switch checked={exempt2fa} onCheckedChange={(b) => setLocal("security.force2faAdminExempt", b)} disabled={!canEdit} aria-label="2FA管理员豁免" />
+          </div>
+          <div className="flex items-start justify-between gap-3 rounded-md border p-2.5">
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-sm font-medium">人机验证码触发阈值</p>
+              <p className="text-[11px] text-muted-foreground leading-snug">登录失败 N 次后要求图形验证码（0=始终要求；-1=从不）。</p>
+              <PrecisionInput value={Number(values["security.captchaAfterFailures"] ?? 3)} min={-1} max={20} step={1} onChange={(v) => setLocal("security.captchaAfterFailures", Math.round(v))} disabled={!canEdit} className="mt-1 w-24" />
+            </div>
+          </div>
+          <div className="flex items-start justify-between gap-3 rounded-md border p-2.5 sm:col-span-2">
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-sm font-medium">网页模式（纯网页内容显示）</p>
+              <p className="text-[11px] text-muted-foreground leading-snug">允许用户在 VNC 会话进入"网页模式"：只显示网页内容、隐藏全部控制界面、期间不弹任何其他弹窗（Esc 退出）。用户级/组级可用权限锁 blockWebKiosk 单独禁止。全局关闭时所有人不可用。</p>
+            </div>
+            <Switch checked={values["security.allowWebKiosk"] === true} onCheckedChange={(b) => setLocal("security.allowWebKiosk", b)} disabled={!canEdit} aria-label="网页模式开关" />
+          </div>
+          <div className="flex items-start justify-between gap-3 rounded-md border p-2.5 sm:col-span-2">
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-sm font-medium">VNC 远程声音回传</p>
+              <p className="text-[11px] text-muted-foreground leading-snug">允许控制端收听沙箱浏览器声音（静音/音量控制在前端声音按钮）。用户级可用权限锁 blockVncAudio 单独禁止。</p>
+            </div>
+            <Switch checked={values["security.allowVncAudio"] === true} onCheckedChange={(b) => setLocal("security.allowVncAudio", b)} disabled={!canEdit} aria-label="VNC声音回传开关" />
+          </div>
+          <div className="flex items-start justify-between gap-3 rounded-md border p-2.5 sm:col-span-2">
+            <div className="min-w-0 space-y-0.5">
+              <p className="text-sm font-medium">邮箱验证码发送前人机验证</p>
+              <p className="text-[11px] text-muted-foreground leading-snug">发送邮箱验证码（登录/注册/找回/换绑）前必须先通过图形验证码 —— 防脚本刷码轰炸邮箱（r35 新增，配合每分钟 IP 限流与每邮箱频控）。</p>
+            </div>
+            <Switch checked={values["security.captchaOnEmailCode"] === true} onCheckedChange={(b) => setLocal("security.captchaOnEmailCode", b)} disabled={!canEdit} aria-label="邮箱验证码人机验证" />
+          </div>
         </div>
       </div>
     </div>

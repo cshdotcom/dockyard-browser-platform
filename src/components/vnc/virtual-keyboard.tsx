@@ -11,6 +11,7 @@
 
 import * as React from "react"
 import { cn } from "@/lib/utils"
+import { GripHorizontal, X, Smile } from "lucide-react"
 import {
   KS_CTRL, KS_ALT, KS_SHIFT, KS_SUPER, KS,
   SHIFT_SYMBOL_CAPS, EXTENDED_CAPS, PUNCT_CAPS, resolveKeysym, type KeyCap,
@@ -20,7 +21,17 @@ interface KeySender {
   (keysym: number, down: boolean): void
 }
 
-type Layer = "main" | "nums" | "fn"
+type Layer = "main" | "nums" | "fn" | "emoji"
+
+// r35：常用表情符号层（直接以 Unicode keysym 注入 —— 远端任意网页输入框可打出）
+const EMOJI_ROWS: string[][] = [
+  ["😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😜", "🤔", "🙄"],
+  ["😢", "😭", "😡", "🥳", "😴", "🤯", "🥺", "😱", "😤", "😇"],
+  ["👍", "👎", "👏", "🙏", "💪", "🤝", "✌️", "👋", "🫶", "🤌"],
+  ["❤️", "💔", "⭐", "🔥", "✨", "💯", "🎉", "🎁", "🏆", "👑"],
+  ["☀️", "🌙", "☕", "🍎", "🍜", "🍺", "⚽", "🎮", "💰", "🔔"],
+  ["😀-range2", "🐱", "🐶", "🌸", "🌈", "⚡", "❄️", "🌊", "🎵", "📷"],
+]
 
 const LETTER_ROWS: string[][] = [
   ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
@@ -82,6 +93,30 @@ export function VirtualKeyboard({ sendKey, disabled, onClose }: {
   disabled?: boolean
   onClose?: () => void
 }) {
+  // r35：软键盘可拖动 —— 拖动头部手柄整体移动（桌面 absolute 定位；移动端也支持拖到舒适位置）
+  const [pos, setPos] = React.useState<{ x: number; y: number } | null>(null)
+  const dragRef = React.useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
+  const kbRef = React.useRef<HTMLDivElement | null>(null)
+  const onHandlePointerDown = (e: React.PointerEvent) => {
+    if (pos === null) {
+      // 首次拖动：记录当前视口位置为基准
+      const rect = kbRef.current?.getBoundingClientRect()
+      if (!rect) return
+      dragRef.current = { sx: e.clientX, sy: e.clientY, ox: rect.left, oy: rect.top }
+    } else {
+      dragRef.current = { sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y }
+    }
+    ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+  }
+  const onHandlePointerMove = (e: React.PointerEvent) => {
+    const d = dragRef.current
+    if (!d) return
+    const x = Math.min(Math.max(0, d.ox + e.clientX - d.sx), Math.max(0, window.innerWidth - 220))
+    const y = Math.min(Math.max(0, d.oy + e.clientY - d.sy), Math.max(0, window.innerHeight - 120))
+    setPos({ x, y })
+  }
+  const onHandlePointerUp = () => { dragRef.current = null }
+
   const [layer, setLayer] = React.useState<Layer>("main")
   const [shiftOn, setShiftOn] = React.useState(false)
   const [shiftLocked, setShiftLocked] = React.useState(false)
@@ -129,6 +164,16 @@ export function VirtualKeyboard({ sendKey, disabled, onClose }: {
     if (!shiftLocked) setShiftOn(false)
   }
 
+  // r35：Unicode 字符（emoji）注入 —— codePoint 作为 keysym 直发（远端按 UCS4 键事件解释）
+  const pressUnicode = (ch: string) => {
+    if (disabled) return
+    const cp = ch.codePointAt(0)
+    if (cp === undefined) return
+    sendKey(cp, true)
+    setTimeout(() => sendKey(cp, false), 60)
+    doFlash(ch)
+  }
+
   const pressNamed = (keysym: number, label: string) => {
     if (disabled) return
     const keys = [...effectiveMods, keysym]
@@ -155,20 +200,34 @@ export function VirtualKeyboard({ sendKey, disabled, onClose }: {
   const kd = disabled
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-2 shadow-sm select-none" data-testid="vnc-virtual-keyboard">
-      {/* 头部：层切换 + 关闭 */}
+    <div
+      ref={kbRef}
+      style={pos ? { position: "fixed", left: pos.x, top: pos.y, zIndex: 40, maxWidth: "min(96vw, 720px)" } : undefined}
+      className="rounded-xl border border-slate-200 bg-slate-50/80 p-2 shadow-sm select-none"
+      data-testid="vnc-virtual-keyboard">
+      {/* 头部：拖动手柄 + 层切换（含 emoji 表情层）+ 关闭（r35 可拖动） */}
       <div className="mb-1.5 flex items-center gap-1">
-        <span className="mr-auto pl-1 text-[10px] font-medium text-slate-500">在线软键盘（按键直达远程桌面）</span>
-        {([["main", "字母"], ["nums", "数字符号"], ["fn", "功能导航"]] as const).map(([k, label]) => (
+        <span
+          onPointerDown={onHandlePointerDown}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={onHandlePointerUp}
+          onPointerCancel={onHandlePointerUp}
+          className="flex cursor-grab touch-none items-center rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-600 active:cursor-grabbing"
+          title="拖动移动软键盘位置">
+          <GripHorizontal className="h-4 w-4" />
+        </span>
+        <span className="mr-auto truncate pl-1 text-[10px] font-medium text-slate-500">在线软键盘{pos ? "（已拖动定位）" : "（按住抓手拖动）"}</span>
+        {([["main", "字母"], ["nums", "数字符号"], ["fn", "功能导航"], ["emoji", "表情"]] as const).map(([k, label]) => (
           <button key={k} type="button" onClick={() => setLayer(k)}
-            className={cn("rounded-md border px-2 py-0.5 text-[10px] transition-colors",
+            className={cn("flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] transition-colors",
               layer === k ? "border-teal-400 bg-teal-50 text-teal-700" : "border-slate-200 bg-white text-slate-500 hover:bg-slate-100")}>
+            {k === "emoji" && <Smile className="h-3 w-3" />}
             {label}
           </button>
         ))}
         {onClose && (
           <button type="button" onClick={onClose} className="rounded-md p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600" title="收起软键盘">
-            ✕
+            <X className="h-3.5 w-3.5" />
           </button>
         )}
       </div>
@@ -278,8 +337,29 @@ export function VirtualKeyboard({ sendKey, disabled, onClose }: {
         </div>
       )}
 
+      {/* r35：表情符号层 —— Unicode keysym 直注入（远端任意输入框可打出；常用 60 个分类精选） */}
+      {layer === "emoji" && (
+        <div className="space-y-1">
+          {EMOJI_ROWS.filter((r) => !r[0].includes("-range2")).map((row, ri) => (
+            <div key={ri} className="flex gap-1">
+              {row.map((em) => (
+                <button key={em} type="button" disabled={disabled}
+                  onPointerDown={(e) => { e.preventDefault(); pressUnicode(em) }}
+                  className="h-10 min-w-0 flex-1 select-none rounded-md border border-slate-200 bg-white text-xl transition-transform touch-manipulation active:scale-90 hover:border-teal-300 hover:bg-teal-50">
+                  {em}
+                </button>
+              ))}
+            </div>
+          ))}
+          <div className="flex items-center justify-center gap-2 pt-1">
+            <button type="button" onClick={() => setLayer("main")} className="rounded-md border border-slate-200 bg-white px-3 py-1 text-[10px] text-slate-600 hover:bg-slate-100">← 返回字母层</button>
+            <span className="text-[10px] text-slate-400">表情以 Unicode 直注入：选择后即上屏远端输入框</span>
+          </div>
+        </div>
+      )}
+
       <p className="mt-1 px-1 text-[10px] leading-relaxed text-slate-400">
-        修饰键为粘滞语义：点选 Ctrl 后再按 C = 发送 Ctrl+C（自动复位）；连点两次修饰键 = 保持。输入中文等语言请使用输入面板（本地输入法组合注入）。
+        修饰键为粘滞语义：点选 Ctrl 后再按 C = 发送 Ctrl+C（自动复位）；连点两次修饰键 = 保持。输入中文等语言请使用输入法输入通道（顶部"输入法"切换器 + 画面点击获得焦点）。表情层含常用 60 个分类表情。
       </p>
     </div>
   )

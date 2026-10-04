@@ -26,6 +26,7 @@ import {
   revokeShareAction, exportWorkspaceConfigAction, exportHarAction, runScriptAction,
   createWorkspaceShareLinkAction, revokeWorkspaceShareLinkAction,
   refreshVncKeyAction, updateWorkspaceAction, switchProxyAction, restartBrowserProcessAction,
+  switchWorkspaceModeAction,
 } from "@/server/actions/workspaces"
 import { WorkspaceShareDialog } from "../share-dialogs"
 import { setWorkspacePolicyOverrideAction, refreshWorkspacePolicyAction } from "@/server/actions/rules"
@@ -45,6 +46,7 @@ export interface WorkspaceDetailData {
   snapshotId: string | null; snapshotName: string | null; snapshotSize: number
   ownerName: string; ownerEmail: string | null; creatorName: string | null
   isOwner: boolean; mySharePermission: string | null; isAdmin: boolean
+  allowWebKiosk: boolean; allowVncAudio: boolean
   /** r13c：四级共享管控（沙箱否决/用户/组/全局解析结果，供共享按钮禁用态与提示） */
   shareDisabled: boolean
   shareBlockedReason: string
@@ -258,7 +260,7 @@ export function WorkspaceDetail({
 
         {isVnc && (
           <TabsContent value="vnc" className="mt-4">
-            <VncPanel workspace={workspace} canOperate={canOperate} vncBridge={vncBridge} />
+            <VncPanel workspace={workspace} canOperate={canOperate} vncBridge={vncBridge} allowWebKiosk={workspace.allowWebKiosk} allowVncAudio={workspace.allowVncAudio} />
           </TabsContent>
         )}
         {!isVnc && (
@@ -304,9 +306,10 @@ export function WorkspaceDetail({
 }
 
 // ================= NoVNC 远程桌面面板（HelmPort 品牌化查看器：自研 RFB 客户端） =================
-function VncPanel({ workspace, canOperate, vncBridge }: { workspace: WorkspaceDetailData; canOperate: boolean; vncBridge: { mode: string; url: string } }) {
+function VncPanel({ workspace, canOperate, vncBridge, allowWebKiosk, allowVncAudio }: { workspace: WorkspaceDetailData; canOperate: boolean; vncBridge: { mode: string; url: string }; allowWebKiosk?: boolean; allowVncAudio?: boolean }) {
   const router = useRouter()
   const [busy, setBusy] = React.useState(false)
+  const [confirmSwitchDown, setConfirmSwitchDown] = React.useState(false)
 
   const refreshKey = async () => {
     setBusy(true)
@@ -323,6 +326,18 @@ function VncPanel({ workspace, canOperate, vncBridge }: { workspace: WorkspaceDe
       const res = await restartBrowserProcessAction({ id: workspace.id })
       if (res.code === 0) {
         toast.success(res.data?.simulated ? "已触发浏览器进程重启（模拟通道）" : "已触发浏览器进程重启，同一 Profile 秒级拉起")
+        router.refresh()
+      } else toast.error(res.msg)
+    } finally { setBusy(false) }
+  }
+
+  // r35：VNC↔CDP 模式升降级（Profile 归档迁移保留数据）
+  const switchMode = async () => {
+    setBusy(true)
+    try {
+      const res = await switchWorkspaceModeAction({ id: workspace.id, targetMode: "cdp_light" })
+      if (res.code === 0) {
+        toast.success(`已切换为 CDP 轻量模式${res.data?.restarted ? "并已自动拉起" : ""}${"，浏览器 Profile 已归档迁移保留"}`)
         router.refresh()
       } else toast.error(res.msg)
     } finally { setBusy(false) }
@@ -353,6 +368,7 @@ function VncPanel({ workspace, canOperate, vncBridge }: { workspace: WorkspaceDe
           watermark: workspace.vncPolicy.watermark,
           autoQuality: workspace.vncPolicy.autoQuality,
         } : undefined}
+        allowWebKiosk={allowWebKiosk}
       />
 
       {/* r13c：VNC 接入信息（跨域名部署可视化） */}
@@ -401,6 +417,17 @@ function VncPanel({ workspace, canOperate, vncBridge }: { workspace: WorkspaceDe
             </Button>
             <Button variant="outline" size="sm" onClick={restartBrowser} disabled={!canOperate || busy} title="容器内浏览器进程退出后由 supervisor 以同一 Profile 自动拉起；此按钮用于卡死时手动触发">
               <RotateCcw className="h-3.5 w-3.5 mr-1" /> 重启浏览器进程
+            </Button>
+            <ConfirmDialog
+              open={confirmSwitchDown}
+              onOpenChange={setConfirmSwitchDown}
+              title="降级为 CDP 轻量模式"
+              confirmText="切换并迁移数据"
+              description={`将「${workspace.name}」从 VNC 完整模式切换为 CDP 轻量模式：浏览器 Profile（登录态/书签/历史/插件配置）将归档迁移保留；运行中的远程桌面会话将断开并自动以 CDP 模式重新拉起。`}
+              onConfirm={switchMode}
+            />
+            <Button variant="outline" size="sm" onClick={() => setConfirmSwitchDown(true)} disabled={!canOperate || busy} title="保留浏览器数据切换为 CDP 轻量模式（Profile 归档迁移）">
+              <Terminal className="h-3.5 w-3.5 mr-1" /> 降级为 CDP 轻量模式
             </Button>
             <span className="text-xs text-muted-foreground">
               防退出：浏览器进程退出后 1 秒内自动以同一 Profile 拉起（supervisor 循环 + RestartPolicy=always + 看门狗自动重建）
@@ -584,6 +611,20 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
   const [throttle, setThrottle] = React.useState({ download: 0, upload: 0, latency: 0 })
   const [domain, setDomain] = React.useState("")
   const [busy, setBusy] = React.useState(false)
+  const [confirmSwitchUp, setConfirmSwitchUp] = React.useState(false)
+  const router = useRouter()
+
+  // r35：CDP→VNC 升级（Profile 归档迁移保留数据）
+  const switchUp = async () => {
+    setBusy(true)
+    try {
+      const res = await switchWorkspaceModeAction({ id: workspace.id, targetMode: "novnc_full" })
+      if (res.code === 0) {
+        toast.success(`已升级为 VNC 完整模式${res.data?.restarted ? "并已自动拉起" : ""}，浏览器 Profile 已归档迁移保留`)
+        router.refresh()
+      } else toast.error(res.msg)
+    } finally { setBusy(false) }
+  }
 
   const applyThrottle = async () => {
     setBusy(true)
@@ -612,6 +653,20 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
           <CardDescription>所有 CDP 指令经平台网关 Route Handler 转发（限速+黑名单拦截），不直连底层 Chrome</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <ConfirmDialog
+              open={confirmSwitchUp}
+              onOpenChange={setConfirmSwitchUp}
+              title="升级为 VNC 完整模式"
+              confirmText="切换并迁移数据"
+              description={`将「${workspace.name}」从 CDP 轻量模式升级为 VNC 完整模式：浏览器 Profile 将归档迁移保留，升级后可获得完整远程桌面（软键盘/输入法/录屏/截图/剪贴板等全部能力）。`}
+              onConfirm={switchUp}
+            />
+            <Button variant="outline" size="sm" onClick={() => setConfirmSwitchUp(true)} disabled={!canOperate || busy} title="保留浏览器数据升级为 VNC 完整模式（Profile 归档迁移）">
+              <MonitorPlay className="h-3.5 w-3.5 mr-1" /> 升级为 VNC 完整模式
+            </Button>
+            <span className="text-xs text-muted-foreground">r35：VNC↔CDP 双向升降级均保留浏览器数据</span>
+          </div>
           {publicCdpEndpoint && (
             <div className="rounded-md border border-teal-200 bg-teal-50 dark:bg-teal-950/30 p-2.5">
               <div className="text-xs text-muted-foreground mb-1">

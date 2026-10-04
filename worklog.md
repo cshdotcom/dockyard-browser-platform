@@ -1226,3 +1226,34 @@ Work Log:
 Stage Summary:
 - r34+r34b 全部交付并发布 v1.10.0：7 大报障根因修复（闲置回收/验证码/软键盘/剪贴板/IME/IP/播放器）+ 9 项功能增强（消息记录/文件管理5项/记录存储/时间轴/配置搜索/磁盘容量/上传进度/批量下载/邮件规则）
 - 质量证据：QA 脚本 48/48 断言 + 浏览器 E2E 16 场景实证 + tsc 29=基线31-2 净减 + lint 0 error 0 warning + build 78 路由全绿 + CI 双工作流 success + GHCR 双镜像 manifest 200
+
+---
+Task ID: r35
+Agent: main
+Task: r35 大批次 —— 用户上传日志根因修复（SQLite WAL/软删 email 占用/P1008）+ 三大点名功能（文件编辑器/SingBox 订阅导入/VNC↔CDP 升降级）+ VNC 体验包（物理键盘抓取/全屏容器化/网页模式/软键盘拖动+emoji/HUD 可隐藏/触屏鼠标混合）+ 2FA 强制三处补齐 + 模拟登录 + 认证加固 + 定时录屏 + 快照 VNC + 企业策略颗粒化 + 用户侧代理页
+
+Work Log:
+- 【P0-1 SQLite 性能根因（日志实锤）】journal=delete 写锁排他 → slow-query 1~5s 堆积 → P1008 → JWT 会话错误/CDP 判卡死反复重启。修复：Prisma $queryRawUnsafe 切 WAL（持久）+ connection_limit=8 + socket_timeout=20s + PRAGMA optimize；实测 journal mode=wal ✓
+- 【P0-2 软删用户 email 占用】根因：软删除记录仍占 @unique → "邮箱已被占用"。修复：删除时 email→NULL + username 污染化防撞 + 孤儿 2FA 凭据清理 + 启动维护扫历史残留（释放 email/username/过期会话/验证码）
+- 【P0-3 重置密码复制】navigator.clipboard 失败静默 → 加 execCommand 回退 + select-all 手动复制提示 + 友好错误
+- 【文件编辑器增强（点名）】SuperEditor 组件：行号槽同步滚动/查找替换（正则+大小写+全部）/跳行/Ctrl+S/超级工具栏（大小写/Trim/去空行/去重/排序/反转/时间戳/JSON 格式化压缩/复制全部，按扩展名自适应）/MD 实时可视化分屏/HTML iframe/SVG 内联渲染/状态栏（行:列/选中/字节）；ImageCropperDialog：canvas 裁剪（四角手柄+比例锁定 6 档+旋转+缩放+WebP/PNG/JPEG+质量）经上传通道落盘（配额链复用）；renderMarkdown 抽独立客户端安全模块
+- 【SingBox 订阅一键导入（点名）】subscription-parser.ts：vmess(base64JSON)/vless(reality)/ss(两种编码)/trojan/socks/http + base64 整体订阅/明文列表/Clash YAML 三格式；SSRF 防护（内网/回环/元数据拒绝）+ UA 模拟 + 限流；两步流 action（解析预览→勾选子集→路由模式 rule/proxy/direct→创建实例）；单测 29/29（含坏行容错）；UI 订阅导入对话框（全选/清空/节点列表）——浏览器端到端实证 2/2 节点解析 ✓
+- 【VNC↔CDP 升降级（点名）】switchWorkspaceModeAction：Profile tar 归档→快照记录+FileMeta→解包新 profileKey 目录→销毁旧会话→mode 切换→自动拉起；审计 WORKSPACE_MODE_SWITCH；双向 UI（VncPanel 降级按钮/CdpPanel 升级按钮）
+- 【VNC 体验包】①物理键盘 window 级自动抓取（capture:true，焦点无关，沉浸/非沉浸一致；输入框聚焦自动放行；F11/Esc 保留本地）②全屏容器化（rootRef 全屏：功能栏+控制坞+软键盘全保留 + 全屏紧凑功能栏）③沉浸模式 pointerlockchange 复位（Esc 状态错乱修复）④网页模式 webOnly（纯网页内容+极简退出+Esc+不弹窗；全局开关+blockWebKiosk 权限锁+MCP kioskMode/kioskStartUrl 创建参数+沙箱 kiosk 字段+exitGuard kiosk 档复用+重建链保持）⑤工具栏横向滑动 ⑥软键盘可拖动（手柄+fixed 定位）+emoji 表情层（60 常用+Unicode keysym 直注入）⑦HUD RFB 徽标可隐藏（localStorage 记忆）⑧触屏不再否决鼠标事件（混合输入）⑨1:1 溢出四向可达（m-auto）⑩声音回传（<audio> webm/opus 流 + POST 签 HMAC 令牌 + GET ffmpeg pulse 抓流 + 静音控制 + 无声卡 503 优雅降级 + allowVncAudio 权限锁）
+- 【2FA 强制三处补齐（用户点名）】user-form 三态开关（继承/强制/不强制+实际绑定状态提示）+ updateUserAction 字段；组级已有确认；config 安全卡 2FA 策略块（全局强制/组继承/管理员豁免/人机验证阈值/邮箱码人机验证 5 控件）
+- 【模拟登录】impersonateLoginAction（超管+一次性票据 5min+审计）→ next-auth signIn 建立会话 → session.impersonatorName → AppShell 紫色横幅+一键退出模拟
+- 【头像编辑】/api/avatar 支持 targetUserId（管理员代传，独立审计 USER_AVATAR_ADMIN_SET）；user-form 上传/恢复默认
+- 【邮箱验证码人机验证（点名）】email-code 路由 41006 captchaRequired 强制（security.captchaOnEmailCode 开关）+ 三个表单（login/register/forgot）适配自动拉取 captcha
+- 【认证配置可管理化】captchaAfterFailures/captchaOnEmailCode/allowWebKiosk/allowVncAudio 注册 CONFIG_DEFAULTS
+- 【定时录屏】startManualRecording maxMinutes：ffmpeg -t 精确限时 + 到时兜底收口 + metadata 截止时间 + action 层 5-720 分钟（Alt+点击录屏按钮选择）
+- 【录屏孤儿修正】fixOrphanRecording（pid 探测→FAILED 收口）+ manualRecordingStatus 轮询对账（重开页面真实态）
+- 【快照支持 VNC】mode 校验放开两模式 + RUNNING 限制放开（Profile 磁盘持久化）+ 前端候选放开
+- 【企业策略颗粒化】策略目录补全（DnsOverHttpsMode/Templates + 搜索引擎 Keyword/Suggest/Icon/Encodings/AlternateURLs/POST 参数/LockDown）；User/Group managedPolicyOverrides（JSON 字段）+ resolveUserPolicyOverrides 合并链（用户>组>模板，安全键后置不可覆盖）+ 用户/组表单策略编辑器 + 校验审计
+- 【用户侧代理页（404 修复）】/proxy 页 + 菜单入口：代理绑定/直连统计+工作区绑定表（通道/类型/状态/SOCKS 端点）
+- 【杂项对齐】SANDBOX_GRANT_KEYS 前后端 8/9 对齐（+blockRestartInstance）；alert.emailMinLevel 补 INFO/WARNING 档；VncPanel→HelmPortViewer 传 allowWebKiosk/allowVncAudio
+- 【质量门】tsc 23=基线26-3（净减）；eslint 0 error 0 warning；next build 80 路由全绿（47s）；QA 脚本 65/65；浏览器 E2E 12 场景实证（登录/dashboard/用户管理/安全卡 2FA 五控件/SingBox 订阅按钮+对话框+粘贴解析 2/2/代理页/文件创建/超级编辑器打开-输入-MD 实时预览-保存/移动端 375px 双页无溢出）；QA 数据清理
+
+Stage Summary:
+- r35 交付：3 大 P0 根因修复（WAL/软删 email/密码复制）+ 3 大点名功能（超级编辑器+裁剪/订阅一键导入/升降级）+ VNC 体验包 10 项 + 认证批次 6 项 + 录屏 2 项 + 快照 VNC + 企业策略颗粒化 + 代理页 + 杂项对齐
+- 浏览器实证关键证据：WAL 持久启用、订阅解析 2/2 节点、超级编辑器 MD 预览+保存、安全卡 2FA 五控件渲染、移动端 375 无溢出
+- 截图存档 download/qa-r35/（13 张）；测试脚本 scripts/qa-r35.ts（65 断言）+ scripts/qa-r35-subscription.ts（29 断言）

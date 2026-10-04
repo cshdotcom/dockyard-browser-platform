@@ -30,6 +30,8 @@ const LOCK_GROUPS: Array<{ title: string; keys: string[] }> = [
 ]
 
 const LOCK_LABELS: Record<string, string> = {
+  "blockWebKiosk": "网页模式（纯网页内容显示）",
+  "blockVncAudio": "VNC 声音回传",
   blockCreateWorkspace: "创建工作区", blockModifyWorkspace: "修改工作区", blockModifyResourceExpiry: "修改资源有效期",
   blockDeleteResource: "删除资源", blockRestoreRecycle: "从回收站恢复", blockBatchOps: "批量操作",
   blockRestartInstance: "重启实例", blockViewContainerDetail: "查看容器详情",

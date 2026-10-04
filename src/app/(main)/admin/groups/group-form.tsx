@@ -41,6 +41,7 @@ interface GroupFormDialogProps {
     quota: Record<string, number | null> | null
     reservedQuota: Record<string, number | null> | null
     force2fa: boolean
+    managedPolicyOverrides?: string | null
     allowInternalNetwork: boolean
     allowSecureLocationAccess: boolean
     allowShare: boolean
@@ -96,6 +97,8 @@ function descendantsOf(id: string, all: GroupTreeNodeInfo[]): Set<string> {
 export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParentId, allNodes }: GroupFormDialogProps) {
   const router = useRouter()
   const [busy, setBusy] = React.useState(false)
+  // r35：组级企业策略覆盖 JSON
+  const [policyOverrides, setPolicyOverrides] = React.useState("")
 
   const [name, setName] = React.useState("")
   const [description, setDescription] = React.useState("")
@@ -147,6 +150,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       setEnabled(group.enabled)
       setInheritParentQuota(group.inheritParentQuota)
       setForce2fa(group.force2fa)
+      setPolicyOverrides(group.managedPolicyOverrides ? (() => { try { return JSON.stringify(JSON.parse(group.managedPolicyOverrides), null, 2) } catch { return group.managedPolicyOverrides } })() : "")
       setAllowInternalNetwork(group.allowInternalNetwork)
       setAllowShare(group.allowShare !== false)
       setVncLimitEnabled(group.vncSessionMaxMinutes != null && group.vncSessionMaxMinutes > 0)
@@ -255,6 +259,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       enabled,
       inheritParentQuota,
       force2fa,
+      managedPolicyOverrides: policyOverrides.trim() || undefined,
       allowInternalNetwork,
       allowSecureLocationAccess,
       allowShare,
@@ -369,6 +374,18 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
               <span className="text-sm">启用该组</span>
               <Switch checked={enabled} onCheckedChange={setEnabled} />
             </div>
+            <div className="space-y-1.5">
+          <Label className="text-sm">企业策略覆盖（Chromium Managed Policy）</Label>
+          <textarea
+            value={policyOverrides}
+            onChange={(e) => setPolicyOverrides(e.target.value)}
+            placeholder={'{\n  "DefaultSearchProviderEnabled": false,\n  "DnsOverHttpsMode": "off",\n  "DeveloperToolsAvailability": 2\n}'}
+            className="min-h-[96px] w-full rounded-md border bg-background p-2 font-mono text-xs"
+            spellCheck={false}
+          />
+          <p className="text-[11px] text-muted-foreground">组级策略 JSON（成员继承；用户级可覆盖组级）。可用键：搜索引擎/DNS/DevTools/下载/无痕等 40+ 项。</p>
+        </div>
+
             <div className="flex items-center justify-between rounded-md border px-3 py-2">
               <span className="text-sm">组级强制2FA</span>
               <Switch checked={force2fa} onCheckedChange={setForce2fa} />

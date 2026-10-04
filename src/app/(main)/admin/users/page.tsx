@@ -78,7 +78,7 @@ export default async function AdminUsersPage({
         lastLoginIp: true,
         createdAt: true,
         // r33：存储配额 + 沙箱最大时长
-        storageQuotaMb: true,
+        storageQuotaMb: true, managedPolicyOverrides: true,
         storagePolicy: true,
         maxTtlMinutes: true,
         allowUnlimitedTtl: true,
@@ -157,6 +157,7 @@ export default async function AdminUsersPage({
     maxTtlMinutes: u.maxTtlMinutes ?? null,
     allowUnlimitedTtl: u.allowUnlimitedTtl ?? null,
     storageUsageMb: storageUsageMbByUser.get(u.id) ?? 0,
+    managedPolicyOverrides: (u as { managedPolicyOverrides?: string | null }).managedPolicyOverrides ?? null,
   }))
 
   return (

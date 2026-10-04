@@ -5,7 +5,8 @@
 import * as React from "react"
 import { PlaybackPolicyDialog } from "@/components/recordings/playback-policy-dialog"
 import { HardwarePermsDialog } from "@/components/hardware/hardware-perms-dialog"
-import { Cpu } from "lucide-react"
+import { Cpu, VenetianMask } from "lucide-react"
+import { signIn } from "next-auth/react"
 import { RetentionPolicyDialog } from "@/components/recycle/retention-policy-dialog"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
@@ -34,7 +35,7 @@ import {
   importUsersCsvAction, batchSetUserStatusAction, batchMoveGroupAction, batchResetQuotaAction, batchAssignStorageQuotaAction,
   kickUserSessionsAction, deleteUserAction, unlockUserAction, adminResetPasswordAction,
   setForce2faAction, resetUserTotpAction, clearTrustedDevicesAction, resetBackupCodesAction,
-  setUserNetworkPolicyAction, setUserShareAllowedAction,
+  setUserNetworkPolicyAction, setUserShareAllowedAction, impersonateLoginAction,
   type CsvImportReport,
 } from "@/server/actions/users"
 import { batchDeleteUsersAction } from "@/server/actions/batch"
@@ -75,6 +76,7 @@ export interface AdminUserRow {
   maxTtlMinutes: number | null
   allowUnlimitedTtl: boolean | null
   storageUsageMb: number // 当前用量（FileMeta 统一口径）
+  managedPolicyOverrides?: string | null // r35：用户级 Chromium 企业策略覆盖（JSON 字符串）
 }
 
 interface UsersTableProps {
@@ -209,6 +211,26 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
     } finally {
       setBusyAction("")
     }
+  }
+
+  // ---- r35：模拟登录（超管）—— 票据 → signIn 建立模拟会话 ----
+  const isSuperAdmin = viewerRole === "SUPER_ADMIN"
+  const doImpersonate = async (row: AdminUserRow) => {
+    const reason = window.prompt(`以「${row.displayName || row.username}」身份建立模拟会话？请输入本次模拟原因（将写入审计）：`, "用户支持/问题排查")
+    if (reason === null) return
+    setBusyAction(`impersonate-${row.id}`)
+    try {
+      const res = await impersonateLoginAction({ id: row.id, reason: reason || "管理员模拟登录" })
+      if (res.code === 0 && res.data) {
+        toast.success(`模拟会话票据已签发（5 分钟内有效），正在进入 ${res.data.username} 的视角…`)
+        const r = await signIn("credentials", { ticket: res.data.ticket, redirect: false })
+        if (r?.ok) {
+          window.location.href = "/dashboard"
+        } else {
+          toast.error("模拟会话建立失败（票据可能已过期），请重试")
+        }
+      } else toast.error(res.msg)
+    } finally { setBusyAction("") }
   }
 
   // ---- CSV 导出 ----
@@ -489,6 +511,11 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
             </DropdownMenuItem>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
+        {isSuperAdmin && (
+          <DropdownMenuItem onClick={() => void doImpersonate(row)} title="以该用户身份建立短时模拟会话（全审计）">
+            <VenetianMask className="mr-1.5 h-4 w-4" /> 模拟登录该用户（超管）
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>
             <ShieldBan className="mr-1.5 h-4 w-4" /> 网络访问策略
@@ -879,14 +906,28 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
             </DialogDescription>
           </DialogHeader>
           <div className="flex items-center gap-2 rounded-md border bg-muted/50 p-3">
-            <code className="flex-1 font-mono text-lg font-semibold tracking-wider">{tempPassword?.password}</code>
+            <code className="flex-1 select-all font-mono text-lg font-semibold tracking-wider" title="点击密码文本可全选，支持手动复制">{tempPassword?.password}</code>
             <Button
               size="sm"
               variant="outline"
               onClick={async () => {
                 if (tempPassword) {
-                  await navigator.clipboard.writeText(tempPassword.password).catch(() => {})
-                  toast.success("已复制到剪贴板")
+                  // r35：多重复制保障 —— clipboard API → execCommand 回退 → 手动全选提示
+                  let copied = false
+                  try { await navigator.clipboard.writeText(tempPassword.password); copied = true } catch { copied = false }
+                  if (!copied) {
+                    try {
+                      const ta = document.createElement("textarea")
+                      ta.value = tempPassword.password
+                      ta.style.position = "fixed"; ta.style.opacity = "0"
+                      document.body.appendChild(ta)
+                      ta.select(); ta.setSelectionRange(0, ta.value.length)
+                      copied = document.execCommand("copy")
+                      document.body.removeChild(ta)
+                    } catch { copied = false }
+                  }
+                  if (copied) toast.success("临时密码已复制到剪贴板")
+                  else toast.info("自动复制被浏览器拦截：请点击密码文本手动复制（已全选）")
                 }
               }}
             >

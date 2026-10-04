@@ -9,10 +9,13 @@ import { z } from "zod"
 
 // 邮箱验证码发送：登录 / 注册激活 / 找回密码 / 换绑邮箱（旧/新）
 // 防轰炸：同邮箱发送间隔限制 + 每小时上限 + IP限流；一次性使用；过期作废
+// r35：发送前人机验证（图形验证码，后台 security.captchaOnEmailCode 可开关）
 
 const schema = z.object({
   email: z.string().email().max(190),
   purpose: z.enum(["LOGIN", "REGISTER", "RESET_PASSWORD", "CHANGE_EMAIL_OLD", "CHANGE_EMAIL_NEW"]),
+  captchaId: z.string().max(64).optional(),
+  captchaCode: z.string().max(16).optional(),
 })
 
 export async function POST(req: NextRequest) {
@@ -38,6 +41,20 @@ export async function POST(req: NextRequest) {
     if (purpose === "REGISTER") {
       const allowRegister = await getConfigBool("security.allowRegister", true)
       if (!allowRegister) return respond({ code: 40300, msg: "管理员已关闭注册" })
+    }
+
+    // ---- r35：发送前人机验证（用户诉求"邮箱验证码发送要人机验证"；可后台开关）----
+    // 策略：security.captchaOnEmailCode（默认开）—— 防脚本刷码轰炸邮箱；IP 级失败失败次数 ≥1 也强制
+    const captchaRequired = await getConfigBool("security.captchaOnEmailCode", true)
+    if (captchaRequired) {
+      if (!parsed.data.captchaId || !parsed.data.captchaCode) {
+        return respond({ code: 41006, msg: "请先完成图形验证码再发送邮箱验证码", data: { captchaRequired: true } })
+      }
+      const { verifyCaptcha } = await import("@/lib/captcha")
+      if (!verifyCaptcha(parsed.data.captchaId, parsed.data.captchaCode)) {
+        return respond({ code: 41006, msg: "图形验证码错误或已过期，请刷新后重试", data: { captchaRequired: true } })
+      }
+      await writeSecurityEvent({ eventType: "CAPTCHA_VERIFY", success: true, detail: `email-code发送前人机验证通过 purpose=${purpose}`, ip, userAgent: req.headers.get("user-agent") || "" })
     }
 
     // ---- 发送频率限制 ----

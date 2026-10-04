@@ -1,5 +1,6 @@
 import { resolveShareControl } from "@/lib/share-policy"
 import { notFound } from "next/navigation"
+import { isPermissionLocked } from "@/lib/permissions"
 import { db } from "@/lib/db"
 import { requireAuth, userGroupIds } from "@/lib/permissions"
 import { fmtDate, fmtBytes } from "@/lib/utils-server"
@@ -118,6 +119,9 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
         ownerEmail: owner?.email ?? null,
         creatorName: creator ? (creator.displayName || creator.username) : null,
         isOwner: ws.userId === ctx.userId,
+        // r35：网页模式与声音回传权限（全局开关 AND 用户级权限锁；详情页直传查看器）
+        allowWebKiosk: (await getConfigBool("security.allowWebKiosk", false)) && !(await isPermissionLocked(ctx.userId, "blockWebKiosk")),
+        allowVncAudio: (await getConfigBool("security.allowVncAudio", true)) && !(await isPermissionLocked(ctx.userId, "blockVncAudio")),
         mySharePermission: share?.permission ?? null,
         isAdmin,
         shareDisabled: ws.shareDisabled === true,

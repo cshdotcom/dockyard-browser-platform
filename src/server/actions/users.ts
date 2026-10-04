@@ -6,7 +6,7 @@ import { z } from "zod"
 import { Prisma } from "@prisma/client"
 import { db } from "@/lib/db"
 import { actionHandler, type ActionResult } from "@/lib/api"
-import { requireWritableMode, requireAdmin, requireAuth } from "@/lib/permissions"
+import { requireWritableMode, requireAdmin, requireSuperAdmin, requireAuth } from "@/lib/permissions"
 import { writeAudit, writeSecurityEvent } from "@/lib/audit"
 import { trackBehavior } from "@/lib/risk"
 import { zodValidate, zId, zEmail, zUsername, validatePasswordPolicy, checkPasswordHistory, zPrecision } from "@/lib/validators"
@@ -126,6 +126,8 @@ const updateUserSchema = z.object({
   groupIds: z.array(zId).max(50).optional(), // 不传 = 不改组
   quota: zQuota.optional(),
   password: z.string().min(6).max(128).optional().or(z.literal("").transform(() => undefined)),
+  force2faSetup: z.boolean().nullable().optional(), // r35：用户级强制 2FA（null=继承组/全局）
+  managedPolicyOverrides: z.string().max(64 * 1024).optional().or(z.literal("").transform(() => undefined)), // r35：企业策略覆盖 JSON（空=清除）
 })
 
 export async function updateUserAction(input: unknown): Promise<ActionResult<{ id: string }>> {
@@ -150,6 +152,25 @@ export async function updateUserAction(input: unknown): Promise<ActionResult<{ i
       frozen: p.frozen,
     }
     if (p.quota) data.quota = { ...p.quota }
+    // r35：强制 2FA 用户级覆盖（三态：不传=不改 / true=强制 / false=解除 / null=继承）
+    if (p.force2faSetup !== undefined) data.force2faSetup = p.force2faSetup === null ? false : p.force2faSetup
+    // r35：企业策略覆盖（JSON 校验：空串=清除，非空必须可解析为对象且键合法）
+    if (p.managedPolicyOverrides !== undefined) {
+      const raw = p.managedPolicyOverrides.trim()
+      if (!raw) {
+        data.managedPolicyOverrides = null
+      } else {
+        let parsed: unknown
+        try { parsed = JSON.parse(raw) } catch { throw new Error("企业策略覆盖不是合法 JSON") }
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          throw new Error("企业策略覆盖必须是 JSON 键值对象")
+        }
+        const { validateExtraPolicies } = await import("@/lib/chromium-policies")
+        const v = validateExtraPolicies(parsed as Record<string, unknown>)
+        if (!v.ok) throw new Error(`策略键校验失败：${v.errors.join("；")}`)
+        data.managedPolicyOverrides = JSON.stringify(parsed)
+      }
+    }
 
     // 密码（可选）
     if (p.password) {
@@ -281,9 +302,18 @@ export async function deleteUserAction(input: unknown): Promise<ActionResult<{ i
     if (running > 0) throw new Error(`该用户存在 ${running} 个运行中浏览器会话，禁止删除（请先销毁其工作区）`)
 
     const now = new Date()
-    await db.user.update({ where: { id }, data: { deletedAt: now, enabled: false, frozen: true } })
-    // 撤销全部会话与刷新令牌；软删API令牌
+    // r35：唯一字段即时释放 —— 软删除用户 email 置空、username 污染化防撞
+    // （根因：软删记录仍占用 @unique 索引 → 新用户"邮箱已被占用"无法绑定）
+    const poisonedUsername = `__del__${user.id.slice(-8)}__${Math.random().toString(36).slice(2, 8)}`
+    await db.user.update({
+      where: { id },
+      data: { deletedAt: now, enabled: false, frozen: true, email: null, username: poisonedUsername },
+    })
+    // 撤销全部会话与刷新令牌；软删API令牌；清理孤儿 2FA 凭据
     const kicked = await kickAllSessions(id, "ADMIN_KICK")
+    await db.totpSecret.deleteMany({ where: { userId: id } }).catch(() => {})
+    await db.twoFactorBackupCode.deleteMany({ where: { userId: id } }).catch(() => {})
+    await db.trustedDevice.deleteMany({ where: { userId: id } }).catch(() => {})
     const tokens = await db.apiToken.updateMany({
       where: { userId: id, deletedAt: null },
       data: { deletedAt: now, enabled: false },
@@ -571,6 +601,38 @@ export async function setForce2faAction(input: unknown): Promise<ActionResult<{ 
     })
 
     return { id: user.id, force2faSetup: p.force2faSetup }
+  })
+}
+
+// ---- r35：模拟登录（impersonate）—— 仅超管；短时会话 + 完整审计 + 页面横幅 ----
+// 返回一次性票据（5 分钟内使用）→ 前端 signIn("credentials", { ticket }) 建立模拟会话
+export async function impersonateLoginAction(input: unknown): Promise<ActionResult<{ ticket: string; username: string; displayName: string | null }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireSuperAdmin()
+    const p = zodValidate(z.object({ id: zId, reason: z.string().max(200).optional().default("管理员模拟登录") }), input)
+
+    const target = await db.user.findUnique({ where: { id: p.id } })
+    if (!target || target.deletedAt) throw new Error("用户不存在或已删除")
+    if (!target.enabled || target.frozen) throw new Error("目标用户已禁用或冻结，无法模拟登录")
+    if (target.id === ctx.userId) throw new Error("无需模拟登录自己")
+
+    // 被模拟用户的全部活跃会话不受影响（模拟是并行会话，不踢线）
+    const { issueLoginTicket } = await import("@/lib/auth")
+    const { ticket } = issueLoginTicket(target.id, "IMPERSONATE", false, { impBy: ctx.userId, impName: ctx.username })
+
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "USER_IMPERSONATE_START",
+      resourceType: "USER",
+      resourceId: target.id,
+      resourceName: target.username,
+      ownerUserId: target.id,
+      severity: "WARN",
+      after: { targetUsername: target.username, reason: p.reason, ticketWindow: "5分钟" },
+    })
+    return { ticket, username: target.username, displayName: target.displayName }
   })
 }
 

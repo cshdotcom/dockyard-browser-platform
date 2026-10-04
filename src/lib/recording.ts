@@ -376,7 +376,7 @@ function pidAlive(pid: number): boolean {
 
 export async function startManualRecording(
   ws: ManualWorkspaceInfo,
-  opts?: { operatorUserId?: string; operatorName?: string },
+  opts?: { operatorUserId?: string; operatorName?: string; maxMinutes?: number },
 ): Promise<{ started: boolean; sessionId: string; mode: "embedded" | "docker"; reason?: string }> {
   const sessionId = manualSessionId(ws.novncSessionId)
   if (!safeId(ws.novncSessionId)) return { started: false, sessionId, mode: "embedded", reason: "会话标识非法" }
@@ -426,12 +426,23 @@ export async function startManualRecording(
     if (entry) {
       display = entry.display
       const size = ws.resolution || "1280x800"
-      const child = spawn("ffmpeg", ffmpegArgs(dir, display, size, tuning.fps, tuning.segmentSec, startIdx), {
+      // r35：定时录屏 —— maxMinutes 生效（ffmpeg -t 精确限时 + 到时兜底收口）
+      const baseArgs = ffmpegArgs(dir, display, size, tuning.fps, tuning.segmentSec, startIdx)
+      const timedArgs = opts?.maxMinutes && opts.maxMinutes > 0
+        ? [...baseArgs.slice(0, baseArgs.length - 2), "-t", String(Math.round(opts.maxMinutes * 60)), ...baseArgs.slice(baseArgs.length - 2)]
+        : baseArgs
+      const child = spawn("ffmpeg", timedArgs, {
         env: { ...process.env, DISPLAY: `:${display}` },
         detached: true,
         stdio: "ignore",
       })
       child.unref()
+      if (opts?.maxMinutes && opts.maxMinutes > 0) {
+        const timer = setTimeout(() => {
+          void stopManualRecording(sessionId, { reason: "定时录屏到期自动停止" }).catch(() => {})
+        }, opts.maxMinutes * 60_000 + 5_000)
+        if (typeof (timer as unknown as { unref?: () => void }).unref === "function") (timer as unknown as { unref: () => void }).unref()
+      }
       pid = child.pid ?? null
       spawned = true
     }
@@ -478,7 +489,7 @@ export async function startManualRecording(
     policy: { enabled: true, source: "GLOBAL_DEFAULT", resolvedAt: new Date().toISOString() },
     tuning,
     trigger: "MANUAL",
-    metadata: { manual: true, mode, pid, display: display >= 0 ? display : undefined, containerRef: ws.containerRef || undefined, operatorUserId: opts?.operatorUserId, operatorName: opts?.operatorName },
+    metadata: { manual: true, mode, pid, display: display >= 0 ? display : undefined, containerRef: ws.containerRef || undefined, operatorUserId: opts?.operatorUserId, operatorName: opts?.operatorName, maxMinutes: opts?.maxMinutes || undefined, maxMinutesDeadline: opts?.maxMinutes && opts.maxMinutes > 0 ? new Date(Date.now() + opts.maxMinutes * 60_000).toISOString() : undefined },
   })
   // pid/mode 溯源回写（行可能由扫描任务先行创建 → 显式覆盖元数据，确保停止时可定位进程）
   const firstRow = await db.vncRecording.findFirst({ where: { sessionId, segmentIndex: 0 }, select: { id: true } })
@@ -506,7 +517,7 @@ export async function startManualRecording(
 
 export async function stopManualRecording(
   sessionId: string,
-  opts?: { operatorUserId?: string; operatorName?: string },
+  opts?: { operatorUserId?: string; operatorName?: string; reason?: string },
 ): Promise<{ stopped: boolean; reason?: string }> {
   const rows = await db.vncRecording.findMany({ where: { sessionId, status: "RECORDING", deletedAt: null }, take: 1 })
   if (rows.length === 0) return { stopped: false, reason: "没有进行中的手动录像" }
@@ -547,16 +558,46 @@ export async function stopManualRecording(
 }
 
 // 手动录像状态查询（VNC 工具栏按钮轮询）
+// r35：孤儿录屏状态修正 —— ffmpeg 已死但 DB 仍 RECORDING（重启/崩溃残留）：
+// 嵌入形态 pid 探测；死亡 → finalize 为 FAILED（"下次打开还是显示录屏状态"的正确态）
+async function fixOrphanRecording(sessionId: string): Promise<boolean> {
+  try {
+    const rec = await db.vncRecording.findFirst({ where: { sessionId, status: "RECORDING", deletedAt: null } })
+    if (!rec) return false
+    const meta = (rec.metadata as Record<string, unknown> | null) || {}
+    const pid = typeof meta.pid === "number" ? meta.pid : null
+    if (pid && pidAlive(pid)) return false
+    await finalizeRecordingSession(sessionId, {
+      reason: "录制进程已结束（孤儿状态修正：页面重开/服务重启后自动对账）",
+    }).catch(() => {})
+    return true
+  } catch { return false }
+}
+
 export async function manualRecordingStatus(workspaceId: string): Promise<{
   active: boolean
   sessionId: string | null
   startedAt: string | null
   segments: number
 }> {
-  const rows = await db.vncRecording.findMany({
+  let rows = await db.vncRecording.findMany({
     where: { workspaceId, status: "RECORDING", deletedAt: null, trigger: "MANUAL" },
     orderBy: { startedAt: "desc" },
   })
+  // r35：孤儿对账 —— 轮询状态时顺带修正死进程残留（重开页面显示真实态）
+  if (rows.length > 0) {
+    let anyFixed = false
+    for (const rec of rows.slice(0, 3)) {
+      const fixed = await fixOrphanRecording(rec.sessionId).catch(() => false)
+      if (fixed) anyFixed = true
+    }
+    if (anyFixed) {
+      rows = await db.vncRecording.findMany({
+        where: { workspaceId, status: "RECORDING", deletedAt: null, trigger: "MANUAL" },
+        orderBy: { startedAt: "desc" },
+      })
+    }
+  }
   if (rows.length === 0) return { active: false, sessionId: null, startedAt: null, segments: 0 }
   return {
     active: true,
