@@ -1208,3 +1208,21 @@ Stage Summary:
 - r34 交付：7 大报障根因修复（闲置回收/验证码/键盘/剪贴板/IME/IP/播放器）+ 8 项功能增强（消息记录/文件管理/记录存储/时间轴/配置搜索/磁盘容量/上传进度/批量下载）
 - 核心架构升级：剪贴板真实 X 通道（xclip）+ RFB 能力协商门控；IME 全异步化；IP 解析全形态统一库
 - 截图存档 download/qa-r34/（15 张）；测试脚本 scripts/qa-r34.ts（48 断言）
+
+---
+Task ID: 34-final
+Agent: main
+Task: r34 终态 — CI 全绿监督 + v1.10.0 发布确认 + r34b 邮件触发规则
+
+Work Log:
+- 【r34b 追加】邮件触发条件完整自定义（用户诉求"当触发什么情况发邮件要完整自定义可增删"）：alert.emailRules 规则引擎（title/resourceType/all 三种匹配 × 级别门槛 × 启用/抑制三态；deny-wins 显式抑制；空规则回退全局最低级别向后兼容）+ raiseAlert 携带 resourceType + 预警中心规则 CRUD UI（新增/编辑/删除/开关；浏览器实测新增规则表单渲染）
+- 【提交链】6c353ef（r34 主体 44 文件）→ 1a50125（r34b 邮件规则）推送 main
+- 【CI 终态】1a50125：CI Lint ✅ SUCCESS + Build & Push Docker Image ✅ SUCCESS；6c353ef：CI Lint ✅ SUCCESS + Build & Push Docker Image ✅ SUCCESS（GitHub API 共享 IP 限流 → HTML 页面解析通道双确认）
+- 【GHCR 发布确认】主镜像 latest manifest 200（含 r34/r34b 组件）；worker 镜像 latest 200
+- 【tag v1.10.0】annotated tag（P0 修复 7 项 + 功能增强 8 项 + 质量证据清单）推送成功
+- 【环境终态】dev 三服务健康（app:200 / bridge:health ok mode=gateway）；QA 数据全清（工作区 0/通知 0/测试文件清）
+- 【交付】download/qa-r34/ 16 张截图（登录/消息记录筛选/我的记录/配置搜索+跳转/长文件名/时间轴+详情/通知清除回查/软键盘点号+Shift/批量下载/移动端/邮件规则）
+
+Stage Summary:
+- r34+r34b 全部交付并发布 v1.10.0：7 大报障根因修复（闲置回收/验证码/软键盘/剪贴板/IME/IP/播放器）+ 9 项功能增强（消息记录/文件管理5项/记录存储/时间轴/配置搜索/磁盘容量/上传进度/批量下载/邮件规则）
+- 质量证据：QA 脚本 48/48 断言 + 浏览器 E2E 16 场景实证 + tsc 29=基线31-2 净减 + lint 0 error 0 warning + build 78 路由全绿 + CI 双工作流 success + GHCR 双镜像 manifest 200
