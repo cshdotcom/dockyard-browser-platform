@@ -9,7 +9,7 @@ import {
   Users, FolderTree, ScrollText, Settings2, Timer, FolderOpen, DatabaseBackup,
   Bell, Server, Network, Recycle, ShieldAlert, MessageSquareCode,
   ChevronLeft, Menu, LogOut, Search, UserCog, MonitorSmartphone,
-  AlertTriangle, CheckCircle2, Loader2, ChevronRight, Sparkles,
+  AlertTriangle, CheckCircle2, Loader2, ChevronRight, Sparkles, Video as VideoIcon, Camera as CameraIcon,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { UserAvatar } from "@/components/shared/user-avatar"
@@ -314,6 +314,30 @@ function NotificationBell({ initial }: { initial: number }) {
     }
   }
 
+  // r28：通知清除（单条/已读批量/全部）—— 软删除后从列表移除
+  const clearNotices = async (mode: "one" | "read" | "all", id?: string) => {
+    try {
+      const res = await fetch("/api/notifications", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, id }),
+      })
+      const json = await res.json()
+      if (json.code === 0) {
+        toast.success(json.msg || "已清除")
+        if (mode === "one" && id) {
+          setItems((prev) => prev.filter((x) => x.id !== id))
+          if (selected?.id === id) setSelected(null)
+        } else {
+          setItems([])
+        }
+        void load()
+      } else toast.error(json.msg || "清除失败")
+    } catch {
+      toast.error("网络异常，清除失败")
+    }
+  }
+
   // 查看详情目标：公告类 → 公告页（link 携带 focus 定位）；其他 → 有 link 才跳转
   const detailLink = (n: NonNullable<typeof selected>): string | null => {
     if (n.type === "ANNOUNCEMENT") return n.link || "/announcements"
@@ -334,12 +358,17 @@ function NotificationBell({ initial }: { initial: number }) {
     SYSTEM: "系统通知",
     TOKEN_EXPIRE: "令牌到期",
     SECURITY: "安全通知",
+    RECORDING_DONE: "录像完成",
+    SCREENSHOT_DONE: "截图完成",
+    FILE_SHARE: "文件分享",
   }
   const TypeIcon = (n: NonNullable<typeof selected>) => {
     if (n.type === "ANNOUNCEMENT") return <Megaphone className="h-4 w-4 text-violet-500 shrink-0" />
     if (n.type === "ALERT") return <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
     if (n.type === "TOKEN_EXPIRE") return <KeyRound className="h-4 w-4 text-orange-500 shrink-0" />
     if (n.type === "SECURITY") return <ShieldAlert className="h-4 w-4 text-red-500 shrink-0" />
+    if (n.type === "RECORDING_DONE") return <VideoIcon className="h-4 w-4 text-rose-500 shrink-0" />
+    if (n.type === "SCREENSHOT_DONE") return <CameraIcon className="h-4 w-4 text-sky-500 shrink-0" />
     return <Bell className="h-4 w-4 text-teal-500 shrink-0" />
   }
 
@@ -363,16 +392,31 @@ function NotificationBell({ initial }: { initial: number }) {
         <DropdownMenuContent align="end" className="w-80">
           <DropdownMenuLabel className="flex items-center justify-between">
             <span>站内通知</span>
-            <button
-              className="text-xs text-teal-600 underline"
-              onClick={async (e) => {
-                e.stopPropagation()
-                await fetch("/api/notifications", { method: "PUT" })
-                void load()
-              }}
-            >
-              全部已读
-            </button>
+            <span className="flex items-center gap-2 text-xs">
+              <button
+                className="text-teal-600 underline"
+                onClick={async (e) => {
+                  e.stopPropagation()
+                  await fetch("/api/notifications", { method: "PUT" })
+                  void load()
+                }}
+              >
+                全部已读
+              </button>
+              {/* r28：通知清除（用户诉求）—— 清已读 / 清全部 */}
+              <button
+                className="text-muted-foreground underline hover:text-foreground"
+                onClick={(e) => { e.stopPropagation(); void clearNotices("read") }}
+              >
+                清除已读
+              </button>
+              <button
+                className="text-red-500 underline"
+                onClick={(e) => { e.stopPropagation(); void clearNotices("all") }}
+              >
+                清除全部
+              </button>
+            </span>
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
           <div className="max-h-96 overflow-y-auto">
@@ -459,6 +503,16 @@ function NotificationBell({ initial }: { initial: number }) {
                 <Button onClick={() => gotoDetail(selected)} className="bg-teal-600 hover:bg-teal-700 flex-1 sm:flex-none">
                   查看详情
                   <ChevronRight className="ml-1 h-4 w-4" />
+                </Button>
+              )}
+              {/* r28：单条通知清除 */}
+              {selected && (
+                <Button
+                  variant="ghost"
+                  className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
+                  onClick={() => selected && void clearNotices("one", selected.id)}
+                >
+                  清除本条
                 </Button>
               )}
             </div>

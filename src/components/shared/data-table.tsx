@@ -46,6 +46,8 @@ interface DataTableProps<T extends { id: string }> {
   emptyText?: string
   batchToolbar?: React.ReactNode
   dense?: boolean
+  // 行点击（云盘列表：点击行弹预览 / 点击文件夹行进入目录；复选框与行操作列阻止冒泡）
+  onRowClick?: (row: T) => void
   // 行数超过该值时表体启用纵向滚动容器（默认 5；防止长列表撑爆页面/页面被顶住无法滚动）
   scrollThreshold?: number
   // 滚动容器最大高度（默认 460px ≈ 10 行）
@@ -69,6 +71,7 @@ export function DataTable<T extends { id: string }>({
   emptyText = "暂无数据",
   batchToolbar,
   dense,
+  onRowClick,
   scrollThreshold = 5,
   scrollMaxHeight = 460,
 }: DataTableProps<T>) {
@@ -200,9 +203,14 @@ export function DataTable<T extends { id: string }>({
               </TableRow>
             )}
             {rows.map((row) => (
-              <TableRow key={row.id} className={dense ? "py-1" : undefined}>
+              <TableRow
+                key={row.id}
+                className={dense ? "py-1" : undefined}
+                onClick={onRowClick ? () => onRowClick(row) : undefined}
+                style={onRowClick ? { cursor: "pointer" } : undefined}
+              >
                 {selectEnabled && (
-                  <TableCell>
+                  <TableCell onClick={onRowClick ? (e) => e.stopPropagation() : undefined}>
                     <Checkbox checked={!!selectedIds?.includes(row.id)} onCheckedChange={() => toggleRow(row.id)} />
                   </TableCell>
                 )}
@@ -211,7 +219,11 @@ export function DataTable<T extends { id: string }>({
                     {c.render ? c.render(row) : ((row as Record<string, unknown>)[c.key] as React.ReactNode) ?? "-"}
                   </TableCell>
                 ))}
-                {rowActions && <TableCell className="text-right">{rowActions(row)}</TableCell>}
+                {rowActions && (
+                  <TableCell className="text-right" onClick={onRowClick ? (e) => e.stopPropagation() : undefined}>
+                    {rowActions(row)}
+                  </TableCell>
+                )}
               </TableRow>
             ))}
           </TableBody>
@@ -269,9 +281,14 @@ export function DataTable<T extends { id: string }>({
                 </TableRow>
               )}
               {rows.map((row) => (
-                <TableRow key={row.id} className={dense ? "py-1" : undefined}>
+                <TableRow
+                  key={row.id}
+                  className={dense ? "py-1" : undefined}
+                  onClick={onRowClick ? () => onRowClick(row) : undefined}
+                  style={onRowClick ? { cursor: "pointer" } : undefined}
+                >
                   {selectEnabled && (
-                    <TableCell>
+                    <TableCell onClick={onRowClick ? (e) => e.stopPropagation() : undefined}>
                       <Checkbox checked={!!selectedIds?.includes(row.id)} onCheckedChange={() => toggleRow(row.id)} />
                     </TableCell>
                   )}
@@ -280,7 +297,11 @@ export function DataTable<T extends { id: string }>({
                       {c.render ? c.render(row) : ((row as Record<string, unknown>)[c.key] as React.ReactNode) ?? "-"}
                     </TableCell>
                   ))}
-                  {rowActions && <TableCell className="text-right">{rowActions(row)}</TableCell>}
+                  {rowActions && (
+                    <TableCell className="text-right" onClick={onRowClick ? (e) => e.stopPropagation() : undefined}>
+                      {rowActions(row)}
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>

@@ -61,6 +61,74 @@ export function recordingAbsPath(storageKey: string): string | null {
   return join(ENV.storageLocalPath.replace(/\/$/, ""), storageKey)
 }
 
+// ============================================================
+// r28：录像完成 → 用户云盘 FileMeta 落库（占配额）+ 站内信通知
+// · 每个 COMPLETED 分段 = 云盘一个文件（category=RECORDING）
+// · 通知含沙箱名/事件/可下载提示 + sourceKey → /files?focus=<id> 直达选中
+// · 幂等：storageKey 唯一约束兜底（upsert）
+// ============================================================
+export async function ensureRecordingFileMeta(row: {
+  id: string
+  workspaceId: string
+  workspaceUuid: string
+  workspaceName: string
+  userId: string
+  username: string
+  sessionId: string
+  segmentIndex: number
+  status: string
+  durationSec: number
+  sizeBytes: number
+  storageKey: string | null
+}): Promise<{ fileMetaId: string | null; notified: boolean }> {
+  if (row.status !== "COMPLETED" || !row.storageKey || row.sizeBytes <= 0) {
+    return { fileMetaId: null, notified: false }
+  }
+  // FileMeta 幂等落库（storageKey 唯一）
+  const fileName = `${row.workspaceName}-录像-${String(row.segmentIndex).padStart(3, "0")}.mp4`
+  const meta = await db.fileMeta
+    .upsert({
+      where: { storageKey: row.storageKey },
+      create: {
+        fileName,
+        storageKey: row.storageKey,
+        size: row.sizeBytes,
+        mime: "video/mp4",
+        category: "RECORDING",
+        userId: row.userId,
+        workspaceId: null, // 录像归用户云盘（不挂工作区附件权限树，回放走录像 RBAC）
+        virusScanned: true,
+        createdByUserId: null,
+      },
+      update: { size: row.sizeBytes }, // 大小修正（扫描补齐场景）
+    })
+    .catch(() => null)
+  if (!meta) return { fileMetaId: null, notified: false }
+
+  // 站内信（同一分段只发一次：FileMeta 刚创建时发；已存在则不重复）
+  const createdJustNow = meta.createdAt && Date.now() - meta.createdAt.getTime() < 5_000
+  let notified = false
+  if (createdJustNow) {
+    try {
+      await db.notice.create({
+        data: {
+          userId: row.userId,
+          title: `录像完成：${row.workspaceName}`,
+          content: `沙箱「${row.workspaceName}」的录像分段 #${row.segmentIndex} 已完成并保存到你的云盘（${(row.sizeBytes / 1024 / 1024).toFixed(1)} MB，约 ${Math.max(1, Math.round(row.durationSec))} 秒）。可在线回放或下载。`,
+          type: "RECORDING_DONE",
+          link: `/files?focus=${meta.id}`,
+          sourceType: "RECORDING",
+          sourceKey: meta.id,
+        },
+      })
+      notified = true
+    } catch {
+      // 通知失败不阻塞录像链路
+    }
+  }
+  return { fileMetaId: meta.id, notified }
+}
+
 // ---- 1. 策略四级链解析（与网络策略 idle-policy 同构）----
 export async function resolveRecordingPolicy(userId: string, workspaceId?: string | null): Promise<RecordingPolicy> {
   const resolvedAt = new Date().toISOString()
@@ -265,6 +333,8 @@ export async function scanRecordingSegments(sessionId: string): Promise<{ create
         },
       })
       finalized++
+      // r28：收尾即入云盘 + 通知（用户诉求：录屏完自动收到站内信可下载）
+      await ensureRecordingFileMeta({ ...existing, status: "COMPLETED", endedAt: new Date(st.mtimeMs), durationSec: await probeDurationSec(abs), sizeBytes: st.size, storageKey: existing.storageKey || recordingStorageKey(first.userId, sessionId, f) }).catch(() => null)
     } else if (existing.status === "COMPLETED" && existing.sizeBytes === 0) {
       // 历史行缺大小（早前扫描失败）→ 补
       await db.vncRecording.update({
@@ -391,6 +461,12 @@ export async function finalizeRecordingSession(sessionId: string, opts?: { opera
       before: { liveSegments: rows.length },
       after: { reason: opts?.reason || "session_end" },
     })
+  }
+
+  // r28：收尾后的分段 → 云盘 FileMeta（占配额）+ 站内信（幂等）
+  const completedRows = await db.vncRecording.findMany({ where: { sessionId, status: "COMPLETED", deletedAt: null } })
+  for (const r of completedRows) {
+    await ensureRecordingFileMeta(r).catch(() => null)
   }
   return rows.length
 }

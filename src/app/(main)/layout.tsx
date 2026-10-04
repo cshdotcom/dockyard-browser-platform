@@ -7,7 +7,7 @@ import {
   LayoutDashboard, Globe, FileCode2, KeyRound, ShieldCheck, Megaphone,
   Users, FolderTree, ScrollText, Settings2, Timer, FolderOpen, DatabaseBackup,
   Server, Network, Recycle, ShieldAlert, MessageSquareCode, SlidersHorizontal, Puzzle, ShieldBan,
-  Video, ToggleLeft,
+  Video, ToggleLeft, Cloud,
 } from "lucide-react"
 
 // 主应用布局（RSC）：深度会话校验 + 强制2FA策略拦截 + 权限菜单过滤
@@ -39,6 +39,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         { key: "templates", label: "会话模板", href: "/templates", icon: <FileCode2 className="h-4 w-4" /> },
         { key: "announcements", label: "平台公告", href: "/announcements", icon: <Megaphone className="h-4 w-4" /> },
         { key: "my-recordings", label: "我的录像", href: "/recordings", icon: <Video className="h-4 w-4" /> },
+        { key: "my-files", label: "我的云盘", href: "/files", icon: <Cloud className="h-4 w-4" /> },
       ],
     },
     {

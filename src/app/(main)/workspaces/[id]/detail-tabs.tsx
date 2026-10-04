@@ -611,6 +611,15 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
               <p className="text-[11px] text-muted-foreground mt-1">内网穿透/域名部署场景：Puppeteer/Playwright/自定义脚本经此端点鉴权转发，无需访问内部网络</p>
             </div>
           )}
+          {/* r28：部署答疑卡 —— 直接回答"到底要穿透哪部分"（内置形态零穿透；仅外部分离浏览器需平台可达 9222） */}
+          {!publicCdpEndpoint && (
+            <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground space-y-1.5">
+              <div className="font-medium text-foreground">外部工具接入指引（穿透答疑）</div>
+              <p>· <span className="text-foreground">默认单容器形态：无需任何穿透。</span>外部工具只连 <code className="font-mono">https://你的平台域名/api/cdp/command</code>，网关鉴权后内部转发。</p>
+              <p>· 仅「外部分离浏览器」部署（EXTERNAL_BROWSER_URL）需要打通：浏览器容器 <b>9222（CDP）</b> → 平台容器可达即可（内网互通就行，不必暴露公网）；需 VNC 再加 5900。</p>
+              <p>· 显示公网端点：给平台设 <code className="font-mono">PUBLIC_BASE_URL=https://你的域名</code> 后此处自动展示。</p>
+            </div>
+          )}
           <div className="flex items-center justify-between rounded-md border p-2.5">
             <span className="text-muted-foreground">浏览器会话ID</span>
             <code className="text-xs font-mono">{workspace.browserSessionId ?? "-"}</code>

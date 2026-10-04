@@ -1,20 +1,27 @@
 "use client"
 
-// 用户组树形渲染：缩进层级 + 展开折叠 + 行操作（编辑/组员/组管理员/代理/复制/权限锁/删除）
+// 用户组树形渲染：缩进层级 + 展开折叠 + 行操作（编辑/组员/组管理员/代理/复制/权限锁/安全策略/删除）
+// r28b：URL 筛选参数模式对齐用户管理（keyword/enabled/创建日期范围走 searchParams）
+//      + 批量启用/禁用/移动父级/全选 + 行内 2FA 强制开关（乐观更新失败回滚）+ CSV 导出
 
 import * as React from "react"
-import { useRouter } from "next/navigation"
+import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { ChevronDown, ChevronRight, FileDown, FileUp, KeyRound, MoreHorizontal, Plus, Search, Trash2, X, Loader2, UserX } from "lucide-react"
+import {
+  ChevronDown, ChevronRight, FileDown, FileUp, KeyRound, MoreHorizontal, Plus, Search, Trash2, X,
+  Loader2, UserX, ShieldAlert, FolderInput, Power, Ban, CheckSquare,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
+import { Switch } from "@/components/ui/switch"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { ConfirmDialog } from "@/components/shared/confirm"
-import { deleteGroupAction } from "@/server/actions/groups"
+import { deleteGroupAction, setGroupForce2faAction, batchSetGroupStatusAction } from "@/server/actions/groups"
 import { batchDeleteGroupsAction } from "@/server/actions/batch"
 import { adminEvictGroupSharesAction, adminShareEvictPreviewAction } from "@/server/actions/admin-share-evict"
 import { BatchFailuresDialog } from "@/components/shared/batch-ui"
@@ -22,6 +29,7 @@ import { GroupFormDialog } from "./group-form"
 import { GroupTokenPolicyDialog } from "../users/token-policy-dialog"
 import {
   MembersDialog, AdminsDialog, ProxiesDialog, LocksDialog, CopyGroupDialog, ImportGroupsDialog,
+  GroupSecurityDialog, BatchMoveParentDialog,
   type UserOption, type ProxyOption,
 } from "./group-dialogs"
 
@@ -39,8 +47,10 @@ export interface AdminGroupNode {
   allowInternalNetwork: boolean
   allowSecureLocationAccess: boolean
   allowShare: boolean
+  vncSessionMaxMinutes: number | null
   policy: Record<string, unknown> | null
   userCount: number
+  twoFactorReady: number
   proxyBindings: string[]
   members: { userId: string; username: string }[]
   admins: { userId: string; username: string; canModifyQuota: boolean }[]
@@ -49,18 +59,61 @@ export interface AdminGroupNode {
   children: AdminGroupNode[]
 }
 
+interface GroupsTreeFilter {
+  keyword?: string
+  enabled?: string
+  createdFrom?: string
+  createdTo?: string
+  /** 当前筛选下被排除的组数（服务端过滤统计） */
+  filteredOut: number
+}
+
 interface GroupsTreeProps {
   roots: AdminGroupNode[]
   allNodes: AdminGroupNode[]
   lockKeys: string[]
   userOptions: UserOption[]
   proxyOptions: ProxyOption[]
+  filter: GroupsTreeFilter
 }
 
-export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOptions }: GroupsTreeProps) {
+export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOptions, filter }: GroupsTreeProps) {
   const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
   const [expanded, setExpanded] = React.useState<Set<string>>(() => new Set(roots.map((r) => r.id)))
   const [busyId, setBusyId] = React.useState("")
+
+  // ---- r28b：URL 筛选参数（对齐用户管理 pushQuery 模式） ----
+  const pushQuery = (patch: Record<string, string | undefined>) => {
+    const params = new URLSearchParams(searchParams.toString())
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined || v === "") params.delete(k)
+      else params.set(k, v)
+    }
+    router.push(`${pathname}?${params.toString()}`)
+  }
+
+  // 关键词防抖（350ms → URL keyword，服务端过滤树）
+  const [keywordInput, setKeywordInput] = React.useState(filter.keyword || "")
+  React.useEffect(() => {
+    setKeywordInput(filter.keyword || "")
+  }, [filter.keyword])
+  React.useEffect(() => {
+    const t = setTimeout(() => {
+      const trimmed = keywordInput.trim()
+      if ((filter.keyword || "") !== trimmed) {
+        pushQuery({ keyword: trimmed || undefined })
+      }
+    }, 350)
+    return () => clearTimeout(t)
+  }, [keywordInput])
+
+  // 筛选中（关键词非空或状态/日期条件）自动展开全部可见节点
+  const hasFilter = !!(filter.keyword?.trim() || filter.enabled === "true" || filter.enabled === "false" || filter.createdFrom || filter.createdTo)
+  React.useEffect(() => {
+    if (hasFilter) setExpanded(new Set(allNodes.map((n) => n.id)))
+  }, [hasFilter, allNodes])
 
   // 弹窗状态
   const [formOpen, setFormOpen] = React.useState(false)
@@ -82,6 +135,8 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
   const [copyGroup, setCopyGroup] = React.useState<AdminGroupNode | null>(null)
   const [deleteGroup, setDeleteGroup] = React.useState<AdminGroupNode | null>(null)
   const [importOpen, setImportOpen] = React.useState(false)
+  // r28b：安全策略弹窗（2FA 强制状态与生效人数）
+  const [securityGroup, setSecurityGroup] = React.useState<AdminGroupNode | null>(null)
 
   // r22b：清退本组成员收到的共享（接收者维度批量撤销；超管/ADMIN）
   const [evictGroup, setEvictGroup] = React.useState<AdminGroupNode | null>(null)
@@ -117,12 +172,21 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
     }
   }
 
-  // ---- 批量选择与批量删除（多选框 + 逐条失败隔离） ----
+  // ---- 批量选择（多选框 + 全选 + 逐条失败隔离） ----
   const [selGroups, setSelGroups] = React.useState<string[]>([])
   const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false)
   const [batchDeleteBusy, setBatchDeleteBusy] = React.useState(false)
+  const [batchStatusBusy, setBatchStatusBusy] = React.useState("")
+  const [batchMoveOpen, setBatchMoveOpen] = React.useState(false)
   const [batchFailures, setBatchFailures] = React.useState<{ id: string; reason: string }[] | null>(null)
   const toggleSelGroup = (id: string) => setSelGroups((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]))
+  // r28b：全选/反选（当前筛选后可见的全部组，上限 500 与批量 action 一致）
+  const allVisibleIds = React.useMemo(() => allNodes.map((n) => n.id).slice(0, 500), [allNodes])
+  const allSelected = allVisibleIds.length > 0 && allVisibleIds.every((id) => selGroups.includes(id))
+  const toggleSelectAll = () => {
+    if (allSelected) setSelGroups((prev) => prev.filter((id) => !allVisibleIds.includes(id)))
+    else setSelGroups((prev) => [...new Set([...prev, ...allVisibleIds])])
+  }
 
   const runBatchDeleteGroups = async () => {
     setBatchDeleteBusy(true)
@@ -150,6 +214,64 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
     }
   }
 
+  // r28b：批量启用/禁用（失败清单复用 BatchFailuresDialog）
+  const runBatchStatus = async (enabled: boolean) => {
+    setBatchStatusBusy(enabled ? "enable" : "disable")
+    try {
+      const res = await batchSetGroupStatusAction({ ids: selGroups, enabled })
+      if (res.code === 0) {
+        const failed = res.data?.failed ?? []
+        if (failed.length > 0) {
+          setBatchFailures(failed)
+          toast.warning(`批量${enabled ? "启用" : "禁用"}完成：成功 ${res.data?.affected ?? 0} 个组，跳过 ${failed.length} 个（查看原因）`)
+        } else {
+          toast.success(`已${enabled ? "启用" : "禁用"} ${res.data?.affected ?? 0} 个用户组`)
+        }
+        router.refresh()
+      } else {
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : `批量${enabled ? "启用" : "禁用"}失败`)
+    } finally {
+      setBatchStatusBusy("")
+    }
+  }
+
+  // r28b：行内 2FA 强制开关（乐观更新失败回滚：本地 override 立即生效，失败清除回滚）
+  const [force2faOverride, setForce2faOverride] = React.useState<Map<string, boolean>>(new Map())
+  const [force2faBusyId, setForce2faBusyId] = React.useState("")
+  const toggleRowForce2fa = async (node: AdminGroupNode, next: boolean) => {
+    if (force2faBusyId) return
+    setForce2faOverride((prev) => new Map(prev).set(node.id, next))
+    setForce2faBusyId(node.id)
+    try {
+      const res = await setGroupForce2faAction({ id: node.id, force2fa: next })
+      if (res.code === 0 && res.data) {
+        toast.success(next
+          ? `已开启「${node.name}」强制 2FA：${Math.max(0, res.data.affectedMembers - res.data.twoFactorReady)} 名未开通成员登录时将被要求设置`
+          : `已关闭「${node.name}」强制 2FA`)
+        router.refresh()
+      } else {
+        setForce2faOverride((prev) => {
+          const m = new Map(prev)
+          m.delete(node.id)
+          return m
+        })
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      setForce2faOverride((prev) => {
+        const m = new Map(prev)
+        m.delete(node.id)
+        return m
+      })
+      toast.error(e instanceof Error ? e.message : "设置失败")
+    } finally {
+      setForce2faBusyId("")
+    }
+  }
+
   const toggleExpand = (id: string) => {
     setExpanded((prev) => {
       const next = new Set(prev)
@@ -158,41 +280,6 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
       return next
     })
   }
-
-  // ---- r25-b 树内关键词搜索：组名/描述/组员/标签匹配；命中节点及其祖先自动展开 ----
-  const [groupFilter, setGroupFilter] = React.useState("")
-  const kw = groupFilter.trim().toLowerCase()
-  const { visibleRoots, matchCount } = React.useMemo(() => {
-    if (!kw) return { visibleRoots: roots, matchCount: allNodes.length }
-    const matchSelf = (n: AdminGroupNode) =>
-      n.name.toLowerCase().includes(kw)
-      || (n.description || "").toLowerCase().includes(kw)
-      || n.tags.some((t) => t.toLowerCase().includes(kw))
-      || n.members.some((m) => m.username.toLowerCase().includes(kw))
-    const keep = new Set<string>()
-    let count = 0
-    const walk = (n: AdminGroupNode): boolean => {
-      const self = matchSelf(n)
-      const kept = n.children.map((c) => walk(c)).some(Boolean)
-      if (self || kept) {
-        keep.add(n.id)
-        if (self) count++
-        return true
-      }
-      return false
-    }
-    roots.forEach((r) => walk(r))
-    // 过滤树：仅保留命中节点及其祖先链（复制节点构建新树，不改原引用）
-    const filterTree = (nodes: AdminGroupNode[]): AdminGroupNode[] =>
-      nodes
-        .filter((n) => keep.has(n.id))
-        .map((n) => ({ ...n, children: filterTree(n.children) }))
-    return { visibleRoots: filterTree(roots), matchCount: count }
-  }, [kw, roots, allNodes])
-  // 搜索命中时自动展开全部可见节点（祖先链可见即展开）
-  React.useEffect(() => {
-    if (kw) setExpanded(new Set(allNodes.map((n) => n.id)))
-  }, [kw, allNodes])
 
   const expandAll = () => setExpanded(new Set(allNodes.map((n) => n.id)))
   const collapseAll = () => setExpanded(new Set())
@@ -214,12 +301,29 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
     }
   }
 
+  // ---- r28b：CSV 导出（当前筛选结果；选中优先） ----
+  const exportCsv = (ids?: string[]) => {
+    const params = new URLSearchParams()
+    params.set("format", "csv")
+    if (ids && ids.length > 0) {
+      params.set("ids", ids.join(","))
+    } else {
+      if (filter.keyword?.trim()) params.set("keyword", filter.keyword.trim())
+      if (filter.enabled === "true" || filter.enabled === "false") params.set("enabled", filter.enabled)
+      if (filter.createdFrom) params.set("createdFrom", filter.createdFrom)
+      if (filter.createdTo) params.set("createdTo", filter.createdTo)
+    }
+    window.open(`/api/export/groups?${params.toString()}`, "_blank")
+  }
+
   // ---- 递归树节点渲染 ----
   const renderNode = (node: AdminGroupNode, depth: number) => {
     const hasChildren = node.children.length > 0
     const isOpen = expanded.has(node.id)
     const quota = node.quota
     const lockCount = Object.values(((node.policy as Record<string, unknown> | null)?.permissionLocks as Record<string, boolean> | undefined) || {}).filter(Boolean).length
+    // 乐观值：override 优先（行内 2FA 开关切换中）
+    const effectiveForce2fa = force2faOverride.has(node.id) ? force2faOverride.get(node.id)! : node.force2fa
 
     return (
       <div key={node.id}>
@@ -251,7 +355,7 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="font-medium truncate">{node.name}</span>
               {!node.enabled && <Badge variant="outline">已禁用</Badge>}
-              {node.force2fa && <Badge variant="destructive" className="text-[10px]">强制2FA</Badge>}
+              {effectiveForce2fa && <Badge variant="destructive" className="text-[10px]">强制2FA</Badge>}
               {node.allowInternalNetwork && <Badge className="text-[10px] bg-amber-100 text-amber-800 hover:bg-amber-100">内网✓</Badge>}
               {node.allowShare === false && <Badge variant="destructive" className="text-[10px]">禁共享</Badge>}
               {node.allowSecureLocationAccess && <Badge className="text-[10px] bg-amber-100 text-amber-800 hover:bg-amber-100">安全位置✓</Badge>}
@@ -288,6 +392,17 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
                 管理：{node.admins.map((a) => a.username).join("、")}
               </Badge>
             )}
+            {/* r28b：行内 2FA 强制快捷开关（对齐用户管理 2FA 管控入口；乐观更新失败回滚） */}
+            <div className="flex items-center gap-1 rounded-md border px-2 py-1" title={`组级强制 2FA：组内 ${Math.max(0, node.userCount - node.twoFactorReady)} 名未开通成员登录时将被强制设置`}>
+              <ShieldAlert className={`h-3.5 w-3.5 ${effectiveForce2fa ? "text-amber-600" : "text-muted-foreground"}`} />
+              <Switch
+                checked={effectiveForce2fa}
+                disabled={force2faBusyId === node.id}
+                onCheckedChange={(v) => toggleRowForce2fa(node, v)}
+                aria-label={`${node.name} 组级强制2FA开关`}
+                className="scale-90"
+              />
+            </div>
             <Button
               size="sm" variant="outline"
               onClick={() => { setMembersGroup(node) }}
@@ -308,6 +423,9 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
                 <DropdownMenuItem onClick={() => { setAdminsGroup(node) }}>组管理员</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setProxiesGroup(node) }}>代理绑定</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setLocksGroup(node) }}>权限锁</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setSecurityGroup(node) }}>
+                  <ShieldAlert className="mr-1.5 h-4 w-4 text-amber-600" /> 安全策略（2FA）
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => { setTokenPolicyGroup(node) }}>
                   <KeyRound className="mr-1.5 h-4 w-4" /> API-Key 策略
                 </DropdownMenuItem>
@@ -345,43 +463,109 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
 
   return (
     <div className="space-y-4">
-      {/* 顶部操作栏 */}
+      {/* 顶部操作栏（r28b：URL 筛选参数模式对齐用户管理——搜索/状态/日期范围） */}
       <div className="flex flex-wrap items-center gap-2">
-        {/* r25-b 组树关键词搜索：名称/描述/组员/标签实时过滤 + 自动展开 */}
         <div className="flex min-w-56 flex-1 md:max-w-xs items-center gap-2 rounded-md border px-2">
           <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
           <Input
-            value={groupFilter}
-            onChange={(e) => setGroupFilter(e.target.value)}
+            value={keywordInput}
+            onChange={(e) => setKeywordInput(e.target.value)}
             placeholder="搜索用户组 / 描述 / 组员 / 标签…"
             className="h-8 border-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
             aria-label="搜索用户组"
           />
-          {groupFilter && (
-            <button type="button" aria-label="清空搜索" onClick={() => setGroupFilter("")} className="rounded p-0.5 text-muted-foreground hover:text-foreground shrink-0">
+          {keywordInput && (
+            <button
+              type="button"
+              aria-label="清空搜索"
+              onClick={() => { setKeywordInput(""); pushQuery({ keyword: undefined }) }}
+              className="rounded p-0.5 text-muted-foreground hover:text-foreground shrink-0"
+            >
               <X className="h-3.5 w-3.5" />
             </button>
           )}
+        </div>
+        <Select value={filter.enabled || "all"} onValueChange={(v) => pushQuery({ enabled: v === "all" ? undefined : v })}>
+          <SelectTrigger className="h-9 w-28 text-xs" aria-label="启停状态筛选">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部状态</SelectItem>
+            <SelectItem value="true">已启用</SelectItem>
+            <SelectItem value="false">已禁用</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <span>创建于</span>
+          <Input
+            type="date"
+            className="h-9 w-36"
+            value={filter.createdFrom || ""}
+            onChange={(e) => pushQuery({ createdFrom: e.target.value || undefined })}
+            aria-label="创建日期起"
+          />
+          <span>至</span>
+          <Input
+            type="date"
+            className="h-9 w-36"
+            value={filter.createdTo || ""}
+            onChange={(e) => pushQuery({ createdTo: e.target.value || undefined })}
+            aria-label="创建日期止"
+          />
         </div>
         <Button size="sm" className="bg-teal-600 hover:bg-teal-700" onClick={() => { setFormMode("create"); setFormParentId(null); setEditingGroup(null); setFormOpen(true) }}>
           <Plus className="mr-1 h-4 w-4" /> 新建用户组
         </Button>
         <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
-          <FileUp className="mr-1 h-4 w-4" /> 导入JSON
+          <FileUp className="mr-1 h-4 w-4" /> 导入 (JSON/CSV)
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => exportCsv()}>
+          <FileDown className="mr-1 h-4 w-4" /> 导出CSV
         </Button>
         <Button size="sm" variant="outline" onClick={() => window.open("/api/export/groups", "_blank")}>
           <FileDown className="mr-1 h-4 w-4" /> 导出JSON
         </Button>
+        {(filter.keyword || filter.enabled || filter.createdFrom || filter.createdTo) && (
+          <button
+            type="button"
+            onClick={() => { setKeywordInput(""); pushQuery({ keyword: undefined, enabled: undefined, createdFrom: undefined, createdTo: undefined }) }}
+            className="flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted"
+            aria-label="清空全部筛选"
+          >
+            <X className="h-3.5 w-3.5" /> 清空筛选
+          </button>
+        )}
         <div className="ml-auto flex items-center gap-1">
           <Button size="sm" variant="ghost" onClick={expandAll}>全部展开</Button>
           <Button size="sm" variant="ghost" onClick={collapseAll}>全部折叠</Button>
         </div>
       </div>
 
-      {/* 批量操作条（勾选后出现） */}
+      {/* 筛选结果提示 */}
+      {filter.filteredOut > 0 && (
+        <p className="text-xs text-muted-foreground">
+          当前筛选命中 {allNodes.length} 个组（已排除 {filter.filteredOut} 个不匹配）
+        </p>
+      )}
+
+      {/* 批量操作条（勾选后出现；r28b 对齐用户管理批量按钮布局 + 全选） */}
       {selGroups.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-teal-200 bg-teal-50/60 dark:bg-teal-950/30 dark:border-teal-800 px-2 py-1.5">
-          <Badge className="bg-teal-600 hover:bg-teal-600 text-[10px]">已选 {selGroups.length} 个组</Badge>
+          <div className="flex items-center gap-1.5">
+            <Checkbox checked={allSelected} onCheckedChange={toggleSelectAll} aria-label="全选当前可见组" />
+            <Badge className="bg-teal-600 hover:bg-teal-600 text-[10px]">已选 {selGroups.length} 个组</Badge>
+          </div>
+          <Button size="sm" variant="outline" disabled={!!batchStatusBusy} onClick={() => runBatchStatus(true)}>
+            {batchStatusBusy === "enable" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Power className="mr-1 h-3.5 w-3.5 text-emerald-600" />}
+            批量启用
+          </Button>
+          <Button size="sm" variant="outline" disabled={!!batchStatusBusy} onClick={() => runBatchStatus(false)}>
+            {batchStatusBusy === "disable" ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Ban className="mr-1 h-3.5 w-3.5 text-muted-foreground" />}
+            批量禁用
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setBatchMoveOpen(true)}>
+            <FolderInput className="mr-1 h-3.5 w-3.5" /> 批量移动父级
+          </Button>
           <Button
             size="sm"
             variant="outline"
@@ -393,7 +577,10 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
             批量删除
           </Button>
           <Button size="sm" variant="secondary" onClick={() => window.open(`/api/export/groups?ids=${encodeURIComponent(selGroups.join(","))}`, "_blank")}>
-            <FileDown className="mr-1 h-3.5 w-3.5" /> 导出选中
+            <FileDown className="mr-1 h-3.5 w-3.5" /> 导出选中JSON
+          </Button>
+          <Button size="sm" variant="secondary" onClick={() => exportCsv(selGroups)}>
+            <CheckSquare className="mr-1 h-3.5 w-3.5" /> 导出选中CSV
           </Button>
           <button
             type="button"
@@ -410,15 +597,10 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
       <div className="space-y-1.5">
         {allNodes.length === 0 && (
           <div className="rounded-lg border bg-card py-12 text-center text-sm text-muted-foreground">
-            暂无用户组，点击「新建用户组」创建第一个组织节点
+            {hasFilter ? "当前筛选无匹配的用户组（可调整关键词 / 状态 / 日期范围）" : "暂无用户组，点击「新建用户组」创建第一个组织节点"}
           </div>
         )}
-        {kw && matchCount === 0 && (
-          <div className="rounded-lg border bg-card py-12 text-center text-sm text-muted-foreground">
-            无匹配「{groupFilter}」的组（可搜组名 / 描述 / 组员 / 标签）
-          </div>
-        )}
-        {visibleRoots.map((r) => renderNode(r, 0))}
+        {roots.map((r) => renderNode(r, 0))}
       </div>
 
       {/* 新建/编辑弹窗 */}
@@ -469,6 +651,13 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
         }
       />
 
+      {/* r28b：安全策略弹窗（2FA 强制状态与生效人数） */}
+      <GroupSecurityDialog
+        open={!!securityGroup}
+        onOpenChange={(v) => !v && setSecurityGroup(null)}
+        group={securityGroup ? { id: securityGroup.id, name: securityGroup.name, force2fa: securityGroup.force2fa, userCount: securityGroup.userCount, twoFactorReady: securityGroup.twoFactorReady } : null}
+      />
+
       {/* r23-d：组级 API-Key 策略基线（组内成员默认；用户级可覆盖收紧） */}
       <GroupTokenPolicyDialog
         open={!!tokenPolicyGroup}
@@ -506,8 +695,17 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
         onConfirm={runEvictGroup}
       />
 
-      {/* 导入JSON */}
+      {/* 导入（JSON / CSV） */}
       <ImportGroupsDialog open={importOpen} onOpenChange={setImportOpen} />
+
+      {/* r28b：批量移动父级弹窗 */}
+      <BatchMoveParentDialog
+        open={batchMoveOpen}
+        onOpenChange={setBatchMoveOpen}
+        ids={selGroups}
+        allNodes={allNodes.map((n) => ({ id: n.id, name: n.name, parentId: n.parentId }))}
+        onFailures={(failed) => setBatchFailures(failed)}
+      />
 
       {/* 批量删除确认 + 失败清单 */}
       <ConfirmDialog

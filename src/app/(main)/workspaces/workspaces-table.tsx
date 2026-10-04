@@ -4,7 +4,7 @@ import * as React from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { Plus, Loader2, Globe, MonitorPlay, Share2, Wifi, Zap, StopCircle, Play, Trash2, Settings2, Download, CopyPlus } from "lucide-react"
+import { Plus, Loader2, Globe, MonitorPlay, Share2, Wifi, Zap, StopCircle, Play, Trash2, Settings2, Download, CopyPlus, RotateCcw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -151,6 +151,12 @@ export function WorkspacesTable(props: Props) {
     { key: "status", title: "状态", sortable: true, render: (r) => (
       <div className="min-w-0">
         <StatusBadge status={r.status} />
+        {/* r28：DESTROYED 状态成因说明（用户反馈“D 开头状态看不懂”）*/}
+        {r.status === "DESTROYED" && (
+          <p className="mt-1 max-w-52 truncate text-[11px] text-muted-foreground" title="闲置回收/TTL 到期/崩溃重试耗尽/看门狗清理均会置为已销毁；点右侧“重建”按钮可原配置秒级拉起">
+            已被引擎回收（闲置/到期/崩溃），可重建
+          </p>
+        )}
         {r.status === "ERROR" && r.lastError && (
           <p className="mt-1 max-w-52 truncate text-[11px] text-red-600 dark:text-red-400" title={r.lastError}>
             {r.lastError.split("\n")[0].slice(0, 90)}
@@ -222,6 +228,7 @@ export function WorkspacesTable(props: Props) {
           <Share2 className={`h-4 w-4 ${r.shareControl?.allowed ? "text-teal-600" : "text-muted-foreground"}`} />
         </Button>
       )}
+      {/* r28：ERROR/DESTROYED 也可重建（此前仅 STOPPED 有启动钮 —— 被引擎回收的工作区成了“僵尸行”） */}
       {r.status === "RUNNING" || r.status === "IDLE" ? (
         <Button variant="ghost" size="icon" title="停止" disabled={busyId === r.id} onClick={() => stop(r)}>
           <StopCircle className="h-4 w-4 text-amber-600" />
@@ -229,6 +236,10 @@ export function WorkspacesTable(props: Props) {
       ) : r.status === "STOPPED" ? (
         <Button variant="ghost" size="icon" title="启动" disabled={busyId === r.id} onClick={() => start(r)}>
           <Play className="h-4 w-4 text-emerald-600" />
+        </Button>
+      ) : r.status === "ERROR" || r.status === "DESTROYED" ? (
+        <Button variant="ghost" size="icon" title={r.status === "ERROR" ? "重试启动（上次失败原因见状态列）" : "重建（沿用原配置，秒级拉起）"} disabled={busyId === r.id} onClick={() => start(r)}>
+          <RotateCcw className="h-4 w-4 text-sky-600" />
         </Button>
       ) : null}
       <Button variant="ghost" size="icon" title="切换代理" onClick={() => setProxyTarget(r)}>

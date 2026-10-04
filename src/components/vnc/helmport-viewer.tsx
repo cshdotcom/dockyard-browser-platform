@@ -704,8 +704,8 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
     } else toast.error("远程端未连接或只读模式，无法注入文本")
   }
 
-  // ---- 截图（画布快照 + 品牌签名条）----
-  const screenshot = () => {
+  // ---- 截图（画布快照 + 品牌签名条 + r28 云盘存储 + 站内信）----
+  const screenshot = async () => {
     const cv = canvasRef.current
     if (!cv || phase !== "live") { toast.error("尚未连接远程桌面"); return }
     const out = document.createElement("canvas")
@@ -728,11 +728,31 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
     ctx.fillStyle = "#5f7a75"
     ctx.font = "12px ui-sans-serif, system-ui"
     ctx.fillText(`${workspace.name} · ${workspace.ownerName} · ${new Date().toLocaleString()} · ${deviceTag()}`, 170, cv.height + 28)
+    const dataUrl = out.toDataURL("image/png")
     const a = document.createElement("a")
-    a.href = out.toDataURL("image/png")
+    a.href = dataUrl
     a.download = `helmport-${workspace.name}-${Date.now()}.png`
     a.click()
-    toast.success("截图已下载（含归属水印签名条）")
+
+    // r28：同步存入用户云盘（占配额）+ 站内信通知（失败不阻塞本地下载）
+    try {
+      const res = await fetch("/api/vnc-proxy/screenshot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: workspace.id, imageBase64: dataUrl }),
+      })
+      const json = await res.json()
+      if (json.code === 0 && json.data) {
+        toast.success("截图已下载，并保存到云盘（站内信已通知）", {
+          action: { label: "打开云盘", onClick: () => window.open(json.data.url, "_blank") },
+          duration: 8000,
+        })
+      } else {
+        toast.warning(`本地已下载；云盘保存失败：${json.msg || "未知错误"}`)
+      }
+    } catch {
+      toast.warning("本地已下载；云盘保存失败（网络错误）")
+    }
   }
 
   // ---- 剪贴板双通道：RFB 扩展直达 + 平台中转审计通道（逐沙箱隔离） ----

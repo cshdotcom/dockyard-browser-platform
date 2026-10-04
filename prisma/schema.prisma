@@ -459,12 +459,18 @@ model FileMeta {
   size          Int       @default(0)
   mime          String?
   checksum      String?
-  category      String    @default("GENERAL") // GENERAL | PROFILE | BACKUP | SNAPSHOT | LOG | REPORT
+  category      String    @default("GENERAL") // GENERAL | PROFILE | BACKUP | SNAPSHOT | LOG | REPORT | RECORDING | SCREENSHOT | AVATAR
   userId        String?
   workspaceId   String?
   shareTo       Json?
   expireAt      DateTime?
   virusScanned  Boolean   @default(false)
+  // r28：收藏夹（用户级；文件管理多标签页/收藏夹）
+  isFavorite    Boolean   @default(false)
+  favoritedBy   String?
+  favoritedAt   DateTime?
+  // r28：分布式存储节点归属（分布式文件管理节点筛选；空/"master" = 主节点本地存储）
+  storageNodeId String?
   createdByUserId String?
   deletedAt     DateTime?
   purgedAt      DateTime?
@@ -473,6 +479,43 @@ model FileMeta {
   @@index([userId, deletedAt])
   @@index([category])
   @@index([expireAt])
+  @@index([storageNodeId])
+  @@index([isFavorite, userId])
+}
+
+// ============================================================
+// r28：文件公开分享（修复「分享链接404」—— 此前不存在公开路由）
+// · 单文件/多文件/文件夹（前缀）三种目标形态
+// · 访客密钥（网关层前置校验；空 = 免密钥，链接 32 字节随机不可枚举）
+// · 自定义过期时间 / 次数限制 / 撤销
+// · 公开路由 /s/<token>（免登录预览 + 下载，文件夹列出全部内含文件）
+// ============================================================
+model FileShare {
+  id            String    @id @default(cuid())
+  token         String    @unique // 32 字节随机 hex
+  name          String    // 分享名称（默认取首个文件名/文件夹名）
+  // 目标形态 A：精确文件白名单（单文件/多文件/跨目录批量分享）
+  fileIds       Json?
+  // 目标形态 B：文件夹前缀（storageKey 前缀匹配，动态包含新增文件）
+  folderKey     String?
+  permission    String    @default("VIEW") // VIEW（仅预览） | DOWNLOAD（可下载）
+  visitorKeyHash String?  // 访客密钥 SHA-256（空 = 免密；创建时明文一次性展示）
+  expireAt      DateTime? // null = 永久有效；自定义有效期精确到分钟
+  maxUses       Int       @default(0) // 0 = 不限次
+  useCount      Int       @default(0) // 每次成功解锁（密钥校验/首次访问）+1
+  viewCount     Int       @default(0)
+  downloadCount Int       @default(0)
+  revokedAt     DateTime?
+  lastUsedAt    DateTime?
+  note          String?
+  createdByUserId String
+  ownerUserId   String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([createdByUserId])
+  @@index([ownerUserId])
+  @@index([revokedAt, expireAt])
 }
 
 model BackupRecord {
@@ -540,12 +583,21 @@ model Notice {
   userId    String
   title     String
   content   String
-  type      String    @default("ALERT") // ALERT | SYSTEM | ANNOUNCEMENT | TOKEN_EXPIRE | SECURITY
+  type      String    @default("ALERT") // ALERT | SYSTEM | ANNOUNCEMENT | TOKEN_EXPIRE | SECURITY | RECORDING_DONE | SCREENSHOT_DONE | FILE_SHARE
   link      String?
+  // r28：事件溯源（点击通知直达对应资源；如 RECORDING_DONE → /files?focus=<FileMeta.id> 自动选中）
+  sourceType String?   // WORKSPACE | RECORDING | SCREENSHOT | FILE | SHARE | ANNOUNCEMENT | ...
+  sourceKey  String?   // 对应资源 id（文件管理选中/工作区跳转）
+  // r28：通知清除（软删除：用户清除单条/已读批量清除/管理员管理）
+  clearedAt DateTime?
+  clearedBy String?    // 清除者（用户本人 / 管理员 id）
+  senderUserId String? // 发送者（管理员手动通知时）
   readAt    DateTime?
   createdAt DateTime  @default(now())
 
   @@index([userId, readAt])
+  @@index([userId, clearedAt])
+  @@index([type, createdAt])
 }
 
 model WebhookRule {
@@ -807,6 +859,8 @@ model BrowserNode {
   id            String   @id @default(cuid())
   name          String
   baseUrl       String
+  // r28：公网展示地址（外部工具/跨域接入展示用；空 = 连接信息回退 ENV 推导）
+  publicUrl     String?
   labels        Json?
   weight        Int      @default(1)
   status        String   @default("ONLINE") // ONLINE | OFFLINE | ISOLATED | GRAY_TEST

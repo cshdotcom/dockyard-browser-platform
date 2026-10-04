@@ -11,7 +11,7 @@ import { PERMISSION_LOCK_KEYS, type PermissionLockKey } from "@/lib/permissions"
 import { writeAudit } from "@/lib/audit"
 import { trackBehavior } from "@/lib/risk"
 import { zodValidate, zId, zPrecision } from "@/lib/validators"
-import { getConfigNumber } from "@/lib/config"
+import { getConfigNumber, getConfigBool } from "@/lib/config"
 import { fmtIdleBrief } from "@/lib/idle-policy"
 
 // ---- schema ----
@@ -910,4 +910,370 @@ export async function getGroupTokenPolicyAction(input: unknown): Promise<ActionR
     const affectedMembers = await db.groupUser.count({ where: { groupId: group.id } })
     return { id: group.id, name: group.name, groupPolicy: (group.tokenPolicy as Record<string, unknown> | null) ?? null, affectedMembers }
   })
+}
+
+// ============================================================
+// r28b：用户组管理对齐用户管理 —— 组级 2FA 快捷管控 / 批量启停 /
+//       批量移动父级 / CSV 导入（权限级别对齐现有组 actions：requireAdmin）
+// ============================================================
+
+// ---- r28b：组级强制 2FA 快捷开关（对齐用户管理 setForce2faAction）----
+// 生效链路（lib/auth.ts force2faRequired，登录时判定）：用户自身开关 > 全局强制 > 所在组 force2fa
+export async function setGroupForce2faAction(
+  input: unknown,
+): Promise<ActionResult<{ id: string; force2fa: boolean; affectedMembers: number; twoFactorReady: number }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAdmin()
+    const p = zodValidate(z.object({ id: zId, force2fa: z.boolean() }), input)
+
+    const group = await db.group.findUnique({ where: { id: p.id } })
+    if (!group || group.deletedAt) throw new Error("用户组不存在或已删除")
+
+    await db.group.update({ where: { id: group.id }, data: { force2fa: p.force2fa } })
+
+    // 生效面统计：组内全部成员数 + 已开通 2FA 成员数（已开通者不受强制提示影响）
+    const memberIds = await db.groupUser.findMany({ where: { groupId: group.id }, select: { userId: true } })
+    const [total, ready] = await Promise.all([
+      db.user.count({ where: { id: { in: memberIds.map((m) => m.userId) }, deletedAt: null } }),
+      db.user.count({ where: { id: { in: memberIds.map((m) => m.userId) }, deletedAt: null, twoFactorEnabled: true } }),
+    ])
+
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "GROUP_2FA_POLICY",
+      resourceType: "GROUP",
+      resourceId: group.id,
+      resourceName: group.name,
+      before: { force2fa: group.force2fa },
+      after: { force2fa: p.force2fa },
+      severity: "WARN",
+      extra: { affectedMembers: total, twoFactorReady: ready },
+    })
+    await trackBehavior(ctx.userId, "BATCH")
+
+    return { id: group.id, force2fa: p.force2fa, affectedMembers: total, twoFactorReady: ready }
+  })
+}
+
+// ---- r28b：查询组级 2FA 安全策略详情（安全策略弹窗只读数据）----
+export async function getGroupSecurityPolicyAction(input: unknown): Promise<ActionResult<{
+  id: string
+  name: string
+  force2fa: boolean
+  memberCount: number
+  twoFactorReady: number
+  globalForce2fa: boolean
+  groupInherit: boolean
+}>> {
+  return actionHandler(async () => {
+    await requireAdmin()
+    const p = zodValidate(z.object({ id: zId }), input)
+    const group = await db.group.findUnique({ where: { id: p.id }, select: { id: true, name: true, force2fa: true, deletedAt: true } })
+    if (!group || group.deletedAt) throw new Error("用户组不存在或已删除")
+
+    const memberIds = await db.groupUser.findMany({ where: { groupId: group.id }, select: { userId: true } })
+    const [memberCount, twoFactorReady, globalForce2fa, groupInherit] = await Promise.all([
+      db.user.count({ where: { id: { in: memberIds.map((m) => m.userId) }, deletedAt: null } }),
+      db.user.count({ where: { id: { in: memberIds.map((m) => m.userId) }, deletedAt: null, twoFactorEnabled: true } }),
+      getConfigBool("security.globalForce2fa", false),
+      getConfigBool("security.groupInheritForce2fa", true),
+    ])
+    return {
+      id: group.id,
+      name: group.name,
+      force2fa: group.force2fa,
+      memberCount,
+      twoFactorReady,
+      globalForce2fa,
+      groupInherit,
+    }
+  })
+}
+
+// ---- r28b：批量启用/禁用（对齐用户管理 batchSetUserStatusAction）----
+export async function batchSetGroupStatusAction(
+  input: unknown,
+): Promise<ActionResult<{ affected: number; failed: { id: string; reason: string }[] }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAdmin()
+    const p = zodValidate(
+      z.object({
+        ids: z.array(zId).min(1, "至少选择一个用户组").max(500, "单批最多 500 个"),
+        enabled: z.boolean(),
+      }),
+      input
+    )
+
+    const targets = await db.group.findMany({
+      where: { id: { in: p.ids }, deletedAt: null },
+      select: { id: true, name: true, enabled: true },
+    })
+    if (targets.length === 0) throw new Error("未找到有效用户组")
+
+    const failed: { id: string; reason: string }[] = []
+    let affected = 0
+    for (const g of targets) {
+      try {
+        if (g.enabled === p.enabled) throw new Error(p.enabled ? "该组已是启用状态" : "该组已是禁用状态")
+        await db.group.update({ where: { id: g.id }, data: { enabled: p.enabled } })
+        affected++
+      } catch (e) {
+        failed.push({ id: g.id, reason: e instanceof Error ? e.message : String(e) })
+      }
+    }
+
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "GROUP_BATCH_STATUS",
+      resourceType: "GROUP",
+      severity: "WARN",
+      before: { ids: targets.map((t) => t.id), names: targets.map((t) => t.name), enabled: targets.map((t) => t.enabled) },
+      after: { enabled: p.enabled, affected, failed },
+      extra: { batchSize: targets.length },
+    })
+    await trackBehavior(ctx.userId, "BATCH")
+    return { affected, failed }
+  })
+}
+
+// ---- r28b：批量移动父级（对齐用户管理 batchMoveGroupAction 迁移语义的组对应物）----
+// 逐组校验：新父组存在且未删除 / 不能是自己 / 不能是自己的后代（防循环）
+export async function batchMoveGroupParentAction(
+  input: unknown,
+): Promise<ActionResult<{ affected: number; failed: { id: string; reason: string }[] }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAdmin()
+    const p = zodValidate(
+      z.object({
+        ids: z.array(zId).min(1, "至少选择一个用户组").max(500, "单批最多 500 个"),
+        parentId: zId.nullable(), // null = 移为根节点
+      }),
+      input
+    )
+
+    const targets = await db.group.findMany({
+      where: { id: { in: p.ids }, deletedAt: null },
+      select: { id: true, name: true, parentId: true },
+    })
+    if (targets.length === 0) throw new Error("未找到有效用户组")
+
+    // 新父组存在性校验（目标父组本身不能在被移动的组里——否则形成悬挂）
+    const movingIds = new Set(targets.map((t) => t.id))
+    let parentName: string | null = null
+    if (p.parentId) {
+      if (movingIds.has(p.parentId)) throw new Error("新父组不能是被移动的组之一（会形成循环层级）")
+      const parent = await db.group.findFirst({ where: { id: p.parentId, deletedAt: null }, select: { id: true, name: true } })
+      if (!parent) throw new Error("新父组不存在或已删除")
+      parentName = parent.name
+    }
+
+    const failed: { id: string; reason: string }[] = []
+    let affected = 0
+    for (const g of targets) {
+      try {
+        if (p.parentId === g.id) throw new Error("父组不能是自己")
+        if (g.parentId === p.parentId) throw new Error(p.parentId ? "该组已挂在该父组下" : "该组已是根节点")
+        if (p.parentId) {
+          const desc = await descendantIds(g.id)
+          if (desc.has(p.parentId)) throw new Error("新父组是该组的后代（禁止循环层级）")
+        }
+        await db.group.update({ where: { id: g.id }, data: { parentId: p.parentId } })
+        affected++
+      } catch (e) {
+        failed.push({ id: g.id, reason: e instanceof Error ? e.message : String(e) })
+      }
+    }
+
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "GROUP_BATCH_MOVE",
+      resourceType: "GROUP",
+      severity: "WARN",
+      before: { ids: targets.map((t) => t.id), names: targets.map((t) => t.name), parents: targets.map((t) => t.parentId) },
+      after: { newParentId: p.parentId, newParentName: parentName, affected, failed },
+      extra: { batchSize: targets.length },
+    })
+    await trackBehavior(ctx.userId, "BATCH")
+    return { affected, failed }
+  })
+}
+
+// ---- r28b：CSV 导入用户组（对齐用户管理 importUsersCsvAction）----
+// 列：组名,父组名,描述（表头中英文均可；父组可引用库中已有组或本批次先建的组——
+// 「父组必须先存在」语义天然阻断循环引用，仍保留导入后全图环检测安全网）
+
+export interface GroupCsvImportReport {
+  total: number
+  success: number
+  failed: number
+  errors: { line: number; message: string }[]
+}
+
+// 表头列名归一（中文/英文别名 → 标准键）
+const CSV_HEADER_ALIASES: Record<string, string> = {
+  name: "name", "组名": "name", groupname: "name", group: "name",
+  parentname: "parent", "父组": "parent", "父组名": "parent", parent: "parent",
+  description: "desc", "描述": "desc", "说明": "desc", desc: "desc",
+}
+
+export async function importGroupsCsvAction(input: unknown): Promise<ActionResult<GroupCsvImportReport>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAdmin()
+    const p = zodValidate(
+      z.object({ text: z.string().min(1, "CSV内容为空").max(1_000_000, "CSV内容过大") }),
+      input
+    )
+
+    const lines = p.text.split(/\r?\n/).filter((l) => l.trim().length > 0)
+    if (lines.length < 2) throw new Error("CSV至少需要表头和一行数据")
+
+    const header = parseCsvLineForGroups(lines[0]).map((h) => h.toLowerCase().replace(/\s+/g, ""))
+    const colIdx: Record<string, number> = {}
+    for (let i = 0; i < header.length; i++) {
+      const key = CSV_HEADER_ALIASES[header[i]]
+      if (key && colIdx[key] === undefined) colIdx[key] = i
+    }
+    if (colIdx.name === undefined) {
+      throw new Error('表头缺少「组名」列（要求：组名,父组名,描述 或 name,parentName,description）')
+    }
+
+    const report: GroupCsvImportReport = { total: 0, success: 0, failed: 0, errors: [] }
+    const nameToId = new Map<string, string>()
+    // 含软删除组：Group.name 为数据库级全局唯一索引（软删行仍占用），与 createGroupAction 重名语义一致
+    const existing = await db.group.findMany({ select: { id: true, name: true } })
+    for (const g of existing) nameToId.set(g.name, g.id)
+    const createdIds: string[] = []
+
+    for (let i = 1; i < lines.length; i++) {
+      const lineNo = i + 1
+      const cols = parseCsvLineForGroups(lines[i])
+      const name = colIdx.name !== undefined ? (cols[colIdx.name] || "") : ""
+      const parentName = colIdx.parent !== undefined ? (cols[colIdx.parent] || "").trim() : ""
+      const description = colIdx.desc !== undefined ? (cols[colIdx.desc] || "").trim() : ""
+      report.total++
+
+      try {
+        const nameCheck = z.string().min(2, "组名至少2位").max(64, "组名最长64位").safeParse(name)
+        if (!nameCheck.success) throw new Error(nameCheck.error.issues[0]?.message || "组名非法")
+        if (nameToId.has(name)) throw new Error("组名已存在（库中或本批次）")
+
+        let parentId: string | null = null
+        if (parentName) {
+          if (parentName === name) throw new Error("父组不能是自己")
+          parentId = nameToId.get(parentName) || null
+          if (!parentId) throw new Error(`父组 ${parentName} 不存在（须在库中或本批次前部先声明）`)
+        }
+
+        const group = await db.group.create({
+          data: {
+            name,
+            description: description || null,
+            parentId,
+            enabled: true,
+            inheritParentQuota: true,
+            createdByUserId: ctx.userId,
+          },
+        })
+        nameToId.set(group.name, group.id)
+        createdIds.push(group.id)
+        report.success++
+      } catch (e) {
+        report.failed++
+        report.errors.push({ line: lineNo, message: e instanceof Error ? e.message : "解析失败" })
+      }
+    }
+
+    // 安全网：全图环检测（「父组必须先存在」已天然防环；检出极端场景即回滚本批创建）
+    if (createdIds.length > 0) {
+      const cycle = await detectGroupCycle()
+      if (cycle) {
+        await db.group.deleteMany({ where: { id: { in: createdIds } } })
+        throw new Error(`导入会形成循环层级（环：${cycle}），已回滚本批全部 ${createdIds.length} 个新组`)
+      }
+    }
+
+    await writeAudit({
+      operatorUserId: ctx.userId,
+      operatorName: ctx.username,
+      operationType: "GROUP_IMPORT_CSV",
+      resourceType: "GROUP",
+      severity: report.failed > 0 ? "WARN" : "INFO",
+      after: { total: report.total, success: report.success, failed: report.failed },
+      extra: { batchSize: report.total },
+    })
+    await trackBehavior(ctx.userId, "BATCH")
+
+    return report
+  })
+}
+
+// 简易CSV行解析（支持双引号包裹与转义，与用户管理 CSV 导入同实现）
+function parseCsvLineForGroups(line: string): string[] {
+  const out: string[] = []
+  let cur = ""
+  let inQuote = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (inQuote) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"'
+          i++
+        } else {
+          inQuote = false
+        }
+      } else {
+        cur += ch
+      }
+    } else {
+      if (ch === '"') {
+        inQuote = true
+      } else if (ch === ",") {
+        out.push(cur)
+        cur = ""
+      } else {
+        cur += ch
+      }
+    }
+  }
+  out.push(cur)
+  return out.map((s) => s.trim())
+}
+
+// 全图环检测（DFS 三色标记；返回环节点名或 null）
+async function detectGroupCycle(): Promise<string | null> {
+  const all = await db.group.findMany({ where: { deletedAt: null }, select: { id: true, name: true, parentId: true } })
+  const byId = new Map(all.map((g) => [g.id, g]))
+  const state = new Map<string, number>() // 0=未访问 1=在当前路径 2=已完成
+  const path: string[] = []
+  const visit = (id: string): string | null => {
+    const st = state.get(id) ?? 0
+    if (st === 1) {
+      const idx = path.indexOf(id)
+      return path.slice(idx).map((p) => byId.get(p)?.name || p).join(" -> ")
+    }
+    if (st === 2) return null
+    state.set(id, 1)
+    path.push(id)
+    const parent = byId.get(id)?.parentId
+    if (parent && byId.has(parent)) {
+      const found = visit(parent)
+      if (found) return found
+    }
+    path.pop()
+    state.set(id, 2)
+    return null
+  }
+  for (const g of all) {
+    const found = visit(g.id)
+    if (found) return found
+  }
+  return null
 }

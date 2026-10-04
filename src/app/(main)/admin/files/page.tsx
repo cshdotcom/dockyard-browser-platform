@@ -3,12 +3,19 @@ import { requireAdmin } from "@/lib/permissions"
 import { parseListQuery, pageSkipTake, safeOrderBy, fmtDate, fmtBytes } from "@/lib/utils-server"
 import { getConfigBool, getConfigNumber } from "@/lib/config"
 import { StatCard } from "@/components/shared/confirm"
+import { Button } from "@/components/ui/button"
 import { FilesTable, type FileRow } from "./files-table"
+import { buildFilesWhere } from "./where"
 import { UploadCard } from "./upload-card"
 import { TopUsersCard, type UserDiskRow } from "./top-users-card"
-import { FileText, HardDrive, FilePlus2, ShieldCheck } from "lucide-react"
+import { FileText, HardDrive, FilePlus2, ShieldCheck, Download } from "lucide-react"
 
 // 文件存储管理（管理员）：分页列表 / 统计 / 用户占用 Top10 / 上传 / 下载 / 软删
+// r28a 增强：
+//   · 分布式节点筛选（默认主节点 storageNodeId=null；BrowserNode 多选；「全部节点」）
+//   · 归属点击筛选（owner 列可点击 → userId 过滤）
+//   · CSV 导出（/api/export/files 按当前筛选条件流式导出）
+//   · isFavorite / storageNodeId 列展示 + 批量删除 / 批量立即过期
 export const metadata = { title: "文件存储" }
 
 export default async function AdminFilesPage({
@@ -21,16 +28,13 @@ export default async function AdminFilesPage({
   const q = parseListQuery(sp)
   const f = q.filters
 
-  // ---- 筛选：category / 用户 / 关键词 ----
-  const where: Record<string, unknown> = { deletedAt: null }
-  if (f.category) where.category = f.category
-  if (f.userId) where.userId = f.userId
-  if (q.keyword) where.OR = [{ fileName: { contains: q.keyword } }, { storageKey: { contains: q.keyword } }]
+  // ---- 筛选：category / 用户 / 关键词 / 存储节点（默认主节点） ----
+  const where = buildFilesWhere({ category: f.category, userId: f.userId, keyword: q.keyword, node: f.node })
 
   const startOfToday = new Date()
   startOfToday.setHours(0, 0, 0, 0)
 
-  const [rows, total, statAll, statSize, statToday, topUsers, userOptions, virusScanEnabled, quotaMb] = await Promise.all([
+  const [rows, total, statAll, statSize, statToday, topUsers, userOptions, browserNodes, virusScanEnabled, quotaMb] = await Promise.all([
     db.fileMeta.findMany({
       where,
       ...pageSkipTake(q),
@@ -56,6 +60,13 @@ export default async function AdminFilesPage({
       orderBy: { username: "asc" },
       take: 200,
     }),
+    // 分布式存储节点（节点筛选下拉；参照 admin/network 的 BrowserNode 查询）
+    db.browserNode.findMany({
+      where: { deletedAt: null },
+      select: { id: true, name: true, status: true },
+      orderBy: { name: "asc" },
+      take: 100,
+    }),
     getConfigBool("storage.virusScan", false),
     getConfigNumber("storage.quotaPerUserMb", 2048),
   ])
@@ -66,6 +77,7 @@ export default async function AdminFilesPage({
     ? await db.user.findMany({ where: { id: { in: involvedUserIds } }, select: { id: true, username: true } })
     : []
   const userNameById = new Map(involvedUsers.map((u) => [u.id, u.username]))
+  const nodeNameById = new Map(browserNodes.map((n) => [n.id, n.name]))
 
   const list: FileRow[] = rows.map((file) => ({
     id: file.id,
@@ -76,6 +88,9 @@ export default async function AdminFilesPage({
     userId: file.userId,
     username: file.userId ? userNameById.get(file.userId) || file.userId : null,
     workspaceId: file.workspaceId,
+    storageNodeId: file.storageNodeId,
+    nodeLabel: file.storageNodeId ? nodeNameById.get(file.storageNodeId) || file.storageNodeId.slice(0, 10) : null,
+    isFavorite: file.isFavorite,
     expireAt: file.expireAt ? fmtDate(file.expireAt) : null,
     expired: !!file.expireAt && file.expireAt.getTime() < Date.now(),
     virusScanned: file.virusScanned,
@@ -92,13 +107,28 @@ export default async function AdminFilesPage({
 
   const myUsedAgg = await db.fileMeta.aggregate({ where: { userId: { not: null }, deletedAt: null }, _sum: { size: true } })
 
+  // CSV 导出链接（按当前筛选条件；导出路由内复用同一 where 语义）
+  const exportParams = new URLSearchParams()
+  if (q.keyword) exportParams.set("keyword", q.keyword)
+  if (f.category) exportParams.set("category", f.category)
+  if (f.userId) exportParams.set("userId", f.userId)
+  if (f.node) exportParams.set("node", f.node)
+  const exportUrl = `/api/export/files${exportParams.size > 0 ? `?${exportParams.toString()}` : ""}`
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">文件存储</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          全平台文件管控：上传（后缀黑名单 + 魔数校验 + 配额）/ 下载鉴权 / 软删除入回收站 / 病毒扫描 / 过期管理
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">文件存储</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            全平台文件管控：上传（后缀黑名单 + 魔数校验 + 配额）/ 下载鉴权 / 软删除入回收站 / 病毒扫描 / 过期管理 / 分布式节点筛选
+          </p>
+        </div>
+        <Button variant="outline" asChild>
+          <a href={exportUrl} title="按当前筛选条件导出 CSV">
+            <Download className="mr-1 h-4 w-4" /> 导出 CSV（当前筛选）
+          </a>
+        </Button>
       </div>
 
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
@@ -126,6 +156,7 @@ export default async function AdminFilesPage({
             sortField={q.sortField}
             sortOrder={q.sortOrder}
             filters={f}
+            nodeOptions={browserNodes.map((n) => ({ label: `${n.name}（${n.status}）`, value: n.id }))}
             userOptions={userOptions.map((u) => ({ label: u.username, value: u.id }))}
           />
         </div>

@@ -1,11 +1,11 @@
 "use client"
 
-// 用户组配套管理弹窗：组员 / 组管理员 / 代理绑定 / 权限锁 / 复制 / 导入JSON
+// 用户组配套管理弹窗：组员 / 组管理员 / 代理绑定 / 权限锁 / 复制 / 导入JSON+CSV / 安全策略 / 批量移动父级
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Search, Trash2, UserPlus } from "lucide-react"
+import { Loader2, Search, ShieldAlert, Trash2, UserPlus } from "lucide-react"
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog"
@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Checkbox } from "@/components/ui/checkbox"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ConfirmDialog } from "@/components/shared/confirm"
 import {
@@ -23,7 +24,9 @@ import {
 import { StatusBadge } from "@/components/shared/data-table"
 import {
   setGroupUsersAction, setGroupAdminAction, setGroupProxyAction, updateGroupLocksAction,
-  copyGroupAction, importGroupsJsonAction, type GroupImportReport,
+  copyGroupAction, importGroupsJsonAction, importGroupsCsvAction,
+  setGroupForce2faAction, getGroupSecurityPolicyAction, batchMoveGroupParentAction,
+  type GroupImportReport,
 } from "@/server/actions/groups"
 
 export interface UserOption {
@@ -632,7 +635,7 @@ export function CopyGroupDialog({
   )
 }
 
-// ============ 导入组JSON弹窗 ============
+// ============ 导入组弹窗（r28b：JSON / CSV 双模式，对齐用户管理 CSV 导入） ============
 
 export function ImportGroupsDialog({
   open, onOpenChange,
@@ -641,12 +644,14 @@ export function ImportGroupsDialog({
   onOpenChange: (v: boolean) => void
 }) {
   const router = useRouter()
+  const [mode, setMode] = React.useState<"json" | "csv">("json")
   const [text, setText] = React.useState("")
   const [report, setReport] = React.useState<GroupImportReport | null>(null)
   const [busy, setBusy] = React.useState(false)
 
   React.useEffect(() => {
     if (open) {
+      setMode("json")
       setText("")
       setReport(null)
     }
@@ -654,12 +659,14 @@ export function ImportGroupsDialog({
 
   const submit = async () => {
     if (!text.trim()) {
-      toast.error("请粘贴JSON或选择文件")
+      toast.error(mode === "json" ? "请粘贴JSON或选择文件" : "请粘贴CSV内容或选择文件")
       return
     }
     setBusy(true)
     try {
-      const res = await importGroupsJsonAction({ text })
+      const res = mode === "json"
+        ? await importGroupsJsonAction({ text })
+        : await importGroupsCsvAction({ text })
       if (res.code === 0 && res.data) {
         setReport(res.data)
         toast.success(`导入完成：成功 ${res.data.success} / 失败 ${res.data.failed}`)
@@ -674,15 +681,27 @@ export function ImportGroupsDialog({
     <Dialog open={open} onOpenChange={(v) => !busy && onOpenChange(v)}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>导入用户组 JSON</DialogTitle>
+          <DialogTitle>导入用户组（JSON / CSV）</DialogTitle>
           <DialogDescription>
-            支持导出文件格式：{"[{ name, description, parentName, quota, reservedQuota, force2fa, tags, permissionLocks, userIds, proxyNodeIds }]"}
+            {mode === "json"
+              ? "JSON 完整配置：配额 / 组员 / 代理绑定 / 权限锁（可回灌导出文件）"
+              : "CSV 批量建组：父组可引用库中已有组或本批次前部先声明的组（天然防循环引用）"}
           </DialogDescription>
         </DialogHeader>
+        <RadioGroup value={mode} onValueChange={(v) => setMode(v as "json" | "csv")} className="flex gap-4">
+          <div className="flex items-center space-x-2">
+            <RadioGroupItem value="json" id="imp-json" />
+            <Label htmlFor="imp-json">JSON（完整配置）</Label>
+          </div>
+          <div className="flex items-center space-x-2">
+            <RadioGroupItem value="csv" id="imp-csv" />
+            <Label htmlFor="imp-csv">CSV（批量建组）</Label>
+          </div>
+        </RadioGroup>
         <div className="space-y-2">
           <input
             type="file"
-            accept=".json,application/json"
+            accept={mode === "json" ? ".json,application/json" : ".csv,text/csv"}
             className="block w-full text-sm text-muted-foreground file:mr-3 file:rounded-md file:border-0 file:bg-teal-600 file:px-3 file:py-1.5 file:text-sm file:text-white hover:file:bg-teal-700"
             onChange={(e) => {
               const f = e.target.files?.[0]
@@ -694,10 +713,17 @@ export function ImportGroupsDialog({
           />
           <textarea
             className="flex min-h-40 w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono"
-            placeholder={'[\n  {\n    "name": "华东运营组",\n    "parentName": "默认用户组",\n    "quota": { "sessions": 30, "novncSessions": 10, "diskMb": 8192 },\n    "force2fa": false,\n    "tags": ["运营"]\n  }\n]'}
+            placeholder={mode === "json"
+              ? '[\n  {\n    "name": "华东运营组",\n    "parentName": "默认用户组",\n    "quota": { "sessions": 30, "novncSessions": 10, "diskMb": 8192 },\n    "force2fa": false,\n    "tags": ["运营"]\n  }\n]'
+              : "组名,父组名,描述\n华东运营组,默认用户组,华东区域运营团队\n华北运营组,默认用户组,华北区域运营团队\n独立项目组,,不挂父组（根节点）"}
             value={text}
             onChange={(e) => setText(e.target.value)}
           />
+          {mode === "csv" && (
+            <p className="text-[11px] text-muted-foreground">
+              表头必含「组名」列（支持 组名,父组名,描述 或 name,parentName,description）；「父组名」「描述」可选
+            </p>
+          )}
         </div>
         {report && (
           <div className="space-y-2 rounded-md border p-3 text-sm">
@@ -719,6 +745,237 @@ export function ImportGroupsDialog({
           <Button onClick={submit} disabled={busy} className="bg-teal-600 hover:bg-teal-700">
             {busy && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
             开始导入
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ============ r28b：组级安全策略弹窗（2FA 强制状态与生效人数；行内开关乐观更新失败回滚） ============
+
+export function GroupSecurityDialog({
+  open, onOpenChange, group,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  group: { id: string; name: string; force2fa: boolean; userCount: number; twoFactorReady: number } | null
+}) {
+  const router = useRouter()
+  const [detail, setDetail] = React.useState<{
+    force2fa: boolean
+    memberCount: number
+    twoFactorReady: number
+    globalForce2fa: boolean
+    groupInherit: boolean
+  } | null>(null)
+  const [loading, setLoading] = React.useState(false)
+  const [toggling, setToggling] = React.useState(false)
+
+  React.useEffect(() => {
+    if (!open || !group) {
+      setDetail(null)
+      return
+    }
+    setLoading(true)
+    getGroupSecurityPolicyAction({ id: group.id })
+      .then((res) => {
+        if (res.code === 0 && res.data) {
+          setDetail({
+            force2fa: res.data.force2fa,
+            memberCount: res.data.memberCount,
+            twoFactorReady: res.data.twoFactorReady,
+            globalForce2fa: res.data.globalForce2fa,
+            groupInherit: res.data.groupInherit,
+          })
+        } else {
+          toast.error(res.msg || "安全策略加载失败")
+        }
+      })
+      .catch(() => toast.error("安全策略加载失败"))
+      .finally(() => setLoading(false))
+  }, [open, group])
+
+  // 行内开关：乐观更新（本地先翻转）→ 失败回滚
+  const toggle2fa = async (next: boolean) => {
+    if (!group || !detail || toggling) return
+    const prev = detail
+    setDetail({ ...detail, force2fa: next })
+    setToggling(true)
+    try {
+      const res = await setGroupForce2faAction({ id: group.id, force2fa: next })
+      if (res.code === 0 && res.data) {
+        setDetail((d) => (d ? { ...d, force2fa: res.data!.force2fa, memberCount: res.data!.affectedMembers, twoFactorReady: res.data!.twoFactorReady } : d))
+        toast.success(next ? `已开启组级强制 2FA：${res.data.affectedMembers - res.data.twoFactorReady} 名未开通成员登录时将被要求设置` : "已关闭组级强制 2FA")
+        router.refresh()
+      } else {
+        setDetail(prev)
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      setDetail(prev)
+      toast.error(e instanceof Error ? e.message : "设置失败")
+    } finally {
+      setToggling(false)
+    }
+  }
+
+  const memberCount = detail?.memberCount ?? group?.userCount ?? 0
+  const ready = detail?.twoFactorReady ?? group?.twoFactorReady ?? 0
+  const affected = Math.max(0, memberCount - ready)
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !toggling && onOpenChange(v)}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <ShieldAlert className="h-4 w-4 text-amber-600" /> 安全策略 · {group?.name || ""}
+          </DialogTitle>
+          <DialogDescription>组级 2FA 强制管控与生效面（登录链路实时判定）</DialogDescription>
+        </DialogHeader>
+
+        {loading && !detail && (
+          <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" /> 加载中…
+          </div>
+        )}
+
+        {detail && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div className="min-w-0 pr-2">
+                <p className="text-sm font-medium">组级强制 2FA</p>
+                <p className="text-[11px] text-muted-foreground">
+                  开启后：组内未开通 2FA 的成员登录时被强制进入 2FA 设置流程
+                </p>
+              </div>
+              <Switch checked={detail.force2fa} disabled={toggling} onCheckedChange={toggle2fa} aria-label="组级强制2FA开关" />
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div className="rounded-md border p-2.5">
+                <p className="text-lg font-semibold">{memberCount}</p>
+                <p className="text-[11px] text-muted-foreground">组内成员</p>
+              </div>
+              <div className="rounded-md border p-2.5">
+                <p className="text-lg font-semibold text-emerald-600">{ready}</p>
+                <p className="text-[11px] text-muted-foreground">已开通 2FA</p>
+              </div>
+              <div className="rounded-md border p-2.5">
+                <p className="text-lg font-semibold text-amber-600">{affected}</p>
+                <p className="text-[11px] text-muted-foreground">将受强制影响</p>
+              </div>
+            </div>
+
+            <div className="space-y-1.5 rounded-md border bg-muted/40 p-3 text-xs">
+              <p className="font-medium text-foreground">判定优先级（登录时逐级检查）</p>
+              <p>1 · 用户自身强制 2FA 开关（用户管理 2FA 管控）</p>
+              <p>2 · 全局强制策略（当前：{detail.globalForce2fa ? "已开启" : "未开启"}）</p>
+              <p>3 · 所在组强制 2FA（本开关 · 继承配置当前：{detail.groupInherit ? "生效" : "已停用"}）</p>
+              <p className="text-muted-foreground">已开通 2FA 的成员不受任何一级强制影响；未开通者命中任一级即被强制设置。</p>
+            </div>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={toggling}>关闭</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ============ r28b：批量移动父级弹窗（对齐用户管理「批量迁移用户组」交互） ============
+
+export function BatchMoveParentDialog({
+  open, onOpenChange, ids, allNodes, onFailures,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  ids: string[]
+  allNodes: { id: string; name: string; parentId: string | null }[]
+  onFailures: (failed: { id: string; reason: string }[]) => void
+}) {
+  const router = useRouter()
+  const [parentId, setParentId] = React.useState<string>("__none__")
+  const [busy, setBusy] = React.useState(false)
+
+  React.useEffect(() => {
+    if (open) setParentId("__none__")
+  }, [open])
+
+  // 被移动组自身及相互之间的选择无意义（服务端逐组校验后代环；UI 端仅过滤被移动组本身）
+  const movingIds = React.useMemo(() => new Set(ids), [ids])
+
+  const submit = async () => {
+    if (ids.length === 0) return
+    setBusy(true)
+    try {
+      const res = await batchMoveGroupParentAction({ ids, parentId: parentId === "__none__" ? null : parentId })
+      if (res.code === 0 && res.data) {
+        const failed = res.data.failed ?? []
+        if (failed.length > 0) {
+          onFailures(failed)
+          toast.warning(`批量移动完成：成功 ${res.data.affected} 个组，失败 ${failed.length} 个（查看原因）`)
+        } else {
+          toast.success(`已移动 ${res.data.affected} 个用户组到新父级`)
+        }
+        router.refresh()
+        onOpenChange(false)
+      } else {
+        toast.error(res.msg)
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "批量移动失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // 计算显示路径（如 总公司 / 华东 / 运维组）
+  const byId = React.useMemo(() => new Map(allNodes.map((n) => [n.id, n])), [allNodes])
+  const pathOf = (id: string): string[] => {
+    const path: string[] = []
+    let cur = byId.get(id)
+    const guard = new Set<string>()
+    while (cur && !guard.has(cur.id)) {
+      guard.add(cur.id)
+      path.unshift(cur.name)
+      cur = cur.parentId ? byId.get(cur.parentId) : undefined
+    }
+    return path
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !busy && onOpenChange(v)}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>批量移动父级</DialogTitle>
+          <DialogDescription>
+            将所选 {ids.length} 个用户组挂到新父组下（服务端逐组校验：父组不能是自己或自己的后代，禁止循环层级；不选 = 移为根节点）
+          </DialogDescription>
+        </DialogHeader>
+        <ScrollArea className="h-52 rounded-md border p-2">
+          <div className="space-y-0.5">
+            <label className="flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted cursor-pointer">
+              <Checkbox checked={parentId === "__none__"} onCheckedChange={() => setParentId("__none__")} />
+              <span className="text-muted-foreground">（无父组 · 根节点）</span>
+            </label>
+            {allNodes
+              .filter((n) => !movingIds.has(n.id))
+              .map((n) => (
+                <label key={n.id} className="flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted cursor-pointer" title={pathOf(n.id).join(" / ")}>
+                  <Checkbox checked={parentId === n.id} onCheckedChange={() => setParentId(n.id)} />
+                  <span className="truncate">{pathOf(n.id).join(" / ")}</span>
+                </label>
+              ))}
+          </div>
+        </ScrollArea>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>取消</Button>
+          <Button onClick={submit} disabled={busy || ids.length === 0} className="bg-teal-600 hover:bg-teal-700">
+            {busy && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+            确认移动
           </Button>
         </DialogFooter>
       </DialogContent>

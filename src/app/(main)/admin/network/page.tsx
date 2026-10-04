@@ -1,5 +1,6 @@
 import Link from "next/link"
 import { db } from "@/lib/db"
+import { ENV } from "@/lib/env"
 import { requireAdmin } from "@/lib/permissions"
 import { parseListQuery, pageSkipTake, safeOrderBy, fmtDate } from "@/lib/utils-server"
 import { StatCard } from "@/components/shared/confirm"
@@ -170,6 +171,7 @@ async function BrowserTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: R
     id: r.id,
     name: r.name,
     baseUrl: r.baseUrl,
+    publicUrl: r.publicUrl || ENV.nodePublicUrl || null,
     labels: Array.isArray(r.labels) ? (r.labels as string[]) : [],
     weight: r.weight,
     status: r.status,
@@ -198,6 +200,8 @@ async function BrowserTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: R
         </div>
       </div>
 
+      {/* r28：节点公网地址环境推荐（NODE_PUBLIC_URL > PUBLIC_BASE_URL）—— 客户端表单读取 */}
+      <span id="__nodePublicHint" hidden>{ENV.nodePublicUrl}</span>
       <BrowserNodesTable
         rows={list}
         total={total}

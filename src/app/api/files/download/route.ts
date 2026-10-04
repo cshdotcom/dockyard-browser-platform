@@ -10,7 +10,8 @@ import { writeAudit } from "@/lib/audit"
 import { ENV } from "@/lib/env"
 import { BizError, ErrorCode } from "@/lib/errors"
 
-// 文件下载：GET /api/files/download?id=<FileMeta id>
+// 文件下载：GET /api/files/download?id=<FileMeta id>[&inline=1]
+// inline=1 → Content-Disposition: inline（云盘预览弹窗内嵌渲染：pdf iframe / video / image / 文本取回）
 // 权限分级（服务端强制）：
 //   BACKUP            → 仅 SUPER_ADMIN
 //   PROFILE / 个人文件 → 所有者本人
@@ -119,10 +120,11 @@ export async function GET(req: NextRequest) {
       after: { category: meta.category, sizeBytes: size },
     }).catch(() => {})
 
-    // ---- 响应：RFC5987 双文件名（ASCII fallback + UTF-8 filename*）----
+    // ---- 响应：RFC5987 双文件名（ASCII fallback + UTF-8 filename*）；inline=1 时内联渲染 ----
+    const inline = req.nextUrl.searchParams.get("inline") === "1"
     const asciiFallback = meta.fileName.replace(/[^\x20-\x7E]/g, "_").replace(/"/g, "'") || "download.bin"
     const encodedName = encodeURIComponent(meta.fileName).replace(/['()]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())
-    const disposition = `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedName}`
+    const disposition = `${inline ? "inline" : "attachment"}; filename="${asciiFallback}"; filename*=UTF-8''${encodedName}`
 
     const nodeStream = createReadStream(target)
     const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream<Uint8Array>

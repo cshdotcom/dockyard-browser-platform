@@ -21,11 +21,13 @@ import { Progress } from "@/components/ui/progress"
 import {
   createBrowserNodeAction, updateBrowserNodeAction, deleteBrowserNodeAction, probeBrowserNodeAction, setBrowserNodeGrayGroupAction,
 } from "@/server/actions/network"
+import { isPrivateAddress } from "@/lib/env"
 
 export interface BrowserNodeRow {
   id: string
   name: string
   baseUrl: string
+  publicUrl?: string | null
   labels: string[]
   weight: number
   status: string
@@ -89,17 +91,25 @@ export function BrowserNodesTable(props: Props) {
   // ---- 表单 ----
   const [formOpen, setFormOpen] = React.useState(false)
   const [editing, setEditing] = React.useState<BrowserNodeRow | null>(null)
-  const [form, setForm] = React.useState({ name: "", baseUrl: "", labels: "", weight: 1, grayGroup: "PROD", enabled: true })
+  const [form, setForm] = React.useState({ name: "", baseUrl: "", publicUrl: "", labels: "", weight: 1, grayGroup: "PROD", enabled: true })
   const [formBusy, setFormBusy] = React.useState(false)
+  // r28：环境推荐公网地址（NODE_PUBLIC_URL > PUBLIC_BASE_URL）；空 = 未配置域名
+  const [envPublicHint] = React.useState(() => {
+    try {
+      // 页面服务端注入（data-public-hint）—— env 不能进客户端包
+      const el = document.getElementById("__nodePublicHint")
+      return el?.textContent || ""
+    } catch { return "" }
+  })
 
   const openCreate = () => {
     setEditing(null)
-    setForm({ name: "", baseUrl: "http://", labels: "", weight: 1, grayGroup: "PROD", enabled: true })
+    setForm({ name: "", baseUrl: "http://", publicUrl: envPublicHint, labels: "", weight: 1, grayGroup: "PROD", enabled: true })
     setFormOpen(true)
   }
   const openEdit = (row: BrowserNodeRow) => {
     setEditing(row)
-    setForm({ name: row.name, baseUrl: row.baseUrl, labels: row.labels.join(", "), weight: row.weight, grayGroup: row.grayGroup, enabled: row.enabled })
+    setForm({ name: row.name, baseUrl: row.baseUrl, publicUrl: row.publicUrl || "", labels: row.labels.join(", "), weight: row.weight, grayGroup: row.grayGroup, enabled: row.enabled })
     setFormOpen(true)
   }
 
@@ -112,6 +122,7 @@ export function BrowserNodesTable(props: Props) {
         id: editing?.id,
         name: form.name.trim(),
         baseUrl: form.baseUrl.trim(),
+        publicUrl: form.publicUrl.trim(),
         labels: form.labels.split(/[,，\s]+/).filter(Boolean),
         weight: form.weight,
         grayGroup: form.grayGroup,
@@ -160,7 +171,11 @@ export function BrowserNodesTable(props: Props) {
       render: (row: BrowserNodeRow) => (
         <div className="min-w-0">
           <p className="font-medium truncate">{row.name}</p>
-          <p className="text-xs text-muted-foreground font-mono truncate">{row.baseUrl}</p>
+          <p className="text-xs text-muted-foreground font-mono truncate">{row.publicUrl || row.baseUrl}</p>
+          {/* r28：公网地址优先展示；未配公网且 baseUrl 为私网时标注 */}
+          {!row.publicUrl && isPrivateAddress(row.baseUrl) && (
+            <Badge variant="outline" className="text-[9px] px-1 mt-0.5 text-amber-600 border-amber-300">内网地址</Badge>
+          )}
         </div>
       ),
     },
@@ -281,8 +296,22 @@ export function BrowserNodesTable(props: Props) {
               <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="如 browser-node-hk-01" />
             </div>
             <div className="space-y-1.5">
-              <Label>baseUrl（内网地址）</Label>
+              <Label>baseUrl（拨号地址）</Label>
               <Input value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder="http://browser-node:3000" />
+              {/* r28：私网地址提示 —— 平台可拨号但外部不可直连（用户反馈“显示 localhost 困惑”） */}
+              {isPrivateAddress(form.baseUrl) && (
+                <p className="text-[11px] text-amber-600 flex items-start gap-1">
+                  ⚠ 内网/环回地址：平台拨号可用，外部工具无法直连；对外展示请填写下方「公网地址」
+                </p>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <Label>公网地址（展示用，可选）</Label>
+              <Input value={form.publicUrl} onChange={(e) => setForm({ ...form, publicUrl: e.target.value })} placeholder="https://browser.example.com" />
+              <p className="text-[11px] text-muted-foreground">
+                连接信息/对外展示优先使用该地址{envPublicHint ? `（已从环境变量推荐 ${envPublicHint}）` : "（未配置 NODE_PUBLIC_URL / PUBLIC_BASE_URL 环境变量，可手动填写）"}；
+                实际拨号始终走 baseUrl
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label>标签（逗号分隔）</Label>

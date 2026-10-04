@@ -974,3 +974,81 @@ Stage Summary:
 - r27 全部交付并发布：VNC 会话录像回放企业级闭环（四级策略链→进程树内 ffmpeg 分段→Range 流回放→RBAC→回收站→保留期配额→用户空间→OpenAPI）、防退出三档（kiosk 菜单退出入口物理不存在）、Chromium 策略目录 37 项、功能开关中心 24 项
 - CI 全绿 + v1.7.0 版本镜像发布 GHCR（1.7.0/1.7/latest/main）
 - 质量证据：smoke 35/35 + 真实沙箱 E2E 23/23（含 fMP4 缓冲根因修复与验证）+ 浏览器实测（video readyState=4 真实流加载）+ tsc 78=78 零新增 + eslint 0/0 + build 74 路由全绿
+
+---
+Task ID: 28-a
+Agent: full-stack-developer
+Task: 用户云盘 /files + 管理端 admin/files 增强（r28a）
+
+Work Log:
+- 【前置阅读】worklog r27 尾部 + files.ts 既有 Action 签名（createFileShare/revoke/listMyFileShares/toggleFileFavorite）+ admin/files 页面模式 + file-share.ts / permissions / recycle / data-table / confirm 组件
+- 【环境根因修复】存活 dev 进程（01:17 启动）早于 r28 prisma client 再生成（01:22）→ 运行时 db.fileShare undefined，既有 /api/share/resolve 也 500；用项目自带 scripts/daemon-restart.py 守护化重启（setsid，dev.log 续写），r28 全链路随即恢复
+- 【纯函数抽取】src/lib/preview-kind.ts：previewKindOf/isTextEditable（无 node:path 依赖可进客户端 bundle）；file-share.ts 改为 import + re-export 保持兼容；重写后零 tsc 错误
+- 【用户版 Server Actions】src/server/actions/files-user.ts：userDeleteFileAction（批量≤100；requireAuth+requireWritableMode；userId 严格归属=本人；PROFILE/BACKUP 拒删；storage.backupOnDelete 备份；软删+moveToRecycle ownerUserId=本人 deletedByType=USER；FILE_DELETE WARN 审计）+ saveFileTextAction（归属/类型校验；isTextEditable；≤1MB；storageKey resolve 路径穿越防护（DANGER 审计+拒绝）；fs.writeFile；size+sha256 checksum 更新；FILE_EDIT 审计）
+- 【下载路由】/api/files/download 新增 inline=1 → Content-Disposition: inline（预览弹窗 pdf iframe/video/image/文本取回内嵌渲染；默认仍 attachment）
+- 【用户云盘页面】(main)/files/page.tsx：RSC 直查 db（userId=当前用户 + deletedAt/purgedAt null + category NOT IN PROFILE/BACKUP —— 安全视图，管理员亦只见自己云盘）；统计四卡（配额 User.quota.diskMb→config 回退 / 文件数 / 有效分享数 / 收藏数）；take 2000 截断提示
+- 【多标签页 + 收藏夹】files-client.tsx：文件夹路径标签（storageKey 目录层级，子目录伪行进入、面包屑向上跳、可关闭/「关闭其他」「全部关闭」、localStorage dockyard:files:tabs:v1 会话恢复）+ 收藏夹页签（isFavorite 一键过滤）；收藏星标乐观更新+失败回滚
+- 【focus 直达】?focus=<id> → 自动切换所属目录标签 + 清空搜索 + ring 高亮 + 400ms scrollIntoView + 预览自动打开（handledFocusRef 防刷新重触发）
+- 【预览弹窗】text/md/csv/json/代码（512KB 只读+「编辑」入口）、image/svg、video/audio、pdf iframe、office/二进制下载提示；页脚下载按钮（本人文件）；走 /api/files/download?id=&inline=1
+- 【文本编辑器】text-editor-dialog.tsx：行号 gutter 滚动同步、撤销/重做快照栈（500ms 合并、上限 100 步）、行级 diff 提示（多重集合计数+样例行，琥珀面板）、Ctrl+S/Cmd+S 保存、1MB 客户端预校验、还原按钮；保存走 saveFileTextAction + router.refresh
+- 【分享对话框】多选批量分享（fileIds 白名单形态）；名称/VIEW|DOWNLOAD 卡片/访客密钥开关+随机 8 位生成（无歧义字符集 crypto.getRandomValues）/有效期 chips（30m/1h/1d/7d/永久）+自定义分钟 PrecisionInput/maxUses（0=∞）；成功一次性展示 URL+密钥（复制按钮+「打开验证」_blank+token 32 字节不可枚举说明）
+- 【我的分享面板】my-shares-panel.tsx 折叠区：listMyFileSharesAction 列表（名称/token/类型/密钥/有效期/状态/次数/查看·下载计数/URL 复制/打开/撤销 ConfirmDialog）；version 计数器联动新建分享自动刷新
+- 【批量操作】复选框+全选（folder: 前缀伪行自动过滤出选择集）：批量分享 / 批量取消收藏（循环 toggle）/ 批量删除（userDeleteFileAction，requirePhrase DELETE 强确认）
+- 【管理端增强】admin/files/page.tsx + files-table.tsx + 新增 where.ts：category 筛选补 RECORDING/SCREENSHOT/AVATAR；owner 列可点击（UserRound 图标 → pushQuery userId 自动刷新）；节点多选 Popover（默认主节点 storageNodeId=null / __all__ 全部 / master,id 组合 OR；BrowserNode 表生成选项）；isFavorite 只读星标 + 存储节点列；批量删除/批量立即过期（循环复用 deleteFileAction/expireFileAction + 强确认）；CSV 导出按钮（当前筛选参数透传）
+- 【CSV 导出路由】/api/export/files：requireAdmin + 复用 buildFilesWhere（与列表同语义含默认主节点）+ ReadableStream 500 行/批流式 + BOM + RFC5987 中文文件名（filename*=UTF-8''…）+ 分享状态列（fileIds 白名单计数 + folderKey 前缀匹配）+ EXPORT WARN 审计
+- 【导航】(main)/layout.tsx 工作台新增「我的云盘」/files（Cloud 图标）
+- 【Action HTTP 级验证】从 .next/dev/server-reference-manifest 提取 action id，Next-Action 头+会话 cookie POST /files：saveFileText ✓（磁盘内容变更+size68+checksum 落库）/ createFileShare ✓（3 文件+密钥+60min+10 次）/ toggleFavorite ✓ / userDelete ✓（回收站 owner=本人+USER 来源）/ listMyFileShares ✓ / 管理员越权删他人文件 → 40001「只能删除自己云盘中的文件」
+- 【质量门】tsc 88=88 基线零新增；eslint 改动文件 0/0（全仓 0 error 1 预存 warning）；curl /files 200、/files?focus 200、/admin/files（node=__all__/category=RECORDING/userId 参数）200、/api/export/files 200（CSV 1031B 中文表头+BOM，无 cookie → code 40100 拒绝不 500）；/s/<token> 200；QA 数据清理归零（fileShare 0/recycle 0/fileMeta 仅剩原 1 条 BACKUP/用户删除/磁盘目录删除）
+
+Stage Summary:
+- 交付 1（用户云盘 /files）13 项功能全部落地：登录鉴权安全视图（PROFILE/BACKUP 永不暴露）、列渲染（mime 图标/大小/category 中文徽章/收藏星标切换/时间）、focus 通知直达（定位+高亮+自动预览）、全类型预览弹窗、文本在线编辑器（撤销栈/行号/diff/Ctrl+S/写盘+审计+校验和）、批量分享对话框（密钥/有效期 chips+自定义/次数/一次性展示+复制+打开验证）、我的分享管理折叠面板（列表/撤销/URL 复制）、批量分享/删除/取消收藏、文件夹多标签页+收藏夹页签（localStorage 恢复）、配额统计四卡+80% 预警、搜索/类型/收藏筛选/三向排序
+- 交付 2（admin/files 增强）6 项全部落地：category 补 RECORDING/SCREENSHOT/AVATAR、归属点击筛选、节点多选筛选（默认主节点+BrowserNode+全部节点）、CSV 流式导出（当前筛选+RFC5987+审计）、批量删除/批量立即过期补齐、isFavorite 只读列
+- 验证：tsc 零新增（88=88）、eslint 0 error、6 个 Server Action HTTP 端到端全过（含越权拒绝）、三页面 curl 200、导出 CSV 内容正确、审计/回收站/磁盘写入落库核实、QA 清理归零
+- 环境修复：dev 服务器陈旧 Prisma client 导致 r28 分享功能运行时 500 → daemon-restart.py 守护化重启恢复（三服务健康）
+
+---
+Task ID: 28-b
+Agent: full-stack-developer
+Task: 用户组管理功能对齐用户管理（差距盘点 + 补齐实现）
+
+Work Log:
+- 【差距盘点（步骤1）】逐文件对照 admin/users（page/users-table/user-form）vs admin/groups（page/groups-tree/group-form/group-dialogs）+ actions（users.ts vs groups.ts/batch.ts）+ 导出路由：
+  · 用户组【已有】能力（保留不动）：树形组织/组员/组管理员/代理绑定/权限锁（PERMISSION_LOCK_KEYS）/复制组/JSON 导入导出/批量删除（batchDeleteGroupsAction 失败隔离）/树内即时搜索（组名/描述/组员/标签）/组级 2FA 字段+表单开关+徽章+登录链路判定（lib/auth.ts force2faRequired：用户级>全局>组级，pre-login 两处调用——schema Group.force2fa 与 DB 列均已就位，**无需 prisma 变更/重启**）/组配额可视化编辑（group-form 四字段 PrecisionInput+继承标记）→ 跳过补建
+  · 用户组【缺失】（本任务补齐）：①URL 筛选参数模式（用户管理 keyword/enabled/日期范围全走 searchParams 服务端过滤，组管理仅客户端 state 不入 URL，无启停状态筛选、无创建日期范围）②CSV 导出（组仅 JSON，无 CSV 流式+RFC5987）③CSV 导入（组仅 JSON）④批量启用/禁用 ⑤批量移动父级（用户管理的「迁移用户组」对应物）⑥全选/反选（DataTable 有全选，组树仅逐个勾选）⑦2FA 行内快捷开关按钮（用户管理行菜单有「强制启用2FA提示」，组仅表单弹窗深处）⑧组详情「安全策略」区（2FA 强制状态与生效人数展示）⑨GROUP_2FA_POLICY 独立审计（现仅 GROUP_UPDATE 全量审计）；锁定/解锁/强制下线/重置密码为用户实体语义，对组不适用
+- 【实现（步骤2）】Prisma 无需变更：盘点确认 Group.force2fa 字段/schema/DB 列/Prisma client 三层均已就位（bun 直查验证），登录链路 force2faRequired（lib/auth.ts：用户级>全局>组级，pre-login 两处调用）早已接入组级策略——本任务零 schema 改动、零 dev 重启需求
+- 【共享筛选】新 src/app/(main)/admin/groups/filter.ts：keyword（组名/描述/标签/组员用户名模糊）+ enabled（启停）+ createdFrom/createdTo（创建日期范围）→ 命中集合 + 祖先链（树形展示保留层级），页面与 CSV 导出路由复用同一语义（页面命中 + 祖先；导出仅命中组本身）
+- 【page.tsx】searchParams 参数化（对齐用户管理 URL 筛选模式）：RSC 解析 keyword/enabled/createdFrom/createdTo → filterGroups 内存筛选 → 树仅渲染命中+祖先；allUsers select 增 twoFactorReady 统计（组内已开通 2FA 成员数）传入 AdminGroupNode
+- 【Server Actions（groups.ts 尾部 +~360 行）】①setGroupForce2faAction（requireAdmin；GROUP_2FA_POLICY 审计 WARN 含 before/after + affectedMembers/twoFactorReady extra）②getGroupSecurityPolicyAction（安全策略弹窗数据：成员数/已开通数/全局强制/组继承配置）③batchSetGroupStatusAction（≤500/批；逐组失败隔离「已是 XX 状态」跳过；GROUP_BATCH_STATUS 审计）④batchMoveGroupParentAction（parentId null=根；逐组校验父组存在/非自身/非后代（descendantIds 防环）；父组本身在移动集合中整体拒绝；GROUP_BATCH_MOVE 审计）⑤importGroupsCsvAction（表头中英文别名归一 name/parentName/description；「父组必须先存在（库或本批前部）」天然防环 + 导入后全图 DFS 三色环检测安全网（检出即回滚整批）；重名检查含软删组（Group.name 数据库全局唯一索引语义对齐 createGroupAction）；逐行错误报告；GROUP_IMPORT_CSV 审计）
+- 【CSV 导出】/api/export/groups 扩展 format=csv：requireAdmin + ReadableStream 500 行/批流式 + BOM + RFC5987 中文文件名（dockyard-用户组-时间戳.csv + ASCII fallback）+ X-Content-Type-Options；筛选参数与页面 URL 完全同语义（keyword/enabled/createdFrom/createdTo；ids 优先）；列：组名/描述/父组/启用/强制2FA/成员数/组管理员数/配额摘要/权限锁数/代理绑定数/标签/创建时间/组ID；EXPORT WARN 审计（含 filters+streamed）；默认无参仍输出 JSON 完整配置（兼容既有「导出JSON/导出选中」按钮）
+- 【groups-tree.tsx 重构】①URL 筛选（pushQuery 模式对齐用户管理）：搜索框 350ms 防抖入 URL keyword、启停 Select、创建日期范围、清空全部筛选按钮、筛选中自动展开、命中计数提示②批量操作条：全选/反选（当前可见 ≤500）+ 批量启用/禁用 + 批量移动父级 + 批量删除 + 导出选中JSON + 导出选中CSV（布局对齐用户管理 batchToolbar）③行内 2FA 强制开关（每行紧凑 ShieldAlert+Switch；乐观 override Map 立即翻转→失败回滚+toast，成功 router.refresh）④行菜单增「安全策略（2FA）」⑤顶部「导出CSV」（带当前筛选参数）/「导入 (JSON/CSV)」⑥空筛选态文案区分
+- 【group-dialogs.tsx】①ImportGroupsDialog 升级 JSON/CSV 双模式（RadioGroup + 文件/粘贴 + CSV 表头说明 + 逐行错误报告）②新 GroupSecurityDialog（安全策略弹窗：2FA 开关乐观更新失败回滚 + 三统计卡「组内成员/已开通/将受强制影响」+ 判定优先级说明「用户自身>全局>所在组」实时显示全局与继承配置状态）③新 BatchMoveParentDialog（树形路径父组选择 + 根节点选项 + 失败清单回调复用 BatchFailuresDialog）
+- 【保留不动】树形组织/组员/组管理员/代理绑定/29 权限锁/复制组/JSON 导入导出/批量删除（batchDeleteGroupsAction）/组配额可视化编辑（group-form 四字段 PrecisionInput+继承标记）——任务第 7 项确认已有跳过
+- 【QA 验证】登录链路（csrf→pre-login→NextAuth 回调换会话）后：页面 4 URL 形态 200（含 enabled/keyword/createdFrom 参数与空筛选态渲染命中）；CSV 14 断言（200/RFC5987/BOM/中文表头/筛选一致性 enabled=false 0 行/keyword 空仅表头/ids 无效仅表头/JSON 默认兼容/无 cookie 40100 拒绝×2）；Server Action HTTP 级 22 断言（CSV 导入 3 组含父链/重名逐行报错/父组缺失报错/自引用报错/表头缺列整体拒绝/落库核对/B 父=A/D 自引用未落库/安全策略查询/2FA 开关开+关+无效组拒绝/批量禁用 3 组/重复禁用跳过含失败清单/批量启用/批量移根/批量移回/循环层级拒绝/父组在移动集合整体拒绝/清理 3 组）；审计落库核对（GROUP_2FA_POLICY 3 条含 before→after、GROUP_BATCH_STATUS 含失败原因、GROUP_BATCH_MOVE 含循环拒绝、GROUP_IMPORT_CSV、EXPORT 含 filters+streamed）；HTML 渲染断言（搜索框/Select trigger/日期起止/导出CSV/导入/导出JSON/行内 2FA aria；Radix 下拉与菜单项为打开时挂载属正常）
+- 【根因修复】QA 二轮 CSV 导入报 Prisma Unique constraint——Group.name 为数据库级全局唯一（软删行仍占用）而重名预检漏查软删组 → importGroupsCsvAction existing 查询去掉 deletedAt 过滤（对齐 createGroupAction 重名语义，友好报「组名已存在」而非 Prisma 原始错误）
+- 【环境守护】验证期间 dev 服务器被沙箱回收（next 进程消失、端口拒绝连接，日志无崩溃栈）→ scripts/daemon-restart.py 守护化恢复（3s 就绪）→ 全量回归重跑全过
+- 【质量门】tsc 总 error TS 87 ≤ 基线 88（零新增；src/ 口径 26 行全部为基线既有，改动文件 0 错误）；eslint 改动文件 + QA 脚本 0 error 0 warning；QA 数据清理归零（qa28b* 组含软删物理清理 + 关系表级联 + 67+21 条测试审计删除）；dev 三服务恢复健康（/admin/groups 307 未登录重定向 / 登录后 200）
+
+Stage Summary:
+- 用户组管理 9 项缺口全部补齐：URL 筛选参数模式（keyword/enabled/创建日期范围，服务端内存筛选+祖先链）、CSV 流式导出（RFC5987+当前筛选语义+ids 选中）、CSV 批量导入（中英文表头/父链防环+安全网回滚/软删重名语义/逐行报告）、批量启用禁用（失败隔离）、批量移动父级（防循环校验）、全选/反选、行内 2FA 强制开关（乐观更新失败回滚）、组详情「安全策略」弹窗（2FA 状态+生效人数+三级判定链实时展示）、GROUP_2FA_POLICY 等独立审计
+- 2FA 组策略接入点说明：登录链路判定早已存在（lib/auth.ts force2faRequired：用户自身 force2faSetup > 全局 security.globalForce2fa > 所在组 force2fa，pre-login 路由两处调用）——本任务零 NextAuth 核心改动，仅补齐管理侧入口（行内开关+安全策略弹窗+GROUP_2FA_POLICY 审计）
+- 验证：tsc 87≤88 零新增、eslint 0/0、QA 14+22 断言全过、审计五类新 operationType 落库核对、curl 无 cookie /admin/groups 307 与 /api/export/groups code 40100 正确拒绝、QA 数据清理归零
+
+---
+Task ID: 28-main
+Agent: main
+Task: r28 主线 — 四大故障修复 + 文件分享核心 + 云盘化通知链 + 数据层
+
+Work Log:
+- 【A3 启动故障根因修复（最高优先级）】src/lib/db.ts 静态 require('@prisma/client-postgres') 在未装该包的环境被 Turbopack 编译期解析 → 引用 db.ts 的全部路由 500（即用户所述"启动疯狂但日志没启动成功"）。改为运行时拼接模块名 ["@prisma","client-postgres"].join("/") + 清 .next 缓存重启 → /api/cron 200 + 7 任务正常执行 + login 200
+- 【A1 D 状态修复】用户工作区表：DESTROYED/ERROR 状态新增「重建/重试」按钮（RotateCcw；此前仅 STOPPED 有启动钮，引擎回收的行成僵尸）+ DESTROYED 成因说明文案（闲置/到期/崩溃/看门狗）
+- 【A2 节点外网地址】ENV 新增 nodePublicUrl（NODE_PUBLIC_URL>WORKER_PUBLIC_URL）+ isPrivateAddress 导出；BrowserNode 模型加 publicUrl 字段（db push）；节点表单加公网地址字段（ENV 推荐自动填充）+ 私网地址警告；列表公网优先展示 + 内网徽章；CdpPanel 加"到底穿透什么"部署答疑卡（内置形态零穿透；外部分离浏览器只需平台可达 9222）
+- 【A4 分享 404 根治】此前文件级公开分享路由根本不存在 → 新建 FileShare 模型（token 32 字节 hex / fileIds 精确白名单 / folderKey 前缀动态 / visitorKeyHash SHA-256 / expireAt 自定义 / maxUses / 撤销）+ lib/file-share.ts 核心（创建/解析/授权下载/撤销/列表 + 路径穿越防护 + 限流 + 防探测统一拒绝）+ API /api/share/resolve|download/[token]（Range 206 分片流）+ 公开页 /s/[token]（密钥门 + 多文件/文件夹清单 + text/image/svg/video/audio/pdf 预览 + VIEW/DOWNLOAD 分权）+ Server Actions（createFileShareAction/revokeFileShareAction/listMyFileSharesAction/toggleFileFavoriteAction + 归属权限校验）；冒烟 scripts/smoke-r28-file-share.ts 17/17 通过（密钥门/错误密钥/过期/撤销/次数用尽/清单外文件/VIEW 禁下载全负向向量）
+- 【B1/B2 录屏截图云盘化】recording.ts 新增 ensureRecordingFileMeta：分段 COMPLETED → FileMeta(category=RECORDING) 幂等 upsert（占用户配额）+ 站内信（含沙箱名/大小/时长/直达链接）；挂接扫描收尾与 finalize 全路径；新 API /api/vnc-proxy/screenshot（与 VNC 取票同权 + MIME/魔数双重校验 + 8MB 上限 + 30/min 限流 → FileMeta SCREENSHOT + 通知 + 审计）；helmport-viewer 截图函数升级：本地下载 + 云盘同步 + toast「打开云盘」直达动作
+- 【B3 通知清除】Notice 模型加 clearedAt/clearedBy/senderUserId/sourceType/sourceKey（索引补齐）；/api/notifications 加 DELETE（one/read/all 三模式 + 归属校验 + 审计）+ POST（管理员按用户/组发送）+ GET filter 参数；通知铃铛加「清除已读/清除全部/清除本条」三入口 + RECORDING_DONE/SCREENSHOT_DONE/FILE_SHARE 类型图标
+- 【数据层】FileMeta 加 isFavorite/favoritedBy/favoritedAt/storageNodeId；双 prisma db push + generate
+
+Stage Summary:
+- 用户四大报障全部根治：启动 500 崩溃（db.ts 编译期解析）、D 状态无启动钮、节点 localhost 显示、分享链接 404（功能缺失非 bug）
+- 文件公开分享企业级闭环：128bit token + 访客密钥（网关层前置校验，回答用户"CDP 支不支持密钥"——协议层无鉴权、平台网关层实现）+ 自定义过期 + 文件夹前缀动态分享 + 防探测
+- 录屏/截图自动入云盘占配额 + 站内信直达（/files?focus=）+ 通知清除三模式
+- 子代理 28-a（用户云盘 /files 全功能 + admin/files 节点筛选/归属点击/CSV 导出）与 28-b（用户组对齐：批量启停/移动/CSV 导入导出/组级 2FA 开关/安全策略弹窗）均已交付并验证
