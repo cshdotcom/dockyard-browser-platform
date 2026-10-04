@@ -141,6 +141,7 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "alert.emailEnabled": { value: false, category: "ALERT", type: "boolean", description: "告警邮件通知开关（达到最低级别时同步发送邮件）" },
   "alert.emailMinLevel": { value: "ERROR", category: "ALERT", type: "string", description: "邮件告警最低级别（ERROR=ERROR及以上，CRITICAL=仅严重）" },
   "alert.emailRecipients": { value: "", category: "ALERT", type: "string", description: "邮件告警收件人（逗号分隔邮箱；留空=自动发给全部管理员的邮箱）" },
+  "alert.emailRules": { value: "[]", category: "ALERT", type: "string", description: "r34：邮件触发规则（JSON 数组：{id,name,enabled,matchField,keyword,minLevel}——按标题/资源类型关键词匹配，命中才发邮件；空数组=按全局最低级别发送）" },
   // —— r23：宿主机/节点资源预警（阈值可配置；磁盘按 Docker data-root 容器存储位置统计）——
   "alert.hostEnabled": { value: true, category: "ALERT", type: "boolean", description: "宿主机资源水位预警开关（CPU/内存/磁盘超阈值告警+邮件）" },
   "alert.cpuThresholdPct": { value: 80, category: "ALERT", type: "number", description: "CPU使用率预警阈值（%，0-100）" },

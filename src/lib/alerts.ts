@@ -13,13 +13,74 @@ export type AlertLevel = "INFO" | "WARNING" | "WARN" | "ERROR" | "CRITICAL"
 const LEVEL_ORDER: Record<AlertLevel, number> = { INFO: 1, WARNING: 2, WARN: 2, ERROR: 3, CRITICAL: 4 }
 
 // r23：邮件告警通道（异步 fire-and-forget；抑制窗口内不重发；静默窗口对邮件同样生效）
-async function sendAlertEmail(params: { title: string; level: AlertLevel; content: string; suppressed: boolean }): Promise<void> {
+// r34：新增邮件触发规则（alert.emailRules）—— 管理员可按 标题关键词/资源类型 精确控制
+//      "什么情况发邮件"：规则命中才发送；enabled=false 的命中规则显式抑制（deny 优先）；
+//      无规则时回退全局最低级别逻辑（保持向后兼容）。
+export interface AlertEmailRule {
+  id: string
+  name: string
+  enabled: boolean
+  matchField: "title" | "resourceType" | "all"
+  keyword: string
+  minLevel: AlertLevel
+}
+
+function parseEmailRules(raw: string): AlertEmailRule[] {
+  try {
+    const arr = JSON.parse(raw || "[]")
+    if (!Array.isArray(arr)) return []
+    return arr.filter((r): r is AlertEmailRule =>
+      !!r && typeof r.id === "string" && typeof r.keyword === "string" &&
+      ["title", "resourceType", "all"].includes(r.matchField)
+    ).map((r) => ({
+      id: r.id, name: String(r.name || "规则"), enabled: r.enabled !== false,
+      matchField: r.matchField, keyword: String(r.keyword || ""),
+      minLevel: (["INFO", "WARNING", "WARN", "ERROR", "CRITICAL"].includes(r.minLevel) ? r.minLevel : "ERROR") as AlertLevel,
+    }))
+  } catch {
+    return []
+  }
+}
+
+async function sendAlertEmail(params: { title: string; level: AlertLevel; content: string; suppressed: boolean; resourceType?: string }): Promise<void> {
   try {
     if (params.suppressed) return
     const enabled = await getConfigBool("alert.emailEnabled", false)
     if (!enabled) return
+
+    // ---- r34：触发规则评估（命中 enabled 规则才发；命中 disabled 规则显式抑制） ----
+    const rules = parseEmailRules(await getConfig<string>("alert.emailRules", "[]") || "[]")
+    if (rules.length > 0) {
+      const levelVal = LEVEL_ORDER[params.level] ?? 0
+      let send = false
+      let suppressedByRule = false
+      for (const rule of rules) {
+        const matched = rule.matchField === "all" ||
+          (rule.matchField === "title" && rule.keyword && params.title.includes(rule.keyword)) ||
+          (rule.matchField === "resourceType" && rule.keyword && (params.resourceType || "").includes(rule.keyword))
+        if (!matched) continue
+        if (!rule.enabled) { suppressedByRule = true; continue }
+        if (levelVal >= (LEVEL_ORDER[rule.minLevel] ?? 3)) send = true
+      }
+      if (suppressedByRule && !send) return // deny-wins：显式禁用规则抑制其他命中
+      if (send) {
+        await deliverAlertEmail(params)
+      }
+      return
+    }
+
+    // ---- 无规则：全局最低级别（向后兼容） ----
     const minLevel = (await getConfig<string>("alert.emailMinLevel", "ERROR")) as AlertLevel
     if ((LEVEL_ORDER[params.level] ?? 0) < (LEVEL_ORDER[minLevel] ?? 3)) return
+    if (await inSilenceWindow()) return
+    await deliverAlertEmail(params)
+  } catch (e) {
+    console.error("[alert] email notify failed", e)
+  }
+}
+
+// 实际投递（收件人解析 + 模板 + 发送）
+async function deliverAlertEmail(params: { title: string; level: AlertLevel; content: string }): Promise<void> {
     if (await inSilenceWindow()) return
 
     // 收件人：显式配置优先；留空 = 全部管理员（有邮箱的）
@@ -43,9 +104,6 @@ async function sendAlertEmail(params: { title: string; level: AlertLevel; conten
     for (const to of recipients.slice(0, 20)) {
       await sendMail(to, subject, html, params.content).catch(() => {})
     }
-  } catch (e) {
-    console.error("[alert] email notify failed", e)
-  }
 }
 
 const g = globalThis as unknown as {
@@ -192,7 +250,7 @@ export async function raiseAlert(params: {
     }
 
     // r23：邮件通道（异步，不阻塞告警主链路）
-    void sendAlertEmail({ title: params.title, level: params.level, content: params.content, suppressed })
+    void sendAlertEmail({ title: params.title, level: params.level, content: params.content, suppressed, resourceType: params.resourceType })
 
     return alert
   } catch (e) {

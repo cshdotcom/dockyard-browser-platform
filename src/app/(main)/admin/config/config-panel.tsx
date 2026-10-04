@@ -7,7 +7,7 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Save, RotateCcw, History, Wrench, Lock, ShieldAlert, Mail, Siren, ShieldBan, ListChecks, ChevronDown, Search, X, ChevronRight } from "lucide-react"
+import { Loader2, Save, RotateCcw, History, Wrench, Lock, ShieldAlert, Mail, Siren, ShieldBan, ListChecks, ChevronDown, Search, X, ChevronRight, Plus, Trash2 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -81,6 +81,17 @@ const LONG_TEXT_KEYS = new Set(["maintenance.message", "ui.loginAnnouncement"])
 const HARDWARE_CARD_KEYS = new Set(["hardware.defaults"])
 
 // 预警中心卡托管的键（不再重复渲染通用行）
+// r34：邮件触发规则本地解析（AlertCard 使用）
+function parseEmailRulesLocal(raw: string): Array<{ id: string; name: string; enabled: boolean; matchField: "title" | "resourceType" | "all"; keyword: string; minLevel: "ERROR" | "CRITICAL" | "WARNING" | "INFO" }> {
+  try {
+    const arr = JSON.parse(raw || "[]")
+    if (!Array.isArray(arr)) return []
+    return arr.filter((r): r is NonNullable<typeof r> => !!r && typeof r === "object")
+  } catch {
+    return []
+  }
+}
+
 const ALERT_CARD_KEYS = new Set([
   "alert.emailEnabled", "alert.emailMinLevel", "alert.emailRecipients",
   "alert.hostEnabled", "alert.cpuThresholdPct", "alert.memThresholdPct", "alert.diskThresholdPct",
@@ -981,6 +992,94 @@ function AlertCard({ canEdit, values, dirtyKeys, busyKey, setLocal, saveItems }:
             />
           </div>
         </div>
+      </div>
+
+      {/* ---- r34：邮件触发规则（按条件精确控制"什么情况发邮件"） ---- */}
+      <div className="rounded-md border bg-card p-3 space-y-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <p className="text-sm font-medium flex items-center gap-2">
+            <Siren className="h-3.5 w-3.5 text-rose-600" /> 邮件触发规则（alert.emailRules）
+          </p>
+          {canEdit && (
+            <Button
+              size="sm" variant="outline"
+              onClick={() => {
+                const cur = parseEmailRulesLocal(String(values["alert.emailRules"] ?? "[]"))
+                const next = [...cur, { id: `r${Date.now()}`, name: `规则 ${cur.length + 1}`, enabled: true, matchField: "title" as const, keyword: "", minLevel: "ERROR" as const }]
+                setLocal("alert.emailRules", JSON.stringify(next))
+              }}
+            >
+              <Plus className="h-3.5 w-3.5" />新增规则
+            </Button>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          按「告警标题关键词 / 资源类型」精确控制哪些情况触发邮件：命中启用规则且级别达标 → 发送；命中禁用规则 → 显式抑制（deny 优先）。
+          规则列表为空时回退全局最低级别逻辑。保存后生效（批量保存随预警卡）。
+        </p>
+        {(() => {
+          const rules = parseEmailRulesLocal(String(values["alert.emailRules"] ?? "[]"))
+          const setRules = (next: typeof rules) => setLocal("alert.emailRules", JSON.stringify(next))
+          if (rules.length === 0) {
+            return <p className="text-xs text-muted-foreground p-2 border border-dashed rounded text-center">暂无规则（全部告警按全局最低级别发送邮件）</p>
+          }
+          return (
+            <div className="space-y-2">
+              {rules.map((r, i) => (
+                <div key={r.id} className="flex flex-wrap items-center gap-2 rounded-md border p-2">
+                  <Input
+                    value={r.name}
+                    onChange={(e) => setRules(rules.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
+                    placeholder="规则名称"
+                    className="w-32 h-8 text-xs"
+                    disabled={!canEdit}
+                    aria-label="规则名称"
+                  />
+                  <select
+                    value={r.matchField}
+                    onChange={(e) => setRules(rules.map((x, j) => (j === i ? { ...x, matchField: e.target.value as "title" | "resourceType" | "all" } : x)))}
+                    className="h-8 rounded-md border bg-background px-2 text-xs"
+                    disabled={!canEdit}
+                    aria-label="匹配字段"
+                  >
+                    <option value="title">标题含关键词</option>
+                    <option value="resourceType">资源类型含</option>
+                    <option value="all">全部告警（通配）</option>
+                  </select>
+                  <Input
+                    value={r.keyword}
+                    onChange={(e) => setRules(rules.map((x, j) => (j === i ? { ...x, keyword: e.target.value } : x)))}
+                    placeholder="关键词（如：磁盘 / WORKSPACE）"
+                    className="flex-1 min-w-36 h-8 text-xs"
+                    disabled={!canEdit || r.matchField === "all"}
+                    aria-label="关键词"
+                  />
+                  <select
+                    value={r.minLevel}
+                    onChange={(e) => setRules(rules.map((x, j) => (j === i ? { ...x, minLevel: e.target.value as "ERROR" | "CRITICAL" | "WARNING" | "INFO" } : x)))}
+                    className="h-8 rounded-md border bg-background px-2 text-xs"
+                    disabled={!canEdit}
+                    aria-label="规则最低级别"
+                  >
+                    <option value="INFO">INFO+</option>
+                    <option value="WARNING">WARNING+</option>
+                    <option value="ERROR">ERROR+</option>
+                    <option value="CRITICAL">仅 CRITICAL</option>
+                  </select>
+                  <div className="flex items-center gap-1.5">
+                    <Switch checked={r.enabled} onCheckedChange={(b) => setRules(rules.map((x, j) => (j === i ? { ...x, enabled: b } : x)))} disabled={!canEdit} aria-label="规则开关" />
+                    <span className="text-[10px] text-muted-foreground w-8">{r.enabled ? "启用" : "抑制"}</span>
+                  </div>
+                  {canEdit && (
+                    <Button variant="ghost" size="sm" className="h-8 text-red-500" onClick={() => setRules(rules.filter((_, j) => j !== i))} title="删除规则">
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )
+        })()}
       </div>
 
       {/* ---- 宿主机资源水位 ---- */}
