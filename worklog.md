@@ -1167,3 +1167,16 @@ Work Log:
 Stage Summary:
 - R33 全部交付：4 大报障根因修复（登录/404/ERROR 态/分辨率）+ 12 项新功能（存储配额体系全链路/闲置回收归还/TTL 时长链/批量授权/CDP 节点公网地址/录像深链/通知多选/多用户筛选）
 - 质量门全绿：tsc 基线零新增 + lint 0/0 + build 成功 + QA 23/23 + 浏览器实证
+
+---
+Task ID: r33-ci
+Agent: main
+Task: R33 CI 监督 + v1.9.0 双镜像发布确认
+
+Work Log:
+- git rebase 处理远端 r32 重复提交（内容一致，skip 后 r33 干净回放）→ push main（7b35508）+ tag v1.9.0
+- CI 三工作流监督至终态：CI Lint success ✅ / Build & Push Docker Image (main) success ✅ / Build & Push Docker Image (v1.9.0) success ✅
+- GHCR 双镜像 manifest 匿名拉取实证 200：dockyard-browser-platform:1.9.0+latest（Master 完整版）/ dockyard-browser-platform-worker:1.9.0+latest（Worker 分布式版）
+
+Stage Summary:
+- R33 全链路收尾：代码→质量门→QA→浏览器实证→推送→CI 全绿→v1.9.0 双镜像可拉取
