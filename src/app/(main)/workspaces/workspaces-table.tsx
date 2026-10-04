@@ -4,7 +4,7 @@ import * as React from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { Plus, Loader2, Globe, MonitorPlay, Share2, Wifi, Zap, StopCircle, Play, Trash2, Settings2, Download, CopyPlus, MoreVertical, ShieldCheck, Timer, Video, FolderOpen, Snowflake } from "lucide-react"
+import { Plus, Loader2, Globe, MonitorPlay, Share2, Wifi, Zap, StopCircle, Play, Trash2, Settings2, Download, CopyPlus, MoreVertical, ShieldCheck, Timer, Video, FolderOpen, Snowflake, RotateCcw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -226,6 +226,7 @@ export function WorkspacesTable(props: Props) {
           <Share2 className={`h-4 w-4 ${r.shareControl?.allowed ? "text-teal-600" : "text-muted-foreground"}`} />
         </Button>
       )}
+      {/* r32：ERROR/DESTROYED 也可重建（此前仅 STOPPED 有启动钮 —— 被引擎回收的工作区成僵尸行，D 状态无按钮问题） */}
       {r.status === "RUNNING" || r.status === "IDLE" ? (
         <Button variant="ghost" size="icon" title="停止" disabled={busyId === r.id} onClick={() => stop(r)}>
           <StopCircle className="h-4 w-4 text-amber-600" />
@@ -233,6 +234,10 @@ export function WorkspacesTable(props: Props) {
       ) : r.status === "STOPPED" ? (
         <Button variant="ghost" size="icon" title="启动" disabled={busyId === r.id} onClick={() => start(r)}>
           <Play className="h-4 w-4 text-emerald-600" />
+        </Button>
+      ) : r.status === "ERROR" || r.status === "DESTROYED" ? (
+        <Button variant="ghost" size="icon" title={r.status === "ERROR" ? "重试启动（上次失败原因见状态列）" : "重建（沿用原配置秒级拉起；闲置/到期/崩溃回收均可）"} disabled={busyId === r.id} onClick={() => start(r)}>
+          <RotateCcw className="h-4 w-4 text-sky-600" />
         </Button>
       ) : null}
       <Button variant="ghost" size="icon" title="切换代理" onClick={() => setProxyTarget(r)}>

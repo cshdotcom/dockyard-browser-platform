@@ -648,6 +648,11 @@ export async function finalizeRecordingSession(sessionId: string, opts?: { opera
       after: { reason: opts?.reason || "session_end" },
     })
   }
+  // r32：收尾后的分段 → 云盘 FileMeta（占配额）+ 站内信（幂等）
+  const completedRows = await db.vncRecording.findMany({ where: { sessionId, status: "COMPLETED", deletedAt: null } })
+  for (const r of completedRows) {
+    await ensureRecordingFileMeta(r).catch(() => null)
+  }
   return rows.length
 }
 
@@ -824,4 +829,62 @@ export async function recordingUserUsage(userId: string): Promise<{ segments: nu
     quotaGb: Math.max(0, await getConfigNumber("vnc.recordingQuotaGb", 5)),
     oldestAt: agg._min.startedAt ?? null,
   }
+}
+
+
+// ============================================================
+// r32：录像完成 → 用户云盘 FileMeta 落库（占配额）+ 站内信通知
+// · 每个 COMPLETED 分段 = 云盘一个文件（category=RECORDING）
+// · 通知含沙箱名/大小/时长 + sourceKey → /files?focus=<id> 直达选中
+// · 幂等：storageKey 唯一约束 upsert；通知仅在 FileMeta 刚创建时发
+// ============================================================
+export async function ensureRecordingFileMeta(row: Record<string, unknown>): Promise<{ fileMetaId: string | null; notified: boolean }> {
+  const r2 = row
+  if ((r2.status as string) !== "COMPLETED" || !r2.storageKey || !(Number(r2.sizeBytes) > 0)) {
+    return { fileMetaId: null, notified: false }
+  }
+  const fileName = `${String(r2.workspaceName || "工作区")}-录像-${String(r2.segmentIndex ?? 0).padStart(3, "0")}.mp4`
+  const sizeBytes = Number(r2.sizeBytes)
+  const storageKey = String(r2.storageKey)
+  const userId = String(r2.userId)
+  const segmentIndex = Number(r2.segmentIndex ?? 0)
+  const durationSec = Number(r2.durationSec ?? 0)
+  const workspaceName = String(r2.workspaceName || "工作区")
+  const meta = await db.fileMeta
+    .upsert({
+      where: { storageKey },
+      create: {
+        fileName,
+        storageKey,
+        size: sizeBytes,
+        mime: "video/mp4",
+        category: "RECORDING",
+        userId,
+        virusScanned: true,
+      },
+      update: { size: sizeBytes },
+    })
+    .catch(() => null)
+  if (!meta) return { fileMetaId: null, notified: false }
+  const createdJustNow = meta.createdAt && Date.now() - meta.createdAt.getTime() < 5_000
+  let notified = false
+  if (createdJustNow) {
+    try {
+      await db.notice.create({
+        data: {
+          userId,
+          title: `录像完成：${workspaceName}`,
+          content: `沙箱「${workspaceName}」的录像分段 #${segmentIndex} 已完成并保存到你的云盘（${(sizeBytes / 1024 / 1024).toFixed(1)} MB，约 ${Math.max(1, Math.round(durationSec))} 秒）。可在线回放或下载。`,
+          type: "RECORDING_DONE",
+          link: `/files?focus=${meta.id}`,
+          sourceType: "RECORDING",
+          sourceKey: meta.id,
+        },
+      })
+      notified = true
+    } catch {
+      /* 通知失败不阻塞录像链路 */
+    }
+  }
+  return { fileMetaId: meta.id, notified }
 }

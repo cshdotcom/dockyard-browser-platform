@@ -1118,3 +1118,25 @@ Work Log:
 Stage Summary:
 - r31 全部交付并推送发布：13 大块企业级增强（VNC 手机输入/录屏按钮/记录多选/分享重构 404 根因修复/多标签收藏跨端同步/用户资料直达/DFS 归属点击/时长自定义/时区/权限中心/管理员用户侧视图/跨域文档/入库损坏修复）
 - CI 双工作流全绿；GHCR 主镜像 main/latest 更新可拉取；QA 数据清理归零
+
+---
+Task ID: 28-merge
+Agent: main
+Task: r32 — 本地 r28 批次与远端 r29-r31（已发布 v1.8.0 双镜像）智能合并
+
+Work Log:
+- 发现远端已推进至 r31（Master/Worker 架构 + DFS + 权限中心 + 分享系统重构 + v1.8.0 双镜像已发布）；本地 r28 批次（45 文件）与之冲突
+- 本地完整工作已推送保留：分支 feat/r28-local-fixes（含 /s/<token> 公开分享系统、用户云盘 /files 全功能、用户组对齐、文件分享冒烟 17/17）
+- 重置本地 main 至 origin/main，选择性移植远端缺失的独有修复（逐文件判定冲突）：
+  · db.ts 启动崩溃根因修复（远端确认未修！静态 require 改运行时拼接 —— Turbopack 编译期解析导致全路由 500）
+  · env.ts nodePublicUrl/isPrivateAddress + network.ts/actions + browser-nodes publicUrl 字段（节点外网地址推荐/私网警告）+ schema BrowserNode.publicUrl
+  · 通知清除三模式 API + 管理员按用户/组发送 + app-shell 铃铛清除入口与新类型图标 + Notice 模型 clearedAt/sourceType/sourceKey/senderUserId
+  · 录屏/截图云盘化：recording.ts ensureRecordingFileMeta（COMPLETED 分段→FileMeta 占配额+站内信直达）+ /api/vnc-proxy/screenshot（MIME/魔数校验）+ FileMeta isFavorite/storageNodeId
+  · workspaces-table ERROR/DESTROYED 重建按钮（D 状态僵尸行修复）
+  · detail-tabs CdpPanel「到底穿透什么」答疑卡
+- 未移植（远端 r31 已有更完整实现，避免双系统）：/share 分享系统、文件管理多标签页、DFS 节点筛选
+- 质量门：tsc 移植文件零新增 + eslint 0/0 + prisma db push + generate + dev 重启全链路 200（login/cron/workspaces）
+
+Stage Summary:
+- 启动崩溃根因修复（用户最高优先级报障）成功合入 r31 主线；通知清除/录屏截图云盘化/重建按钮/节点公网地址全部并入
+- 分支 feat/r28-local-fixes 保留完整本地批次备查

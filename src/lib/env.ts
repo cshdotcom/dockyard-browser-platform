@@ -103,6 +103,33 @@ export const ENV = {
       ""
     return v.replace(/\/+$/, "")
   },
+  // ---- r28 节点公网展示地址（修"创建节点显示 localhost"问题）----
+  // 用途：浏览器节点/Worker 节点创建表单的公网地址推荐与连接信息展示。
+  // 优先级：NODE_PUBLIC_URL（专用于节点）> WORKER_PUBLIC_URL > publicBaseUrl。
+  // 为空时表单提示"内网地址仅平台同机/同网可用"，不阻塞创建。
+  get nodePublicUrl() {
+    const v = process.env.NODE_PUBLIC_URL || process.env.WORKER_PUBLIC_URL || ""
+    return v.replace(/\/+$/, "")
+  },
+}
+
+// ---- r28 判断地址是否私网/环回（localhost / 127.* / 10.* / 192.168.* / 172.16-31.* / ::1）----
+// 节点表单据此显示警告：该地址仅供平台同机/内网拨号，外部工具无法直连。
+export function isPrivateAddress(url: string): boolean {
+  try {
+    const u = new URL(url.includes("://") ? url : `http://${url}`)
+    const h = u.hostname.toLowerCase()
+    if (h === "localhost" || h.endsWith(".localhost") || h === "::1" || h === "[::1]") return true
+    if (/^127\./.test(h)) return true
+    if (/^10\./.test(h)) return true
+    if (/^192\.168\./.test(h)) return true
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true
+    if (/^169\.254\./.test(h)) return true
+    if (h === "browser-internal") return true
+    return false
+  } catch {
+    return false
+  }
 }
 
 // 外部服务是否可用（不可用时适配器自动降级为模拟模式，业务链路仍完整可跑）

@@ -475,7 +475,12 @@ model FileMeta {
   size          Int       @default(0)
   mime          String?
   checksum      String?
-  category      String    @default("GENERAL") // GENERAL | PROFILE | BACKUP | SNAPSHOT | LOG | REPORT
+  category      String    @default("GENERAL") // GENERAL | PROFILE | BACKUP | SNAPSHOT | LOG | REPORT | RECORDING | SCREENSHOT | AVATAR
+  // r32：收藏夹（用户云盘多标签页/收藏夹）+ 分布式节点归属（节点筛选；空 = 主节点本地存储）
+  isFavorite    Boolean   @default(false)
+  favoritedBy   String?
+  favoritedAt   DateTime?
+  storageNodeId String? // GENERAL | PROFILE | BACKUP | SNAPSHOT | LOG | REPORT
   userId        String?
   workspaceId   String?
   shareTo       Json?
@@ -489,6 +494,8 @@ model FileMeta {
   @@index([userId, deletedAt])
   @@index([category])
   @@index([expireAt])
+  @@index([storageNodeId])
+  @@index([isFavorite, userId])
 }
 
 model BackupRecord {
@@ -556,12 +563,21 @@ model Notice {
   userId    String
   title     String
   content   String
-  type      String    @default("ALERT") // ALERT | SYSTEM | ANNOUNCEMENT | TOKEN_EXPIRE | SECURITY
+  type      String    @default("ALERT") // ALERT | SYSTEM | ANNOUNCEMENT | TOKEN_EXPIRE | SECURITY | RECORDING_DONE | SCREENSHOT_DONE | FILE_SHARE
   link      String?
+  // r32：事件溯源（点击通知直达对应资源；RECORDING_DONE → /files?focus=<FileMeta.id> 自动选中）
+  sourceType String?   // WORKSPACE | RECORDING | SCREENSHOT | FILE | SHARE | ANNOUNCEMENT | ...
+  sourceKey  String?   // 对应资源 id
+  // r32：通知清除（软删除：用户单条/已读批量/全部；管理员管理）
+  clearedAt DateTime?
+  clearedBy String?
+  senderUserId String? // 发送者（管理员按用户/组发送时）
   readAt    DateTime?
   createdAt DateTime  @default(now())
 
   @@index([userId, readAt])
+  @@index([userId, clearedAt])
+  @@index([type, createdAt])
 }
 
 model WebhookRule {
@@ -827,6 +843,8 @@ model BrowserNode {
   id            String   @id @default(cuid())
   name          String
   baseUrl       String
+  // r32：公网展示地址（外部工具/跨域接入展示用；空 = 连接信息回退 ENV 推导）
+  publicUrl     String?
   labels        Json?
   weight        Int      @default(1)
   status        String   @default("ONLINE") // ONLINE | OFFLINE | ISOLATED | GRAY_TEST

@@ -34,8 +34,13 @@ function createPrismaClient(): PrismaClient {
     }
     // 惰性 require：独立生成的 postgres 客户端包（serverExternalPackages 保持外部化，
     // 查询引擎 .so.node 运行时从 node_modules 解析，避免打包器改写 __dirname 引擎路径）
+    // ⚠ r32 修复启动崩溃：模块名运行时拼接 —— dev/sqlite 环境未生成该包时，
+    //   Turbopack 仍对静态字符串 require 做编译期解析 → 引用 db.ts 的全部路由 500
+    //   （症状：容器/进程疯狂重启而日志只见 module not found）。拼接后打包器无法
+    //   静态解析，仅 DATABASE_PROVIDER=postgres 时运行时真实加载。
+    const PG_CLIENT_PKG = ["@prisma", "client-postgres"].join("/")
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { PrismaClient: PostgresPrismaClient } = require("@prisma/client-postgres") as {
+    const { PrismaClient: PostgresPrismaClient } = require(PG_CLIENT_PKG) as {
       PrismaClient: new (opts: { log: string[] }) => unknown
     }
     return new PostgresPrismaClient({ log: prismaLogLevels() }) as unknown as PrismaClient

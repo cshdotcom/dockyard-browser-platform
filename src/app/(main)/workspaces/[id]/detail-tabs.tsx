@@ -3,16 +3,11 @@
 import * as React from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { getCdpGatewayTicketAction } from "@/server/actions/cdp-gateway"
-import { getWorkspaceHardwareAction } from "@/server/actions/hardware-policy-actions"
-import { getBehaviorTimelineAction } from "@/server/actions/behavior-timeline"
 import { toast } from "sonner"
 import {
   ArrowLeft, Globe, MonitorPlay, Share2, FileJson, Terminal, Clipboard, MousePointer2, Hand,
   RefreshCw, ShieldCheck, Wifi, Loader2, Trash2, Lock, Play, StopCircle, Copy, Anchor,
   RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon, Network, FileLock2, Link2, Plus, Cable,
-  Cpu,
-  Activity,
 } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -255,7 +250,6 @@ export function WorkspaceDetail({
           <TabsTrigger value="script"><Terminal className="h-3.5 w-3.5 mr-1" />脚本注入</TabsTrigger>
           <TabsTrigger value="har"><FileJson className="h-3.5 w-3.5 mr-1" />HAR / 录播</TabsTrigger>
           <TabsTrigger value="shares"><Share2 className="h-3.5 w-3.5 mr-1" />共享授权</TabsTrigger>
-          {workspace.isAdmin && <TabsTrigger value="behavior"><Activity className="h-3.5 w-3.5 mr-1" />行为时间轴</TabsTrigger>}
         </TabsList>
 
         {isVnc && (
@@ -265,7 +259,7 @@ export function WorkspaceDetail({
         )}
         {!isVnc && (
           <TabsContent value="cdp" className="mt-4">
-            <CdpPanel workspace={workspace} canOperate={canOperate} publicCdpEndpoint={publicCdpEndpoint} isAdmin={workspace.isAdmin} />
+            <CdpPanel workspace={workspace} canOperate={canOperate} publicCdpEndpoint={publicCdpEndpoint} />
           </TabsContent>
         )}
         <TabsContent value="network" className="mt-4 space-y-4">
@@ -281,11 +275,6 @@ export function WorkspaceDetail({
         <TabsContent value="shares" className="mt-4">
           <SharesPanel workspace={workspace} shares={shares} shareLinks={shareLinks} />
         </TabsContent>
-        {workspace.isAdmin && (
-          <TabsContent value="behavior" className="mt-4">
-            <BehaviorTimelinePanel workspaceId={workspace.id} />
-          </TabsContent>
-        )}
       </Tabs>
 
       <ConfirmDialog
@@ -431,141 +420,7 @@ function VncPanel({ workspace, canOperate, vncBridge }: { workspace: WorkspaceDe
       </Card>
 
       <IsolationPanel hardening={workspace.hardening} containerRef={workspace.containerRef} />
-      {workspace.isAdmin && <HardwareStatusPanel workspaceId={workspace.id} />}
     </div>
-  )
-}
-
-// ================= r29-g：行为监控时间轴（浏览/文件/网络/系统统一时间线） =================
-const KIND_META: Record<string, { label: string; color: string; dot: string }> = {
-  browse: { label: "浏览", color: "text-teal-600 border-teal-200 bg-teal-50", dot: "bg-teal-500" },
-  file: { label: "文件", color: "text-amber-600 border-amber-200 bg-amber-50", dot: "bg-amber-500" },
-  network: { label: "网络", color: "text-sky-600 border-sky-200 bg-sky-50", dot: "bg-sky-500" },
-  system: { label: "系统", color: "text-rose-600 border-rose-200 bg-rose-50", dot: "bg-rose-500" },
-}
-
-function BehaviorTimelinePanel({ workspaceId }: { workspaceId: string }) {
-  const [events, setEvents] = React.useState<Array<{ ts: string; kind: string; title: string; detail?: string | null; actor?: string | null }>>([])
-  const [counts, setCounts] = React.useState<{ browse: number; file: number; network: number; system: number } | null>(null)
-  const [windowMin, setWindowMin] = React.useState("1440")
-  const [kw, setKw] = React.useState("")
-  const [loading, setLoading] = React.useState(true)
-
-  React.useEffect(() => {
-    setLoading(true)
-    void getBehaviorTimelineAction({ workspaceId, fromMin: Number(windowMin) || 1440, ...(kw ? { keyword: kw } : {}) }).then((res) => {
-      if (res.code === 0 && res.data) { setEvents(res.data.events); setCounts(res.data.counts) }
-      setLoading(false)
-    })
-  }, [workspaceId, windowMin, kw])
-
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base flex items-center gap-2">
-          <Activity className="h-4 w-4" /> 行为监控时间轴
-          {counts && (
-            <span className="text-xs font-normal text-muted-foreground">
-              浏览 {counts.browse} · 文件 {counts.file} · 网络 {counts.network} · 系统 {counts.system}
-            </span>
-          )}
-        </CardTitle>
-        <CardDescription>
-          沙箱全行为统一时间线（浏览历史 / 文件操作 / 网络请求 HAR / 系统审计事件），倒序流。与 VNC 录像回放互补：录像看画面，时间轴看结构化行为。
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="flex flex-wrap items-center gap-2 mb-3">
-          {[60, 360, 1440, 10080].map((m) => (
-            <button key={m} onClick={() => setWindowMin(String(m))}
-              className={`h-7 px-2 rounded-md border text-xs ${windowMin === String(m) ? "bg-primary text-primary-foreground" : "bg-background hover:bg-muted"}`}>
-              {m < 1440 ? `${m / 60} 小时` : m === 1440 ? "24 小时" : "7 天"}
-            </button>
-          ))}
-          <input value={kw} onChange={(e) => setKw(e.target.value)} placeholder="过滤（URL/操作/域名）" className="h-7 w-44 rounded-md border bg-background px-2 text-xs" />
-          <span className="text-xs text-muted-foreground ml-auto">{events.length} 条事件</span>
-        </div>
-        {loading ? (
-          <div className="py-8 text-center text-sm text-muted-foreground">装载时间轴…</div>
-        ) : events.length === 0 ? (
-          <div className="py-8 text-center text-sm text-muted-foreground">时间窗口内无行为事件</div>
-        ) : (
-          <div className="max-h-[480px] overflow-y-auto rounded-lg border divide-y">
-            {events.map((e, i) => {
-              const meta = KIND_META[e.kind] || KIND_META.system
-              return (
-                <div key={`${e.ts}-${i}`} className="flex items-start gap-2.5 px-3 py-2 text-xs">
-                  <span className={`mt-1 h-2 w-2 rounded-full shrink-0 ${meta.dot}`} />
-                  <span className="text-muted-foreground font-mono shrink-0 w-[136px]" title={new Date(e.ts).toISOString()}>
-                    {new Date(e.ts).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-                  </span>
-                  <span className={`shrink-0 px-1.5 py-0.5 rounded border text-[10px] ${meta.color}`}>{meta.label}</span>
-                  <div className="min-w-0 flex-1">
-                    <div className="font-medium truncate" title={e.title}>{e.title}</div>
-                    {e.detail && <div className="text-muted-foreground truncate" title={e.detail}>{e.detail}</div>}
-                  </div>
-                  {e.actor && <span className="text-muted-foreground shrink-0 text-[10px]">{e.actor}</span>}
-                </div>
-              )
-            })}
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-// ================= r29-a：硬件权限状态面板（17 项生效一览，管理员可见） =================
-const HW_ITEMS: Array<{ id: string; label: string }> = [
-  { id: "camera", label: "摄像头" }, { id: "microphone", label: "麦克风" }, { id: "screenShare", label: "屏幕共享" },
-  { id: "location", label: "定位" }, { id: "accelerometer", label: "加速度" }, { id: "gyroscope", label: "陀螺仪" },
-  { id: "magnetometer", label: "磁力计" }, { id: "deviceOrientation", label: "方向" }, { id: "deviceMotion", label: "运动" },
-  { id: "clipboardRead", label: "剪贴板读" }, { id: "clipboardWrite", label: "剪贴板写" },
-  { id: "notifications", label: "通知" }, { id: "bluetooth", label: "蓝牙" }, { id: "usb", label: "USB" },
-  { id: "serial", label: "串口" }, { id: "midi", label: "MIDI" }, { id: "hid", label: "HID" },
-]
-
-function HardwareStatusPanel({ workspaceId }: { workspaceId: string }) {
-  const [data, setData] = React.useState<{ policy: Record<string, { enabled?: boolean; audit?: boolean; record?: boolean; silent?: boolean }>; source: string; clipboardSync: { enabled: boolean; source: string } } | null>(null)
-  React.useEffect(() => {
-    void getWorkspaceHardwareAction({ workspaceId }).then((res) => {
-      if (res.code === 0 && res.data) setData(res.data)
-    })
-  }, [workspaceId])
-  if (!data) return null
-  const allowed = HW_ITEMS.filter((i) => data.policy[i.id]?.enabled).length
-  const silentGranted = HW_ITEMS.filter((i) => data.policy[i.id]?.silent).length
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base flex items-center gap-2">
-          <Cpu className="h-4 w-4" /> 硬件权限 · 17 项管控
-          <Badge variant="secondary">放行 {allowed}/17</Badge>
-          {silentGranted > 0 && <Badge className="bg-rose-600 text-white">静默特权 {silentGranted} 项</Badge>}
-        </CardTitle>
-        <CardDescription>
-          四级策略链（沙箱 &gt; 用户 &gt; 用户组 &gt; 全局）解析来源：{data.source}；VNC 剪贴板透传：
-          {data.clipboardSync.enabled ? "开启" : "关闭"}（{data.clipboardSync.source === "legacy-config" ? "旧版全局开关" : "硬件权限接管"}）
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="flex flex-wrap gap-1.5">
-          {HW_ITEMS.map((i) => {
-            const st = data.policy[i.id] || {}
-            return (
-              <Badge
-                key={i.id}
-                variant="outline"
-                className={st.enabled ? "border-emerald-300 text-emerald-700" : "border-red-200 text-red-600"}
-                title={`允许:${st.enabled ? "是" : "否"} · 审计:${st.audit ? "开" : "关"} · 录制:${st.record ? "开" : "关"}${st.silent ? " · 静默特权" : ""}`}
-              >
-                {i.label}{st.silent ? " ·静" : ""}
-              </Badge>
-            )
-          })}
-        </div>
-      </CardContent>
-    </Card>
   )
 }
 
@@ -717,24 +572,10 @@ function IsolationPanel({ hardening, containerRef }: { hardening: Record<string,
   )
 }
 // ================= CDP 控制面板 =================
-function CdpPanel({ workspace, canOperate, publicCdpEndpoint, isAdmin }: { workspace: WorkspaceDetailData; canOperate: boolean; publicCdpEndpoint?: string; isAdmin?: boolean }) {
+function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: WorkspaceDetailData; canOperate: boolean; publicCdpEndpoint?: string }) {
   const [throttle, setThrottle] = React.useState({ download: 0, upload: 0, latency: 0 })
   const [domain, setDomain] = React.useState("")
   const [busy, setBusy] = React.useState(false)
-  // r28：CDP 外网网关票据（内网地址不暴露；票据单次 300s）
-  const [cdpTicket, setCdpTicket] = React.useState<{ gatewayUrl: string | null; expiresAt: string; durationMinutes: number; note: string } | null>(null)
-  const [ticketBusy, setTicketBusy] = React.useState(false)
-  const issueCdpTicket = async () => {
-    setTicketBusy(true)
-    try {
-      const res = await getCdpGatewayTicketAction({ workspaceId: workspace.id })
-      if (res.code === 0 && res.data) {
-        setCdpTicket(res.data)
-        if (res.data.gatewayUrl) toast.success(`已签发外网直连票据（${Math.round((new Date(res.data.expiresAt).getTime() - Date.now()) / 1000)}s 内有效）`)
-        else toast.info(res.data.note)
-      } else toast.error(res.msg || "票据签发失败")
-    } finally { setTicketBusy(false) }
-  }
 
   const applyThrottle = async () => {
     setBusy(true)
@@ -770,41 +611,23 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint, isAdmin }: { works
               <p className="text-[11px] text-muted-foreground mt-1">内网穿透/域名部署场景：Puppeteer/Playwright/自定义脚本经此端点鉴权转发，无需访问内部网络</p>
             </div>
           )}
-          {/* r28：CDP 外网直连（HMAC 票据；容器内网地址零暴露） */}
-          <div className="rounded-md border border-sky-200 bg-sky-50 dark:bg-sky-950/30 p-2.5 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-medium text-sky-800 dark:text-sky-300">CDP 外网直连（签名票据）</div>
-              <Button variant="outline" size="sm" disabled={ticketBusy || !canOperate} onClick={() => void issueCdpTicket()}>
-                {ticketBusy ? "签发中…" : cdpTicket?.gatewayUrl ? "重新签发" : "签发票据"}
-              </Button>
+          {/* r28：部署答疑卡 —— 直接回答"到底要穿透哪部分"（内置形态零穿透；仅外部分离浏览器需平台可达 9222） */}
+          {!publicCdpEndpoint && (
+            <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground space-y-1.5">
+              <div className="font-medium text-foreground">外部工具接入指引（穿透答疑）</div>
+              <p>· <span className="text-foreground">默认单容器形态：无需任何穿透。</span>外部工具只连 <code className="font-mono">https://你的平台域名/api/cdp/command</code>，网关鉴权后内部转发。</p>
+              <p>· 仅「外部分离浏览器」部署（EXTERNAL_BROWSER_URL）需要打通：浏览器容器 <b>9222（CDP）</b> → 平台容器可达即可（内网互通就行，不必暴露公网）；需 VNC 再加 5900。</p>
+              <p>· 显示公网端点：给平台设 <code className="font-mono">PUBLIC_BASE_URL=https://你的域名</code> 后此处自动展示。</p>
             </div>
-            {cdpTicket?.gatewayUrl ? (
-              <>
-                <code className="text-xs font-mono break-all block select-all">{cdpTicket.gatewayUrl}</code>
-                <div className="flex items-center gap-2">
-                  <Button variant="secondary" size="sm" onClick={() => {
-                    void navigator.clipboard.writeText(cdpTicket.gatewayUrl || "")
-                    toast.success("已复制外网 CDP 地址")
-                  }}>复制地址</Button>
-                  <span className="text-[11px] text-muted-foreground">
-                    {cdpTicket.durationMinutes > 0 ? `连接上限 ${cdpTicket.durationMinutes} 分钟 · ` : ""}票据单次有效 · {Math.max(0, Math.round((new Date(cdpTicket.expiresAt).getTime() - Date.now()) / 1000))}s 后过期
-                  </span>
-                </div>
-              </>
-            ) : (
-              <p className="text-[11px] text-muted-foreground">{cdpTicket?.note || "签发后获得带 HMAC 签名的外网直连地址（需管理员配置 cdp.publicGatewayHost 穿透域名）"}</p>
-            )}
-          </div>
+          )}
           <div className="flex items-center justify-between rounded-md border p-2.5">
             <span className="text-muted-foreground">浏览器会话ID</span>
             <code className="text-xs font-mono">{workspace.browserSessionId ?? "-"}</code>
           </div>
-          {isAdmin && (
-            <div className="flex items-center justify-between rounded-md border p-2.5">
-              <span className="text-muted-foreground">内部 CDP 端点（仅管理员可见）</span>
-              <code className="text-xs font-mono">{workspace.cdpUrl ?? "-"}</code>
-            </div>
-          )}
+          <div className="flex items-center justify-between rounded-md border p-2.5">
+            <span className="text-muted-foreground">内部 CDP 端点</span>
+            <code className="text-xs font-mono">{workspace.cdpUrl ?? "-"}</code>
+          </div>
           <div className="flex items-center justify-between rounded-md border p-2.5">
             <span className="text-muted-foreground">CDP 调用量 / 拦截</span>
             <span className="tabular-nums">{workspace.cdpCallCount} / {workspace.cdpBlockedCount}</span>
