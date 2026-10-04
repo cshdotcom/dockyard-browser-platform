@@ -7,7 +7,7 @@ import { toast } from "sonner"
 import {
   Activity,
   ArrowLeft, Globe, MonitorPlay, Share2, FileJson, Terminal, Clipboard, MousePointer2, Hand,
-  RefreshCw, ShieldCheck, Wifi, Loader2, Trash2, Lock, Play, StopCircle, Copy, Anchor,
+  RefreshCw, ShieldCheck, Wifi, Loader2, Trash2, Lock, Play, StopCircle, Copy, Anchor, Ticket,
   RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon, Network, FileLock2, Link2, Plus, Cable,
 } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -28,6 +28,8 @@ import {
   refreshVncKeyAction, updateWorkspaceAction, switchProxyAction, restartBrowserProcessAction,
   switchWorkspaceModeAction,
 } from "@/server/actions/workspaces"
+// r36：CDP 公网票据（网关直连地址一键获取）
+import { getCdpGatewayTicketAction } from "@/server/actions/cdp-gateway"
 import { WorkspaceShareDialog } from "../share-dialogs"
 import { setWorkspacePolicyOverrideAction, refreshWorkspacePolicyAction } from "@/server/actions/rules"
 import { HelmPortViewer } from "@/components/vnc/helmport-viewer"
@@ -612,7 +614,23 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
   const [domain, setDomain] = React.useState("")
   const [busy, setBusy] = React.useState(false)
   const [confirmSwitchUp, setConfirmSwitchUp] = React.useState(false)
+  // r36：CDP 公网票据直连地址（单次防重放；一键获取）
+  const [ticketBusy, setTicketBusy] = React.useState(false)
+  const [ticketData, setTicketData] = React.useState<{ gatewayUrl: string | null; expiresAt: string; durationMinutes: number; note: string } | null>(null)
   const router = useRouter()
+
+  const fetchTicket = async () => {
+    setTicketBusy(true)
+    try {
+      const res = await getCdpGatewayTicketAction({ workspaceId: workspace.id })
+      if (res.code === 0 && res.data) {
+        setTicketData({ gatewayUrl: res.data.gatewayUrl, expiresAt: res.data.expiresAt, durationMinutes: res.data.durationMinutes, note: res.data.note })
+        if (!res.data.gatewayUrl) toast.warning(res.data.note)
+      } else toast.error(res.msg)
+    } finally {
+      setTicketBusy(false)
+    }
+  }
 
   // r35：CDP→VNC 升级（Profile 归档迁移保留数据）
   const switchUp = async () => {
@@ -667,6 +685,35 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
             </Button>
             <span className="text-xs text-muted-foreground">r35：VNC↔CDP 双向升降级均保留浏览器数据</span>
           </div>
+          {/* r36：CDP 外网票据直连（一键获取；网关 HMAC 验签 + 单次防重放 + IP 防爆破 + 跨站劫持拦截） */}
+          <div className="space-y-2">
+            <Button variant="outline" size="sm" onClick={() => void fetchTicket()} disabled={ticketBusy || !canOperate || workspace.status !== "RUNNING"} title="获取带签名票据的外网直连地址（Puppeteer/Playwright endpoint 直接填入）">
+              {ticketBusy ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Ticket className="h-3.5 w-3.5 mr-1" />}
+              获取外网直连地址（票据）
+            </Button>
+            {ticketData && (
+              <div className="rounded-md border border-sky-200 bg-sky-50 dark:bg-sky-950/30 p-2.5 space-y-1.5">
+                {ticketData.gatewayUrl ? (
+                  <>
+                    <div className="text-xs text-muted-foreground">带签名票据的外网直连地址（{new Date(ticketData.expiresAt).toLocaleTimeString()} 前有效 · 单次使用{ticketData.durationMinutes > 0 ? ` · 最长 ${ticketData.durationMinutes} 分钟` : ""}）：</div>
+                    <code className="text-[11px] font-mono break-all">{ticketData.gatewayUrl}</code>
+                    <Button
+                      size="sm" variant="ghost" className="h-6 text-xs gap-1"
+                      onClick={() => {
+                        void navigator.clipboard.writeText(ticketData.gatewayUrl || "")
+                          .then(() => toast.success("票据地址已复制（Puppeteer/Playwright 的 browserWSEndpoint 直接填入）"))
+                          .catch(() => toast.error("复制失败：请手动选择复制"))
+                      }}
+                    >
+                      <Copy className="h-3 w-3" /> 复制
+                    </Button>
+                  </>
+                ) : (
+                  <div className="text-xs text-amber-700 dark:text-amber-300">{ticketData.note}</div>
+                )}
+              </div>
+            )}
+          </div>
           {publicCdpEndpoint && (
             <div className="rounded-md border border-teal-200 bg-teal-50 dark:bg-teal-950/30 p-2.5">
               <div className="text-xs text-muted-foreground mb-1">
@@ -686,6 +733,7 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
               <div className="font-medium text-foreground">外部工具接入指引（穿透答疑）</div>
               <p>· <span className="text-foreground">默认单容器形态：无需任何穿透。</span>外部工具只连 <code className="font-mono">https://你的平台域名/api/cdp/command</code>，网关鉴权后内部转发。</p>
               <p>· 仅「外部分离浏览器」部署（EXTERNAL_BROWSER_URL）需要打通：浏览器容器 <b>9222（CDP）</b> → 平台容器可达即可（内网互通就行，不必暴露公网）；需 VNC 再加 5900。</p>
+              <p>· <span className="text-foreground">直连沙箱 CDP（外网）：</span>管理员在 <code className="font-mono">系统配置 → CDP 网关</code> 填公网网关地址后，此处展示带签名票据的直连端点（单次防重放/IP 防爆破/跨站劫持拦截）。</p>
               <p>· 显示公网端点：给平台设 <code className="font-mono">PUBLIC_BASE_URL=https://你的域名</code> 后此处自动展示。</p>
             </div>
           )}

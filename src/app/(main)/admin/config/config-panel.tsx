@@ -59,16 +59,22 @@ export interface SelfCheckData {
   reservedCount: number
 }
 
-const CATEGORY_ORDER = ["SECURITY", "HARDWARE", "SESSION", "STORAGE", "ALERT", "MAIL", "NETWORK", "UI", "GENERAL", "MCP"] as const
+// r36：新增 CDP / WORKNODE / DOCKER / BACKUP 分类卡；补齐历史 TASKS 分类（此前键已注册但无标签页不展示）
+const CATEGORY_ORDER = ["SECURITY", "HARDWARE", "SESSION", "CDP", "STORAGE", "BACKUP", "ALERT", "MAIL", "NETWORK", "DOCKER", "WORKNODE", "TASKS", "UI", "GENERAL", "MCP"] as const
 
 const CATEGORY_LABEL: Record<string, string> = {
   SECURITY: "安全",
   HARDWARE: "硬件权限",
   SESSION: "会话",
+  CDP: "CDP 网关",
   STORAGE: "存储",
+  BACKUP: "备份容灾",
   ALERT: "告警",
   MAIL: "邮件",
   NETWORK: "网络",
+  DOCKER: "Docker 编排",
+  WORKNODE: "Worker 节点",
+  TASKS: "自定义任务",
   UI: "界面",
   GENERAL: "通用",
   MCP: "MCP 网关",

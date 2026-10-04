@@ -523,7 +523,28 @@ model BackupRecord {
   status        String   @default("SUCCESS") // SUCCESS | FAILED | RESTORING
   createdByUserId String?
   createdAt     DateTime @default(now())
+  // r36：多节点副本状态（JSON：[{nodeUuid, state: PENDING|SENT|OK|FAIL, error?, at?}]）
+  replicasJson  String?
 
+  @@index([createdAt])
+}
+
+// ============================================================
+// r36：Worker 指令队列（主控 → Worker 下行通道；心跳携出/结果回传）
+// 用途：备份多节点推送（backup.replica.* 分块）、后续调度/控制指令统一通道
+// ============================================================
+model WorkNodeCommand {
+  id          String    @id @default(cuid())
+  nodeUuid    String
+  cmd         String // backup.replica.begin | backup.replica.append | backup.replica.finish | ping ...
+  payloadJson String
+  createdAt   DateTime  @default(now())
+  sentAt      DateTime? // 心跳携出时间（首次/重试）
+  doneAt      DateTime? // Worker 结果回传时间
+  resultJson  String? // { ok, error?, data? }
+  retries    Int       @default(0)
+
+  @@index([nodeUuid, sentAt])
   @@index([createdAt])
 }
 

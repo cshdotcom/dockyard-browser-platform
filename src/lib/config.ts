@@ -195,6 +195,23 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "proxy.healthCheckIntervalSec": { value: 60, category: "NETWORK", type: "number", description: "代理健康探测间隔（秒）" },
   "proxy.probeTimeoutMs": { value: 5000, category: "NETWORK", type: "number", description: "代理探测超时（ms）" },
   "env.overrideDbConfig": { value: false, category: "GENERAL", type: "boolean", description: "环境变量覆盖数据库配置开关" },
+
+  // —— r36：CDP 公网网关（连接地址可配置；后台直接改，无需改代码/重启镜像）——
+  "cdp.publicGatewayHost": { value: "", category: "CDP", type: "string", description: "CDP 公网网关地址（域名或 IP，如 cdp.example.com；管理员在宿主机做内网穿透指向 cdp-gateway 端口后填写。空=未配置公网 CDP，用户端不提供外网地址；推荐用 TLS 域名）" },
+  "cdp.gatewayPort": { value: 3006, category: "CDP", type: "number", description: "CDP 网关端口（cdp-gateway mini-service 监听端口；与内网穿透映射端口一致）" },
+  "cdp.gatewayTls": { value: false, category: "CDP", type: "boolean", description: "网关地址是否走 TLS（true=票据地址用 wss://；需穿透/反代侧提供证书）" },
+  "cdp.ticketWindowSec": { value: 300, category: "CDP", type: "number", description: "CDP 连接票据有效窗口（秒，取票→建连；单次防重放）" },
+  "session.cdpMaxMinutes": { value: 0, category: "CDP", type: "number", description: "单次 CDP 外网连接最长时长全局默认（分钟，0=不限；用户>组>全局三级可覆盖）" },
+
+  // —— r36：Worker 节点注册（Master API 地址可配置；修复注册凭证显示 localhost）——
+  "worknode.masterApiUrl": { value: "", category: "WORKNODE", type: "string", description: "Worker 节点注册凭证的 MASTER_API_URL 推荐值（如 https://master.example.com；空=按环境变量 NODE_PUBLIC_URL/PUBLIC_BASE_URL → 请求地址推导。Worker 实际连接地址，跨主机部署必填公网可达地址）" },
+
+  // —— r36：浏览器容器安全选项（管理员可启用 Chromium 原生沙箱）——
+  "docker.browserSecurityOpt": { value: "[]", category: "DOCKER", type: "string", description: "浏览器容器附加 --security-opt（JSON 数组，如 [\"seccomp=/etc/docker/seccomp/dockyard-chromium.json\"]；部署本仓库 deploy/seccomp/dockyard-chromium.json 到 Docker daemon 主机后填写 → Chromium 原生沙箱可用，永不回退 --no-sandbox。谨慎配置，错误值会导致容器创建失败）" },
+  "docker.browserCapAdd": { value: "[]", category: "DOCKER", type: "string", description: "浏览器容器附加 capabilities（JSON 数组，如 [\"SYS_ADMIN\"]；会削弱容器隔离，仅在明确需要且理解风险时配置；默认空=保持 CapDrop=ALL 最强隔离）" },
+
+  // —— r36：备份多节点推送（跨 Worker 副本容灾）——
+  "backup.pushNodes": { value: "", category: "BACKUP", type: "string", description: "备份副本推送的 Worker 节点（逗号分隔 nodeUuid，如 wn-xxx,wn-yyy；备份完成后异步推送到这些节点的分布式存储目录；空=不推送。节点需已注册且在线）" },
 }
 
 type CacheShape = Map<string, { value: unknown; type: string; category: string; version: number }>

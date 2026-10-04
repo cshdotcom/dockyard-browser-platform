@@ -507,7 +507,24 @@ model BackupRecord {
   status        String   @default("SUCCESS") // SUCCESS | FAILED | RESTORING
   createdByUserId String?
   createdAt     DateTime @default(now())
+  // r36：多节点副本状态（JSON：[{nodeUuid, state: PENDING|SENT|OK|FAIL, error?, at?}]）
+  replicasJson  String?
 
+  @@index([createdAt])
+}
+
+model WorkNodeCommand {
+  id          String    @id @default(cuid())
+  nodeUuid    String
+  cmd         String
+  payloadJson String
+  createdAt   DateTime  @default(now())
+  sentAt      DateTime?
+  doneAt      DateTime?
+  resultJson  String?
+  retries    Int       @default(0)
+
+  @@index([nodeUuid, sentAt])
   @@index([createdAt])
 }
 

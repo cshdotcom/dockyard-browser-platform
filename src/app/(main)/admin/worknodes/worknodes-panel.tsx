@@ -24,6 +24,7 @@ interface CreatedCredential {
   nodeUuid: string
   apiKey: string
   deploy: Record<string, string>
+  masterApiUrlHint?: string | null
 }
 
 function pct(v: number | null | undefined): string {
@@ -43,6 +44,9 @@ export function WorkNodesPanel({ initialNodes, canManage }: { initialNodes: Work
   const [region, setRegion] = useState("default")
   const [note, setNote] = useState("")
   const [maxSb, setMaxSb] = useState(20)
+  // r36：MASTER_API_URL 可编辑（预填推荐值；修复注册凭证显示 localhost 根因）
+  const [masterApiUrl, setMasterApiUrl] = useState("")
+  const [masterApiUrlTouched, setMasterApiUrlTouched] = useState(false)
   const [creating, setCreating] = useState(false)
   const [credential, setCredential] = useState<CreatedCredential | null>(null)
   const [copied, setCopied] = useState(false)
@@ -68,10 +72,15 @@ export function WorkNodesPanel({ initialNodes, canManage }: { initialNodes: Work
       const res = await fetch("/api/master/worknode/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, region, note: note || undefined, maxSandboxes: maxSb }),
+        body: JSON.stringify({
+          name, region, note: note || undefined, maxSandboxes: maxSb,
+          // r36：管理员在表单显式填写时下发覆盖（空=服务端优先级链自动推导）
+          masterApiUrl: masterApiUrlTouched && masterApiUrl.trim() ? masterApiUrl.trim() : undefined,
+        }),
       }).then((r) => r.json())
       if (res.code === 0 && res.data) {
-        setCredential({ nodeUuid: res.data.nodeUuid, apiKey: res.data.apiKey, deploy: res.data.deploy })
+        setCredential({ nodeUuid: res.data.nodeUuid, apiKey: res.data.apiKey, deploy: res.data.deploy, masterApiUrlHint: res.data.masterApiUrlHint })
+        if (res.data.masterApiUrlHint) toast.warning(res.data.masterApiUrlHint)
         toast.success("节点已创建（凭证仅本次展示）")
         void refresh()
       } else toast.error(res.msg || "创建失败")
@@ -220,6 +229,11 @@ export function WorkNodesPanel({ initialNodes, canManage }: { initialNodes: Work
                 <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/30 p-3 text-xs text-amber-800 dark:text-amber-300">
                   ⚠️ Worker 部署三环境变量（关闭后无法找回 API_KEY；遗失只能驱逐重建）
                 </div>
+                {credential.masterApiUrlHint && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 dark:bg-red-950/30 p-3 text-xs text-red-700 dark:text-red-300">
+                    {credential.masterApiUrlHint}
+                  </div>
+                )}
                 <div className="rounded-lg border bg-muted/40 p-3 font-mono text-xs space-y-1 break-all">
                   {Object.entries(credential.deploy).map(([k, v]) => (
                     <div key={k}><span className="text-muted-foreground">{k}=</span>{v}</div>
@@ -237,6 +251,20 @@ export function WorkNodesPanel({ initialNodes, canManage }: { initialNodes: Work
                   <span>区域</span><Input value={region} onChange={(e) => setRegion(e.target.value)} placeholder="default / beijing / shanghai" />
                   <span>沙箱上限</span><Input type="number" value={maxSb} onChange={(e) => setMaxSb(Number(e.target.value) || 20)} />
                   <span>备注</span><Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="可选" />
+                </div>
+                {/* r36：MASTER_API_URL 可编辑 —— Worker 实际回连主控的地址 */}
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">MASTER_API_URL（Worker 回连主控地址）</label>
+                  <Input
+                    value={masterApiUrl}
+                    onFocus={() => setMasterApiUrlTouched(true)}
+                    onChange={(e) => { setMasterApiUrl(e.target.value); setMasterApiUrlTouched(true) }}
+                    placeholder="留空 = 自动（后台配置 > 环境变量推荐 > 当前访问地址）；跨主机部署必填，如 https://master.example.com"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    跨主机部署的 Worker 无法用 localhost 回连主控：在此填写主控公网地址，或在
+                    「系统配置 → Worker 节点 → worknode.masterApiUrl」配置全局推荐值（留空两者皆未配时回退当前访问地址，同机部署可用）
+                  </p>
                 </div>
                 <div className="text-xs text-muted-foreground">
                   Worker 启动命令：<code className="bg-muted px-1 rounded">bun run mini-services/worker</code>（容器镜像内已内置）

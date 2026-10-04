@@ -41,6 +41,9 @@ export interface BrowserHardeningSpec {
   exitGuard?: "normal" | "fullscreen" | "kiosk" // 防退出档位（supervisor chromium 参数）
   recordingDir?: string | null // 容器外录像目录（宿主侧用户空间；有 spec.recording.enabled 时必填）
   recordingUserId?: string | null // 录像归属用户（用户空间目录推导；name 由本函数生成）
+  // —— r36：管理员可配置容器安全附加项（后台 docker.browserSecurityOpt/CapAdd）——
+  extraSecurityOpt?: string | null // JSON 数组字符串（追加 --security-opt，如自定义 seccomp profile）
+  extraCapAdd?: string | null // JSON 数组字符串（追加 CapAdd；削弱隔离，管理员显式风险决策）
 }
 
 export interface BrowserHardeningInfo {
@@ -128,12 +131,32 @@ export function browserProfileDir(userId: string, profileKey: string): string | 
   return `${ENV.storageLocalPath.replace(/\/$/, "")}/profiles/${userId}/${profileKey}`
 }
 
+// 硬化默认值 + 管理员可配置附加项（r36）
+// SecurityOpt/CapAdd 附加项来源：后台配置 docker.browserSecurityOpt / docker.browserCapAdd
+//（JSON 数组字符串）。典型用途：部署 deploy/seccomp/dockyard-chromium.json 到
+// Docker daemon 主机后填写 seccomp 项 → Chromium 原生沙箱可用（永不回退 --no-sandbox）。
+function parseSecurityOptList(raw: string): string[] {
+  try {
+    const arr = JSON.parse(raw || "[]") as unknown[]
+    if (!Array.isArray(arr)) return []
+    return arr
+      .map((v) => String(v).trim())
+      .filter(Boolean)
+      .filter((v) => v.length <= 200 && !/[\n\r]/.test(v)) // 单行、限长（防注入畸形 HostConfig）
+  } catch {
+    return []
+  }
+}
+
 export function buildBrowserHostConfig(spec: BrowserHardeningSpec) {
   const binds = spec.profileDir ? [`${spec.profileDir}:/home/browser/profile:rw,nosuid,nodev,noexec`] : []
   // 网络策略托管策略：只读 bind-mount（只读根 FS + 非 root + CapDrop=ALL → 沙箱内无法篡改）
   if (spec.policyFile) binds.push(`${spec.policyFile}:${CHROMIUM_POLICY_MOUNT}:ro`)
   // r27：会话录像目录（用户空间；可写不可执行，与 Profile 同级隔离语义）
   if (spec.recording?.enabled && spec.recordingDir) binds.push(`${spec.recordingDir}:/home/browser/recordings:rw,nosuid,nodev,noexec`)
+  // r36：管理员附加 security-opt（seccomp profile 等）与 capabilities（可选项）
+  const extraSecurityOpt = parseSecurityOptList(spec.extraSecurityOpt || "[]")
+  const extraCapAdd = parseSecurityOptList(spec.extraCapAdd || "[]")
   return {
     NanoCpus: Math.round(spec.cpuLimit * 1e9),
     Memory: Math.round(spec.memLimitMb * 1024 * 1024),
@@ -142,7 +165,8 @@ export function buildBrowserHostConfig(spec: BrowserHardeningSpec) {
     Privileged: false,
     ReadOnlyRootfs: true, // 根文件系统只读
     CapDrop: ["ALL"],
-    SecurityOpt: ["no-new-privileges"],
+    CapAdd: extraCapAdd, // r36：管理员显式授予（默认空数组 = 保持最强隔离）
+    SecurityOpt: ["no-new-privileges", ...extraSecurityOpt],
     RestartPolicy: { Name: "always" }, // 防退出：容器崩溃自动拉起（浏览器进程级自愈在镜像 supervisor）
     NetworkMode: spec.network,
     Binds: binds,

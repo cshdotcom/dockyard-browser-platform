@@ -14,6 +14,9 @@ const MASTER_API_URL = process.env.MASTER_API_URL || ""
 const WORKER_NODE_UUID = process.env.WORKER_NODE_UUID || ""
 const WORKER_API_KEY = process.env.WORKER_API_KEY || ""
 
+// r36：指令执行结果回传队列（内存环；随下次心跳上报主控 → WorkNodeCommand.doneAt）
+const pendingResults: Array<{ cmdId: string; ok: boolean; error?: string; data?: unknown }> = []
+
 const missing: string[] = []
 if (!MASTER_API_URL) missing.push("MASTER_API_URL")
 if (!WORKER_NODE_UUID) missing.push("WORKER_NODE_UUID")
@@ -28,7 +31,7 @@ if (!/^wn-[a-f0-9]{16}$/.test(WORKER_NODE_UUID)) {
 }
 
 const HEARTBEAT_SEC = Number(process.env.WORKER_HEARTBEAT_SEC || 10)
-const VERSION = "worker-1.0.0-r29"
+const VERSION = "worker-1.2.0-r36"
 
 async function collectMetrics(): Promise<Record<string, number | string>> {
   const os = await import("os")
@@ -80,10 +83,11 @@ async function heartbeat() {
         "x-node-uuid": WORKER_NODE_UUID,
         "x-node-key": WORKER_API_KEY,
       },
-      body: JSON.stringify(metrics),
+      // r36：携带上轮指令执行结果（主控更新 WorkNodeCommand 状态/备份副本状态）
+      body: JSON.stringify({ ...metrics, results: pendingResults.splice(0, 64) }),
       signal: AbortSignal.timeout(5000),
     })
-    const json = await res.json().catch(() => null) as { code?: number; msg?: string; data?: { commands?: Array<{ cmd: string; payload?: unknown }> } } | null
+    const json = await res.json().catch(() => null) as { code?: number; msg?: string; data?: { commands?: Array<{ id?: string; cmd: string; payload?: unknown }> } } | null
 
     if (res.status === 403) {
       console.error(`[worker] 主控拒绝心跳（${json?.msg || "403"}）—— 节点已失效，Worker 退出`)
@@ -96,8 +100,11 @@ async function heartbeat() {
       process.exit(3)
     }
     if (json?.code === 0) {
-      for (const cmd of json.data?.commands || []) {
-        void executeCommand(cmd.cmd, cmd.payload)
+      const commands = json.data?.commands || []
+      // r36：顺序执行（backup.replica.begin/append/finish 依赖顺序；执行完才发下轮心跳取新指令）→ 结果回传队列→ 下次心跳携出
+      for (const cmd of commands) {
+        const r = await executeCommand(cmd.cmd, cmd.payload)
+        if (cmd.id) pendingResults.push({ cmdId: cmd.id, ok: r.ok, error: r.error, data: r.data })
       }
     } else {
       console.warn(`[worker] 心跳异常响应：${json?.msg || res.status}`)
@@ -107,19 +114,20 @@ async function heartbeat() {
   }
 }
 
-async function executeCommand(cmd: string, payload: unknown): Promise<void> {
+async function executeCommand(cmd: string, payload: unknown): Promise<{ ok: boolean; error?: string; data?: unknown }> {
   console.log(`[worker] 执行主控指令：${cmd}`)
-  if (cmd.startsWith("file.")) {
+  if (cmd.startsWith("file.") || cmd.startsWith("backup.replica.")) {
     const r = await handleFileCommand(cmd, payload)
     console.log(`[worker] 文件指令结果：${cmd} → ${r.ok ? "OK" : `FAIL ${r.error}`}`)
-    return
+    return r
   }
   switch (cmd) {
     case "ping":
       console.log("[worker] pong")
-      break
+      return { ok: true }
     default:
       console.log(`[worker] 未知指令 ${cmd}（忽略；Worker 不执行未注册指令）`)
+      return { ok: false, error: `未知指令 ${cmd}` }
   }
 }
 

@@ -11,6 +11,7 @@
 
 import { ENV, externalAvailable } from "../env"
 import { randomUUID } from "crypto"
+import { getConfig } from "../config"
 import {
   createIsolatedBrowserContainer,
   ensureSessionNetwork,
@@ -270,8 +271,18 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       exitGuard: params.exitGuard,
       recording: params.recording?.enabled ? params.recording : undefined,
       recordingUserId: params.userId || null,
+      // r36：管理员可配置容器安全附加项（后台「Docker」配置卡；如自定义 seccomp
+      // profile → Chromium 原生沙箱启用，--no-sandbox 永不回退）
+      extraSecurityOpt: await getConfig("docker.browserSecurityOpt", "[]"),
+      extraCapAdd: await getConfig("docker.browserCapAdd", "[]"),
     }
     const cont = await createIsolatedBrowserContainer(spec)
+    // r36：【docker 模式 CDP 端口与 Service 不工作根因修复】
+    // 此前 docker 分支会话对象从未返回 cdpUrl → 库中 cdpUrl=null → CDP 网关取票
+    // 409（"CDP 端点不可用"）、CRX 引擎跳过、监控宫格快照/时间轴/导航管控全部静默失效。
+    // 修复：容器就绪探测（/json/version 轮询）+ 返回稳定 HTTP 基址（按需解析
+    // webSocketDebuggerUrl —— Chromium 每次重启 browser UUID 会变，存基址而非具体 ws 端点）。
+    const cdpBase = cont.ip ? await probeContainerCdp(cont.ip, ENV.browserCdpPort) : null
     return {
       novncSessionId: cont.name,
       wsPath: `/novnc/${cont.name}`,
@@ -281,6 +292,7 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
       rfb: cont.ip ? { host: cont.ip, port: ENV.browserVncPort } : null,
       containerName: cont.name,
       hardening: cont.hardening,
+      cdpUrl: cdpBase ? `${cdpBase}/json` : null,
       recording: params.recording?.enabled && params.userId
         ? { recordDir: `${ENV.storageLocalPath.replace(/\/$/, "")}/recordings/${params.userId}/${cont.name}`, fps: params.recording.fps, segmentSec: params.recording.segmentSec, maxSec: params.recording.maxSec }
         : null,
@@ -298,6 +310,29 @@ export async function createNovncSession(params: NovncProvisionParams): Promise<
     containerName: null,
     hardening: null,
   }
+}
+
+// r36：docker 模式浏览器容器 CDP 就绪探测（/json/version 轮询 ≤25s）
+// Chromium 启动需数秒（镜像 supervisor 拉起 → DevTools HTTP 服务就绪）。
+// 返回 CDP HTTP 基址（http://<容器IP>:<port>）；容器 IP 空或超时 → null（会话仍建立，
+// cdpUrl 为空时 CDP 类功能按既有逻辑 409/降级；看门狗/重建链路后续自愈）。
+export async function probeContainerCdp(containerIp: string, cdpPort: number, timeoutMs = 25_000): Promise<string | null> {
+  const base = `http://${containerIp}:${cdpPort}`
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      // Host 头必须为具体地址（Chromium DevTools HTTP 校验：拒绝非 localhost 域名）——fetch 自动携带 <ip>:<port> ✓
+      const res = await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2000) })
+      if (res.ok) {
+        const j = (await res.json().catch(() => null)) as { Browser?: string } | null
+        if (j?.Browser) return base
+      }
+    } catch {
+      /* 未就绪：继续轮询 */
+    }
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  return null
 }
 
 // 解析 VNC 桥拨号目标：外部浏览器(分离部署 RFB 端点) / 内嵌沙箱(127.0.0.1:rfbPort) / 池集群(RFB端点) / 自托管容器IP / 模拟(演示RFB引擎)

@@ -1,0 +1,49 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32", "SCMP_ARCH_AARCH64", "SCMP_ARCH_ARM"],
+  "syscalls": [
+    {
+      "names": [
+        "add_key",
+        "keyctl",
+        "request_key",
+        "bpf",
+        "perf_event_open",
+        "fanotify_init",
+        "lookup_dcookie",
+        "mbind",
+        "migrate_pages",
+        "move_pages",
+        "nfsservctl",
+        "open_by_handle_at",
+        "quotactl",
+        "set_mempolicy",
+        "swapcontext",
+        "sysfs",
+        "userfaultfd",
+        "vmsplice",
+        "kexec_file_load",
+        "kexec_load",
+        "init_module",
+        "finit_module",
+        "delete_module",
+        "iopl",
+        "ioperm",
+        "pci_iomap_cfg",
+        "s390_pci_mmio_read",
+        "s390_pci_mmio_write",
+        "s390_runtime_instr"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "names": ["personality"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "excludes": {
+        "caps": ["CAP_SYS_ADMIN"]
+      }
+    }
+  ]
+}

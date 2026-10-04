@@ -89,6 +89,11 @@ cleanup() {
   CLEANED=1
   log "收到终止信号：级联停止沙箱进程树"
   [ -n "$IME_PID" ] && kill "$IME_PID" 2>/dev/null
+  # r36：每沙箱独立 pulseaudio 级联停止（声音回传链路）
+  [ -n "${PULSE_PID:-}" ] && kill "$PULSE_PID" 2>/dev/null
+  [ -n "${PULSE_RUNTIME:-}" ] && rm -rf "$PULSE_RUNTIME" 2>/dev/null
+  # r36：每沙箱独立 pulseaudio 级联停止（声音回传链路）
+  [ -n "${PULSE_PID:-}" ] && kill "$PULSE_PID" 2>/dev/null
   # fcitx5 守护双保险：按沙箱专用用户扫杀（root+独立用户形态；共享用户形态不扫，避免误伤其他沙箱）
   [ "$AM_ROOT" = "1" ] && [ -n "${DY_USER:-}" ] && pkill -TERM -u "$DY_USER" -x fcitx5 2>/dev/null
   # r27：VNC 录像优雅收尾（SIGTERM → ffmpeg 写完 trailer 落盘；杀不死的再补 KILL）
@@ -271,6 +276,49 @@ start_recording
   [ "$UNSHARE_OK" = "1" ] && log "unshare 用户/挂载命名空间可用：每沙箱私有策略视图已启用" \
     || log "WARN: unshare 不可用 → Chromium 以共享视图运行（策略降级为全局基线）"
 
+# ---- 2.6 r36：每沙箱独立 pulseaudio（远程声音回传链路）----
+# 独立 socket 目录（/tmp/dy-pulse-<id>）：跨沙箱完全隔离；
+# null sink dockyard-mix = 虚拟扬声器；.monitor 即回放监听源。
+# 平台侧 ffmpeg 经 PULSE_SERVER=unix:<socket> 抓 dockyard-mix.monitor。
+# 非独立用户形态（共享用户）也各自独立 socket，无串扰。
+PULSE_PID=""
+PULSE_RUNTIME=""
+PULSE_SOCKET=""
+AUDIO_READY=0
+start_pulse() {
+  [ "${DY_AUDIO_ENABLED:-1}" = "1" ] || return 0
+  command -v pulseaudio >/dev/null 2>&1 || { log "提示：环境无 pulseaudio → 声音回传不可用（503 降级）"; return 0; }
+  PULSE_RUNTIME="/tmp/dy-pulse-${DY_SANDBOX_ID}"
+  rm -rf "$PULSE_RUNTIME" 2>/dev/null || true
+  mkdir -p "$PULSE_RUNTIME/pulse" 2>/dev/null || return 0
+  # root+独立用户形态：socket 目录归属沙箱用户（chown 后降权进程可写）
+  [ "$AM_ROOT" = "1" ] && [ -n "${DY_USER:-}" ] && chown -R "$DY_USER" "$PULSE_RUNTIME" 2>/dev/null
+  chmod 700 "$PULSE_RUNTIME" 2>/dev/null
+  if bg_user pulseaudio --daemonize=yes --exit-idle-time=-1 --disallow-exit -n \
+      --load="module-native-protocol-unix socket=$PULSE_RUNTIME/pulse/native" \
+      --load="module-null-sink sink_name=dockyard-mix sink_properties=device.description=DockyardRemoteAudio" \
+      --log-target=stderr --log-level=error; then
+    i=0
+    while [ "$i" -lt 40 ]; do
+      [ -S "$PULSE_RUNTIME/pulse/native" ] && break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    if [ -S "$PULSE_RUNTIME/pulse/native" ]; then
+      PULSE_SOCKET="$PULSE_RUNTIME/pulse/native"
+      AUDIO_READY=1
+      log "pulseaudio 虚拟声卡就绪（dockyard-mix → $PULSE_SOCKET）"
+      # 状态心跳携带（平台 audio 路由拨号寻址用）
+      echo "$PULSE_SOCKET" >"$SANDBOX_DIR/pulse-socket" 2>/dev/null || true
+    else
+      log "WARN: pulseaudio 启动但 socket 未就绪 → 声音回传降级不可用"
+    fi
+  else
+    log "WARN: pulseaudio 启动失败 → 声音回传降级不可用（不影响其余功能）"
+  fi
+}
+start_pulse
+
 # ---- 3. 防退出主循环 ----
 # 浏览器退出（任何原因）→ wait 返回 → 1 秒后同一 user-data-dir 拉起
 # Xvfb 意外死亡 → 先重建显示再拉起浏览器（整机自愈语义）
@@ -295,23 +343,36 @@ while :; do
     log "fcitx5 意外退出，重建输入法守护"
     start_ime
   fi
+  # r36：pulseaudio 意外退出 → 重建虚拟声卡（socket 路径不变，音频流自动恢复）
+  if [ "$AUDIO_READY" = "1" ] && [ -n "$PULSE_SOCKET" ] \
+     && ! pgrep -f "socket=$PULSE_RUNTIME/pulse/native" >/dev/null 2>&1; then
+    log "pulseaudio 意外退出，重建虚拟声卡"
+    start_pulse
+  fi
   # r27：录像进程意外退出（OOM/磁盘异常）→ 重建录像（分段续录，不丢已落盘部分）
   if [ "$REC_ENABLED" = "1" ] && ! kill -0 "${REC_PID:-0}" 2>/dev/null; then
     log "ffmpeg 录像意外退出，重建录像进程（分段续录）"
     start_recording
   fi
+  # r36：声音回传（pulse 环境注入：Chromium 输出定向 dockyard-mix 虚拟声卡）
+  if [ "$AUDIO_READY" = "1" ] && [ -n "$PULSE_SOCKET" ]; then
+    PULSE_ENV="PULSE_SERVER=$PULSE_SOCKET XDG_RUNTIME_DIR=$PULSE_RUNTIME"
+    INNER_CMD="env PULSE_SERVER=$PULSE_SOCKET XDG_RUNTIME_DIR=$PULSE_RUNTIME sh $INNER"
+  else
+    INNER_CMD="sh $INNER"
+  fi
   # setpriv/unshare/sh/prlimit 全链 exec —— $! 即 chromium 主进程 PID
   if [ "$UNSHARE_OK" = "1" ]; then
     if [ "$AM_ROOT" = "1" ] && [ -n "${DY_USER:-}" ]; then
-      setpriv --reuid="$DY_USER" --regid="$DY_USER" --init-groups -- unshare -Urm sh "$INNER" >>"$LOG_DIR/chromium.log" 2>&1 &
+      setpriv --reuid="$DY_USER" --regid="$DY_USER" --init-groups -- unshare -Urm $INNER_CMD >>"$LOG_DIR/chromium.log" 2>&1 &
     else
-      unshare -Urm sh "$INNER" >>"$LOG_DIR/chromium.log" 2>&1 &
+      unshare -Urm $INNER_CMD >>"$LOG_DIR/chromium.log" 2>&1 &
     fi
   else
     if [ "$AM_ROOT" = "1" ] && [ -n "${DY_USER:-}" ]; then
-      setpriv --reuid="$DY_USER" --regid="$DY_USER" --init-groups -- sh "$INNER" >>"$LOG_DIR/chromium.log" 2>&1 &
+      setpriv --reuid="$DY_USER" --regid="$DY_USER" --init-groups -- $INNER_CMD >>"$LOG_DIR/chromium.log" 2>&1 &
     else
-      sh "$INNER" >>"$LOG_DIR/chromium.log" 2>&1 &
+      $INNER_CMD >>"$LOG_DIR/chromium.log" 2>&1 &
     fi
   fi
   CHROME_PID=$!
@@ -325,13 +386,17 @@ while :; do
     j=$((j + 1))
   done
   # r28：Chromium 原生沙箱启动失败自愈（存活 <8s 且日志含 sandbox 错误 → 单次回退 --no-sandbox 并告警留痕）
+  # r36：①修复防重入守卫（原 "\${...}" 反斜杠转义导致条件恒真，单次回退语义失效）
+  #      ②回退时同步附 --test-type（抑制 Chromium 坏标志警告条
+  #        "You are using an unsupported command-line flag: --no-sandbox"；ChromeDriver 同款手法）
   CHROME_ALIVE_SEC=$(( $(date +%s) - CHROME_STARTED_AT ))
-  if [ "$CHROME_ALIVE_SEC" -lt 8 ] && [ "\${DY_CHROME_NOSANDBOX:-0}" != "1" ] \
+  if [ "$CHROME_ALIVE_SEC" -lt 8 ] && [ "${DY_CHROME_NOSANDBOX:-0}" != "1" ] \
      && grep -qi "sandbox" "$LOG_DIR/chromium.log" 2>/dev/null \
      && ! grep -qi "Parent process should exit" "$LOG_DIR/chromium.log" 2>/dev/null; then
     export DY_CHROME_NOSANDBOX=1
-    log "WARN: Chromium 原生沙箱启动失败（容器 namespace 受限）→ 已回退 --no-sandbox（仍受 OS 用户级隔离）"
-    echo "[r28-sandbox-fallback] $(date -Is) chromium sandbox failed, fallback to no-sandbox (OS-user isolation remains)" >> "$LOG_DIR/policy.log" 2>/dev/null || true
+    export DY_CHROME_TEST_TYPE=1
+    log "WARN: Chromium 原生沙箱启动失败（容器 namespace 受限）→ 已回退 --no-sandbox + --test-type（OS 用户级隔离 + 容器级隔离兜底）"
+    echo "[r36-sandbox-fallback] $(date -Is) chromium sandbox failed, fallback to no-sandbox + test-type (OS-user isolation remains)" >> "$LOG_DIR/policy.log" 2>/dev/null || true
   fi
   CHROME_PID=""
   RESTARTS=$((RESTARTS + 1))

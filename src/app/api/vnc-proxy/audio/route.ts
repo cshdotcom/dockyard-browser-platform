@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server"
 import crypto from "node:crypto"
+import { PassThrough, Transform, Readable } from "node:stream"
+import type { ChildProcess } from "node:child_process"
 import { db } from "@/lib/db"
 import { apiHandler } from "@/lib/api"
 import { requireAuth } from "@/lib/permissions"
 import { rateLimit } from "@/lib/rate-limit"
 import { writeAudit } from "@/lib/audit"
 import { BizError, ErrorCode } from "@/lib/errors"
+import { ENV } from "@/lib/env"
 
 // ============================================================
 // r35 VNC 远程声音回传：POST /api/vnc-proxy/audio
@@ -41,6 +44,95 @@ export async function POST(req: NextRequest) {
   } catch (e) {
     if (e instanceof BizError) return NextResponse.json({ code: e.code, msg: e.message, data: null, traceId }, { status: 400 })
     return NextResponse.json({ code: 50000, msg: e instanceof Error ? e.message : "内部错误", data: null, traceId }, { status: 500 })
+  }
+}
+
+// ============================================================
+// r36：Docker Engine API exec 流式音频（远程 Docker 部署形态）
+// exec create → exec start（Detach:false，非 TTY）→ 响应体为 Docker 8 字节帧
+// 复用流：[streamType(1) | 0(3) | payloadSize(4 BE)] + payload。
+// 解复用 stdout(1) 帧归一为 ChildProcess 形态（stderr(2) 归集供错误诊断）。
+// ============================================================
+
+// 8 字节帧协议解复用（Docker attach stream format）
+class DockerExecDemux extends Transform {
+  private buf = Buffer.alloc(0)
+  constructor(
+    private readonly out: PassThrough,
+    private readonly err: PassThrough,
+  ) {
+    super()
+  }
+  override _transform(chunk: Buffer, _enc: string, cb: (err?: Error | null) => void) {
+    this.buf = Buffer.concat([this.buf, chunk])
+    while (this.buf.length >= 8) {
+      const streamType = this.buf[0]
+      const size = this.buf.readUInt32BE(4)
+      if (this.buf.length < 8 + size) break
+      const payload = this.buf.subarray(8, 8 + size)
+      this.buf = this.buf.subarray(8 + size)
+      if (streamType === 2) this.err.write(payload)
+      else this.out.write(payload) // stdout(1) 与未知类型均按 stdout 透传
+    }
+    cb()
+  }
+}
+
+async function spawnDockerExecStream(containerRef: string, ffmpegArgs: string[]): Promise<ChildProcess | null> {
+  try {
+    const base = ENV.dockerApiUrl.replace(/\/$/, "")
+    if (!base) return null
+    // 1) exec create（容器内 ffmpeg；pulse 环境由容器 supervisor 注入 PID1，
+    //    exec 新进程需显式传 PULSE_SERVER/XDG_RUNTIME_DIR）
+    const createRes = await fetch(`${base}/containers/${encodeURIComponent(containerRef)}/exec`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        AttachStdout: true,
+        AttachStderr: true,
+        AttachStdin: false,
+        Tty: false,
+        Env: ["PULSE_SERVER=/tmp/pulse/pulse/native", "XDG_RUNTIME_DIR=/tmp/pulse"],
+        Cmd: ["ffmpeg", ...ffmpegArgs],
+      }),
+    })
+    if (!createRes.ok) return null
+    const execInfo = (await createRes.json().catch(() => null)) as { Id?: string } | null
+    if (!execInfo?.Id) return null
+
+    // 2) exec start（流式响应体 = 帧复用流）
+    const startRes = await fetch(`${base}/exec/${execInfo.Id}/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ Detach: false, Tty: false }),
+    })
+    if (!startRes.ok || !startRes.body) return null
+
+    // 3) web ReadableStream → 原生流 → 解复用
+    const native = Readable.fromWeb(startRes.body as Parameters<typeof Readable.fromWeb>[0])
+    const stdout = new PassThrough()
+    const stderr = new PassThrough()
+    native.pipe(new DockerExecDemux(stdout, stderr))
+
+    // 归一 ChildProcess 形态（EventEmitter 提供 on/once；下游 firstChunk/流式回传/kill 零改动）
+    const emitter = new (await import("node:events")).EventEmitter()
+    const pseudo = Object.assign(emitter, {
+      stdout,
+      stderr,
+      kill: (sig?: string) => {
+        void sig
+        try { native.destroy() } catch { /* noop */ }
+        try { void fetch(`${base}/exec/${execInfo.Id}`, { method: "DELETE" }) } catch { /* noop */ }
+        stdout.destroy()
+        stderr.destroy()
+      },
+    }) as unknown as ChildProcess
+    // 上游断流（exec 退出/连接断开）→ 下游流关闭 + close 事件（firstChunk 等待/回传收口）
+    native.on("close", () => { stdout.end(); stderr.end(); emitter.emit("close") })
+    native.on("error", () => { stdout.destroy(); emitter.emit("close") })
+    return pseudo
+  } catch {
+    return null
   }
 }
 
@@ -99,26 +191,42 @@ export async function GET(req: NextRequest) {
     return respond({ code: 40901, msg: "会话不在运行中" }, 409)
   }
 
-  // 音频抓取：优先嵌入沙箱（DISPLAY + pulse socket）；否则 docker exec 容器内抓
+  // 音频抓取：优先嵌入沙箱（每沙箱独立 pulse socket）；否则 Docker API exec 容器内抓
+  // r36 修复：
+  //   · 嵌入式：PULSE_SERVER 指向该沙箱专属 socket（此前未传 → 永远拨错默认路径 → 503）
+  //   · 容器形态：改走 Docker Engine API exec（此前依赖宿主机 docker CLI——
+  //     DOCKER_API_URL 远程部署形态宿主机无 docker 命令 → 音频永远不可用）
+  //   · 镜像/沙箱侧 pulse 虚拟声卡（dockyard-mix）已在 supervisor/镜像补齐
   const { spawn } = await import("node:child_process")
   let child: import("node:child_process").ChildProcess | null = null
+  const FFMPEG_ARGS = [
+    "-nostats", "-loglevel", "error",
+    "-f", "pulse", "-fragment_size", "1024", "-i", "dockyard-mix.monitor",
+    "-c:a", "libopus", "-b:a", "96k", "-ar", "48000", "-ac", "2",
+    "-f", "webm", "pipe:1",
+  ]
   try {
     const { embeddedSandbox } = await import("@/lib/embedded-sandbox")
     const entry = await embeddedSandbox(ws.novncSessionId)
     if (entry) {
-      const env: NodeJS.ProcessEnv = { ...process.env, DISPLAY: `:${entry.display}` }
-      // pulse 服务器路径探测：沙箱进程树内 PULSE_SERVER 由 embedded-sandbox 注入（Dockerfile 需装 pulseaudio）
-      child = spawn("ffmpeg", [
-        "-f", "pulse", "-fragment_size", "1024", "-i", "dockyard-mix.monitor",
-        "-c:a", "libopus", "-b:a", "96k", "-ar", "48000", "-ac", "2",
-        "-f", "webm", "pipe:1",
-      ], { env, stdio: ["ignore", "pipe", "pipe"] as const })
+      // 每沙箱独立 pulse socket（embedded supervisor 建卡写入 pulse-socket 文件）
+      const env: NodeJS.ProcessEnv = { ...process.env }
+      if (entry.pulseSocket) {
+        env.PULSE_SERVER = entry.pulseSocket
+        env.XDG_RUNTIME_DIR = entry.pulseSocket.replace(/\/pulse\/native$/, "")
+      }
+      child = spawn("ffmpeg", FFMPEG_ARGS, { env, stdio: ["ignore", "pipe", "pipe"] as const })
+    } else if (ws.containerRef && ENV.dockerApiUrl) {
+      // Docker Engine API exec：二进制流经 8 字节帧协议解复用（仅取 stdout 流）
+      child = await spawnDockerExecStream(ws.containerRef, FFMPEG_ARGS)
     } else if (ws.containerRef) {
+      // 兜底：本机 docker CLI（同机部署且未配置 DOCKER_API_URL 时）
       child = spawn("docker", [
-        "exec", "-i", ws.containerRef,
-        "ffmpeg", "-f", "pulse", "-fragment_size", "1024", "-i", "dockyard-mix.monitor",
-        "-c:a", "libopus", "-b:a", "96k", "-ar", "48000", "-ac", "2",
-        "-f", "webm", "pipe:1",
+        "exec", "-i",
+        "-e", "PULSE_SERVER=/tmp/pulse/pulse/native",
+        "-e", "XDG_RUNTIME_DIR=/tmp/pulse",
+        ws.containerRef,
+        "ffmpeg", ...FFMPEG_ARGS,
       ], { stdio: ["ignore", "pipe", "pipe"] as const })
     }
   } catch {

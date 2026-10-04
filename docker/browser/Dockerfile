@@ -28,6 +28,11 @@ RUN apt-get update -o Acquire::Retries=5 \
     psmisc \
     # r27：VNC 会话录像（ffmpeg x11grab 分段编码；ffprobe 由 ffmpeg 包携带）
     ffmpeg \
+    # r36：远程声音回传链路（pulseaudio 用户模式 daemon + null sink；
+    # supervisor.sh 启动 dockyard-mix 虚拟声卡，ffmpeg -f pulse 抓 monitor 流）
+    pulseaudio \
+    # r36：pulse 控制工具（pactl 预热/诊断；supervisor 建沉验证）
+    pulseaudio-utils \
     fonts-noto-cjk \
     fonts-liberation \
     # r25-c 多语言字体全覆盖（与平台主镜像同标准：零乱码）
@@ -85,7 +90,9 @@ RUN chmod 0755 /usr/local/bin/supervisor.sh
 ENV HOME=/home/browser \
     RESOLUTION=1280x800 \
     START_URL=about:blank \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    # r36：声音回传链路总开关（0=容器不启 pulseaudio，音频 503 优雅降级）
+    DY_AUDIO_ENABLED=1
 
 # VNC(RFB) 5900 / CDP 9222 —— 仅暴露给 dockyard-sessions 隔离网络内的平台与 VNC 桥
 EXPOSE 5900 9222

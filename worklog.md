@@ -1274,3 +1274,26 @@ Work Log:
 Stage Summary:
 - r35 全部交付并发布 v1.11.0：3 大 P0 根因（SQLite WAL/软删 email 占用/密码复制）+ 三大点名功能（超级编辑器+图片裁剪/订阅一键导入/升降级）+ VNC 体验包 10 项 + 认证 6 项 + 录屏/快照/企业策略/代理页
 - 质量证据：tsc 23=基线26-3 · lint 0/0 · build 80 路由 · QA 65/65 · 订阅单测 29/29 · 浏览器 E2E 12 场景 · CI Lint success · GHCR latest 双镜像 200
+
+---
+Task ID: r36
+Agent: main
+Task: r36 大批次 —— 用户点名根因修复（CDP 端口与服务不工作 / --no-sandbox 警告条 / CDP 公网暴露防攻击 / CDP 连接地址与 Worker API 地址可配置 / 声音传输链路补全 / 安全隔离与硬件精确到用户总控 / 备份多节点+txt 清单+一键在线打包）
+
+Work Log:
+- 【P0-1 CDP 端口与服务不工作·根因A】novnc.ts docker 分支会话对象从未返回 cdpUrl → 库中 cdpUrl=null → CDP 网关取票 409/CRX 引擎跳过/监控宫格快照/时间轴/导航管控全部静默失效。修复：容器创建后 probeContainerCdp（/json/version 轮询 ≤25s）→ 返回稳定 HTTP 基址（http://<容器IP>:9222/json；Chromium 重启 browser UUID 变化时按需解析，天然自愈）
+- 【P0-1 根因B】cdp-gateway 票据校验要求 tgt 必须 ws:// 开头，而平台存的是 http:// 基址 → 全部合法票据被拒"invalid or expired ticket"。修复：tgt 兼容 http(s)://（拨号时 /json/version 实时解析 webSocketDebuggerUrl + host 适配）
+- 【P0-1 根因C（QA 实测发现）】client.on("message") 注册在异步拨号之后 → http tgt 的 /json/version 解析延迟期间客户端首条 CDP 命令被 ws 库丢弃（Puppeteer 连接即发命令的时序必然触发）。修复：消息监听前置 + earlyBuffer 回放
+- 【P0-2 --no-sandbox 警告条根因】容器 CapDrop=ALL + no-new-privileges + Docker 默认 seccomp 封 clone(CLONE_NEWUSER) → Chromium 原生沙箱 SUID/userns 双通道均不可用 → supervisor 探测失败回退 --no-sandbox → Chromium 显示 "You are using an unsupported command-line flag: --no-sandbox" infobar。修复三层：①回退时同步附 --test-type（bad_flag_prompt 对 test-type 短路，ChromeDriver 同款手法；容器级隔离完整保留）②管理员可部署 deploy/seccomp/dockyard-chromium.json + 后台 docker.browserSecurityOpt/CapAdd 配置 → 原生沙箱启用永不回退 ③顺修 embedded 回退守卫 "\$" 转义 bug（防重入恒真）
+- 【P0-3 CDP 公网暴露防攻击】cdp-gateway 重写加固：IP 级验证失败限速（10 次/60s）+ 封禁（10 分钟，Retry-After）；Origin 头拒绝（浏览器跨站 WS 劫持防护——CDP WS 无同源策略）；票据长度/nonce 防畸形；CDP_GATEWAY_BIND 绑定地址可配；默认开发密钥启动 CRITICAL 告警；health 暴露加固计数器
+- 【P0-4 CDP 连接地址可配置】cdp.publicGatewayHost/gatewayPort/gatewayTls/ticketWindowSec/session.cdpMaxMinutes 注册 CONFIG_DEFAULTS + 配置页「CDP 网关」分类卡（含历史 TASKS 分类补齐）；CdpPanel 新增「获取外网直连地址（票据）」按钮（r28 action 此前无前端调用——最后一公里补通）+ 复制 + 有效期/单次提示
+- 【P0-5 Worker API 地址可配置（localhost 根因）】worknode create：MASTER_API_URL 优先级链（表单显式 > worknode.masterApiUrl 配置 > NODE_PUBLIC_URL/PUBLIC_BASE_URL env > 请求 origin）+ 注册对话框可编辑输入框 + localhost 回环凭证红色警示 + masterApiUrlHint
+- 【P1-6 声音传输链路补全】r35 只做了 app 层（路由+播放器+开关），镜像/沙箱侧无 pulseaudio → 永远 503。补全：浏览器镜像 +pulseaudio/pulseaudio-utils + supervisor 启动 daemon + module-null-sink dockyard-mix（虚拟扬声器）+ PULSE_SERVER 注入 chromium；嵌入式每沙箱独立 pulse（/tmp/dy-pulse-<id> 独立 socket 跨沙箱隔离 + 状态心跳 pulse-socket 文件 + 崩溃自愈重建）；audio 路由嵌入式拨号定向该沙箱 socket + docker 形态改 Docker Engine API exec（8 字节帧解复用 → ChildProcess 归一；此前依赖宿主机 docker CLI，远程 Docker 部署无此命令 → 音频不可用）
+- 【P1-7 安全隔离+硬件精确到用户总控】user-policy-control.ts：getUserPolicyControlAction（生效链+用户级覆盖+沙箱级遮蔽数+明细）+ applyUserPolicyToAllSandboxesAction（用户级写入+清沙箱级遮蔽+策略文件重写+运行中 Chromium 重启，scope network/hardware/both）；用户管理表格新增「隔离与硬件总控（应用到全部沙箱）」对话框（三态开关/一键应用/遮蔽统计/沙箱明细）——管理员对单个用户全部沙箱完整控制
+- 【P1-8 备份容灾】①多节点推送：backup.pushNodes 配置 + WorkNodeCommand 指令队列表 + Worker 心跳携出（顺序保真）+ backup.replica.begin/append/finish 分块（2MB/块 + 分片/整体 sha256 双校验 + .part 原子改名）+ 结果回传更新 BackupRecord.replicasJson（PENDING→SENT→OK/FAIL）②manifest TXT：GET /api/admin/backup/manifest（时间/类型/大小/校验和/加密/状态/下载地址/多节点副本状态）③一键在线打包：GET /api/admin/backup/archive（tar 流式直出、打包产物零服务端落盘、随包 manifest.txt、断开自动 kill tar、限流 3/min）——实测 47KB 包 488ms 完成 + tar 内容含备份文件+清单；修复小备份 500ms 内完成时 end 事件先于监听注册 → 流永不关闭（4 分钟挂起）的竞态
+- 【质量门】tsc src 23=基线 23（零新增）；eslint 0 error 0 warning；next build ✓ 44s 全绿；QA 脚本 67/67（CDP 网关 12 项实测含 http 票据根因修复/防重放/Origin 拦截/IP 封禁/畸形票据 + 备份清单/打包解包验证/零服务端产物断言 + worknode 优先级链 + 策略四级链 + 配置播种 + 源码完整性 30 项）；浏览器 E2E 10 场景实证（登录/配置页 CDP 网关卡 5 项/备份页两按钮+多节点副本列/用户总控对话框开启+真实 action 应用成功 toast/Worker 注册 MASTER_API_URL 输入+显式覆盖凭证/工作区票据按钮→配置网关→取票→ws://qa-cdp.example.com:3006/t/<票据> 完整闭环+复制成功/移动端 375px 双页无溢出）；QA 数据全清
+
+Stage Summary:
+- r36 交付：CDP 链路三重根因修复（docker cdpUrl 缺失/网关 http 票据拒绝/早期消息丢失）+ --no-sandbox 警告条根因三层修复 + 公网网关五重加固 + CDP/Worker 地址后台可配置 + 声音链路镜像级补全 + 用户级隔离与硬件总控 + 备份容灾三件套（多节点/txt 清单/零落盘在线打包）
+- 交付物：download/qa-r36/ 10 张截图；测试脚本 scripts/qa-r36.ts（67 断言）；deploy/seccomp/（Chromium 原生沙箱启用路径）
+- 架构新增：WorkNodeCommand 通用指令队列通道（备份推送为首个消费者，后续调度指令可复用）

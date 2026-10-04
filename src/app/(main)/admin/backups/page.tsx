@@ -49,8 +49,16 @@ export default async function AdminBackupsPage({
     : []
   const creatorMap = new Map(creators.map((c) => [c.id, c.username]))
 
+  // r36：多节点副本状态（replicasJson → 前端徽章）
   const list: BackupRow[] = rows.map((b) => {
     const fm = fileMetaById.get(b.fileMetaId)
+    let replicas: BackupRow["replicas"] = null
+    if (b.replicasJson) {
+      try {
+        const reps = JSON.parse(b.replicasJson) as Array<{ nodeUuid: string; state: string; skip?: string }>
+        replicas = reps.map((r) => ({ nodeUuid: r.nodeUuid, state: r.state, skip: r.skip }))
+      } catch { replicas = null }
+    }
     return {
       id: b.id,
       fileMetaId: b.fileMetaId,
@@ -65,6 +73,7 @@ export default async function AdminBackupsPage({
       createdByUserId: b.createdByUserId,
       creatorName: b.createdByUserId ? creatorMap.get(b.createdByUserId) || b.createdByUserId : "系统",
       createdAt: fmtDate(b.createdAt),
+      replicas,
     }
   })
 

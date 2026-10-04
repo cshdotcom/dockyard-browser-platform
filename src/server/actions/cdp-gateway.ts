@@ -16,7 +16,7 @@ import { z } from "zod"
 import { requireAuth } from "@/lib/permissions"
 import { db } from "@/lib/db"
 import { writeAudit } from "@/lib/audit"
-import { getConfig, getConfigNumber } from "@/lib/config"
+import { getConfig, getConfigNumber, getConfigBool } from "@/lib/config"
 import { createHmac, randomBytes } from "crypto"
 
 // 与 mini-services/cdp-gateway 同构（HMAC-SHA256 票据）
@@ -75,10 +75,10 @@ export async function getCdpGatewayTicketAction(input: unknown): Promise<ActionR
     if (!allowed) throw Object.assign(new Error("无该沙箱的 CDP 控制权限"), { code: 403 })
     if (!ws.cdpUrl || ws.status !== "RUNNING") throw Object.assign(new Error("沙箱未运行或 CDP 端点不可用（请先启动）"), { code: 409 })
 
-    // 公网网关配置（未配置时仅返回说明，不暴露内网地址）
+    // 公网网关配置（r36：后台「CDP」配置卡可改；未配置时仅返回说明，不暴露内网地址）
     const publicHost = await getConfig("cdp.publicGatewayHost", "")
     const gatewayPort = await getConfigNumber("cdp.gatewayPort", 3006)
-    const useTls = (await getConfig("cdp.gatewayTls", "false")) === "true"
+    const useTls = await getConfigBool("cdp.gatewayTls", false)
     const windowSec = await getConfigNumber("cdp.ticketWindowSec", 300)
     const durMin = await resolveCdpDurationMinutes(ctx.userId)
 
@@ -111,8 +111,8 @@ export async function getCdpGatewayTicketAction(input: unknown): Promise<ActionR
       workspaceId: ws.id,
       workspaceName: ws.name,
       note: publicHost
-        ? `外网地址含签名票据（${windowSec}s 内有效、单次使用）；容器内网地址不对外暴露`
-        : "管理员尚未配置 CDP 公网网关（cdp.publicGatewayHost）：当前无法提供外网地址",
+        ? `外网地址含签名票据（${windowSec}s 内有效、单次使用）；容器内网地址不对外暴露；网关已启用 IP 防爆破封禁与跨站劫持拦截`
+        : "管理员尚未配置 CDP 公网网关：请在「系统配置 → CDP → 公网网关地址」填写穿透域名（配置后此处即可取外网连接地址）",
     }
   })
 }

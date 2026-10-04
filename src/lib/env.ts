@@ -81,6 +81,11 @@ export const ENV = {
   get browserVncPort() {
     return Number(process.env.BROWSER_VNC_PORT || 5900)
   },
+  // r36：浏览器容器 CDP 端口（镜像 supervisor 固定 9222；此处保持同值默认，
+  // 自定义构建镜像时可改。docker 模式 cdpUrl 推导与就绪探测均使用该端口）
+  get browserCdpPort() {
+    return Number(process.env.BROWSER_CDP_PORT || 9222)
+  },
   // ---- 单容器全内置（r13：默认形态，零外部服务）----
   get browserRuntime() {
     // auto（默认）：容器内浏览器组件齐备 → 单容器内嵌沙箱；否则按外部配置降级

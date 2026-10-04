@@ -382,6 +382,8 @@ export interface EmbeddedSandboxEntry {
   policyFile: string | null
   profileDir: string
   downloadsDir: string
+  // r36：远程声音回传（每沙箱独立 pulseaudio 的 native socket 路径；空=无声卡）
+  pulseSocket?: string | null
 }
 
 const g = globalThis as unknown as {
@@ -780,8 +782,15 @@ if [ -n "$DY_POLICY_FILE" ] && [ -f "$DY_POLICY_FILE" ]; then
 fi
 # r28: Chromium process-level sandbox enabled by default (renderer zero-syscall; virus page cannot read any local file).
 # DY_CHROME_NOSANDBOX=1 -> fallback (auto-set once by outer supervisor on sandbox startup failure).
+# r36: fallback also appends --test-type (suppresses Chromium bad-flags infobar
+#      "You are using an unsupported command-line flag: --no-sandbox";
+#      DY_CHROME_TEST_TYPE=0 can keep the banner for debugging).
 SANDBOX_FLAG=""
-if [ "\${DY_CHROME_NOSANDBOX:-0}" = "1" ]; then SANDBOX_FLAG="--no-sandbox"; fi
+TEST_TYPE_FLAG=""
+if [ "\${DY_CHROME_NOSANDBOX:-0}" = "1" ]; then
+  SANDBOX_FLAG="--no-sandbox"
+  if [ "\${DY_CHROME_TEST_TYPE:-1}" = "1" ]; then TEST_TYPE_FLAG="--test-type"; fi
+fi
 # __DY_FAKE_CAM_BEGIN__
 # r29-e: 虚拟摄像头（恒定帧注入）—— DY_FAKE_CAM_IMAGE 指向图片时启用
 FAKE_CAM_FLAGS=""
@@ -792,7 +801,7 @@ fi
 ${nprocExec} "${bins.chrome}" \\
   --user-data-dir="\${DY_PROFILE_DIR}" \\
   \${FAKE_CAM_FLAGS} \\
-  \${SANDBOX_FLAG} --disable-gpu --no-first-run \\
+  \${SANDBOX_FLAG} \${TEST_TYPE_FLAG} --disable-gpu --no-first-run \\
   --disable-session-crashed-bubble --hide-crash-restore-bubble \\
   --restore-last-session ${resolutionArgs(resolution).join(" ")} ${guard.args} \\
   --remote-debugging-address=127.0.0.1 --remote-debugging-port=${cdpPort} \\
@@ -892,9 +901,11 @@ ${nprocExec} "${bins.chrome}" \\
     policyFile: spec.policyFile || null,
     profileDir,
     downloadsDir,
+    pulseSocket: null, // r36：pulse 就绪后由 refreshSupervisorPid 回填
   }
   registry().set(id, entry)
   void refreshSupervisorPid(entry)
+  void refreshPulseSocket(entry)
   return {
     id,
     name: id,
@@ -923,6 +934,21 @@ async function refreshSupervisorPid(entry: EmbeddedSandboxEntry) {
   }
 }
 
+// r36：声音回传 socket 回填（sandbox-launch.sh 建卡后写入 sandboxDir/pulse-socket）
+async function refreshPulseSocket(entry: EmbeddedSandboxEntry) {
+  try {
+    const p = join(entry.sandboxDir, "pulse-socket")
+    const raw = (await readFile(p, "utf8")).trim()
+    if (raw && raw.startsWith("/")) {
+      entry.pulseSocket = raw
+      return
+    }
+  } catch {
+    /* pulse 未就绪或未启用 */
+  }
+  entry.pulseSocket = null
+}
+
 // ============================================================
 // 运维操作：健康 / 统计 / 日志 / 进程重启 / 停止 / 销毁
 // ============================================================
@@ -933,6 +959,7 @@ export async function embeddedSandbox(idOrRef: string): Promise<EmbeddedSandboxE
   let entry = registry().get(id)
   if (entry) {
     if (!procAlive(entry.supervisorPid)) void refreshSupervisorPid(entry)
+    if (entry.pulseSocket === undefined) void refreshPulseSocket(entry)
     return entry
   }
   // 磁盘兜底（进程重启后 registry 未命中）
@@ -957,8 +984,10 @@ export async function embeddedSandbox(idOrRef: string): Promise<EmbeddedSandboxE
       policyFile: st.policyFile || null,
       profileDir: st.profileDir || "",
       downloadsDir: st.downloadsDir || "",
+      pulseSocket: null,
     }
     registry().set(id, entry)
+    void refreshPulseSocket(entry)
     return entry
   } catch {
     return null

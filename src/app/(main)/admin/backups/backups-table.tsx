@@ -5,7 +5,7 @@
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
-import { AlertTriangle, DatabaseBackup, Download, Loader2, ListChecks, RotateCcw, ShieldAlert, Trash2 } from "lucide-react"
+import { AlertTriangle, DatabaseBackup, Download, FileText, Loader2, ListChecks, PackageOpen, RotateCcw, ShieldAlert, Trash2 } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog } from "@/components/shared/confirm"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -29,6 +29,8 @@ export interface BackupRow {
   createdByUserId: string | null
   creatorName: string
   createdAt: string
+  // r36：多节点副本状态（null=未启用推送）
+  replicas: Array<{ nodeUuid: string; state: string; skip?: string }> | null
 }
 
 interface BackupsTableProps {
@@ -59,6 +61,8 @@ export function BackupsTable({ rows, total, page, pageSize, keyword, sortField, 
   const [sel, setSel] = React.useState<string[]>([])
   const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false)
   const [batchBusy, setBatchBusy] = React.useState("")
+  // r36：在线打包下载中（提示态）
+  const [archiveZipping, setArchiveZipping] = React.useState(false)
 
   const runBatchDelete = async () => {
     if (sel.length === 0) return
@@ -161,12 +165,33 @@ export function BackupsTable({ rows, total, page, pageSize, keyword, sortField, 
 
       {/* 操作区 */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <Button onClick={() => setBackupOpen(true)} disabled={busy === "backup"}>
             {busy === "backup" ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <DatabaseBackup className="mr-1 h-4 w-4" />}
             立即备份
           </Button>
-          <p className="text-xs text-muted-foreground">将 SQLite 数据库文件完整复制到 storage/backups/（按配置可选 AES-256-GCM 加密）</p>
+          {/* r36：下载地址清单（txt）—— 灾难恢复留存 */}
+          <Button variant="outline" onClick={() => window.open("/api/admin/backup/manifest", "_blank")} title="下载全部备份的下载地址清单（txt：时间/大小/校验和/下载地址/多节点副本状态）">
+            <FileText className="mr-1 h-4 w-4" /> 下载地址清单（txt）
+          </Button>
+          {/* r36：一键在线压缩打包下载（流式直出、打包产物零服务端落盘） */}
+          <Button
+            variant="outline"
+            onClick={() => {
+              setArchiveZipping(true)
+              // window.open 后浏览器自行下载；toast 引导（fetch 不可用于二进制流 + 登录 cookie 直下）
+              const w = window.open("/api/admin/backup/archive", "_blank")
+              if (!w) toast.error("弹窗被浏览器拦截：请允许弹窗后重试")
+              else toast.info("已开始在线打包下载（tar.gz 边压缩边传输，服务端不存储打包产物；下载完成或失败后此提示自动消失）")
+              setTimeout(() => setArchiveZipping(false), 3000)
+            }}
+            disabled={archiveZipping}
+            title="全部现存备份 + 清单 manifest.txt 在线流式打包（tar.gz）直接下载到本机——不在服务端生成任何打包文件"
+          >
+            {archiveZipping ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <PackageOpen className="mr-1 h-4 w-4" />}
+            一键在线打包下载（零服务端存储）
+          </Button>
+          <p className="text-xs text-muted-foreground">将 SQLite 数据库文件完整复制到 storage/backups/（按配置可选 AES-256-GCM 加密）；多节点副本推送在系统配置 → 备份容灾（backup.pushNodes）开启</p>
         </div>
       </div>
 
@@ -230,6 +255,26 @@ export function BackupsTable({ rows, total, page, pageSize, keyword, sortField, 
               ),
           },
           { key: "status", title: "状态", render: (r) => <StatusBadge status={r.status} /> },
+          {
+            key: "replicas",
+            title: "多节点副本",
+            render: (r) =>
+              !r.replicas ? (
+                <span className="text-[10px] text-muted-foreground">未启用</span>
+              ) : (
+                <div className="flex flex-col gap-0.5">
+                  {r.replicas.map((rep) => (
+                    <span key={rep.nodeUuid} className="text-[10px] tabular-nums" title={`${rep.nodeUuid}${rep.skip ? `（${rep.skip}）` : ""}`}>
+                      {rep.state === "OK" ? "✓" : rep.state === "SENT" ? "⏳" : rep.state === "FAIL" ? "✗" : "–"}
+                      {rep.nodeUuid.slice(0, 11)}
+                      <span className="text-muted-foreground">
+                        {rep.state === "OK" ? " 已落盘" : rep.state === "SENT" ? " 推送中" : rep.state === "FAIL" ? " 失败" : rep.state === "SKIP" ? " 跳过" : ""}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              ),
+          },
           { key: "creatorName", title: "创建人", render: (r) => <span className="text-sm">{r.creatorName}</span> },
           {
             key: "checksum",

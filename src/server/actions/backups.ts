@@ -15,7 +15,7 @@ import { actionHandler, type ActionResult } from "@/lib/api"
 import { requireAdmin, requireSuperAdmin } from "@/lib/permissions"
 import { writeAudit } from "@/lib/audit"
 import { zodValidate, zId } from "@/lib/validators"
-import { setConfig, getConfigBool } from "@/lib/config"
+import { setConfig, getConfigBool, getConfig } from "@/lib/config"
 import { raiseAlert } from "@/lib/alerts"
 import { ENV } from "@/lib/env"
 import { bizError, ErrorCode } from "@/lib/errors"
@@ -120,6 +120,11 @@ async function performBackup(
     })
   }
 
+  // r36：多节点副本推送（异步不阻断返回；后台 backup.pushNodes 配置的 Worker 节点）
+  if (healthy) {
+    void pushBackupReplicas({ backupId: record.id, fileKey: `backups/${fileName}`, absPath: path.join(ENV.storageLocalPath, storageKey), sizeBytes, checksum })
+  }
+
   await writeAudit({
     operatorUserId: ctx.userId,
     operatorName: ctx.username,
@@ -141,6 +146,91 @@ async function performBackup(
     checksum,
     healthy,
     note,
+  }
+}
+
+// ============================================================
+// r36：多节点备份副本推送（Master → Worker 指令队列分块通道）
+// 流程：读备份文件字节 → 按 2MB 分块 base64 → 逐节点入 WorkNodeCommand 队列
+//（begin → append* → finish 含整体 sha256；Worker 心跳顺取顺执行，结果回传更新
+//  BackupRecord.replicasJson：PENDING→SENT→OK/FAIL）。异步执行、失败告警、不阻断备份返回。
+// ============================================================
+const REPLICA_CHUNK_BYTES = 2 * 1024 * 1024 // 2MB/块（base64 后 ~2.7MB，心跳体可控）
+
+export async function pushBackupReplicas(opts: { backupId: string; fileKey: string; absPath: string; sizeBytes: number; checksum: string }): Promise<void> {
+  try {
+    const cfg = (await getConfig("backup.pushNodes", "")).trim()
+    if (!cfg) return
+    const nodeUuids = cfg.split(",").map((s) => s.trim()).filter((s) => /^wn-[a-f0-9]{16}$/.test(s))
+    if (nodeUuids.length === 0) return
+
+    // 节点存在性与在线状态校验（未注册/离线 → 跳过并在副本状态中留 PENDING-SKIP 痕迹）
+    const nodes = await db.workNode.findMany({ where: { nodeUuid: { in: nodeUuids } } })
+    const byUuid = new Map(nodes.map((n) => [n.nodeUuid, n]))
+
+    const data = await fs.readFile(opts.absPath).catch(() => null)
+    if (!data || data.length !== opts.sizeBytes) {
+      await raiseAlert({
+        title: "备份副本推送失败（文件不可读）",
+        level: "WARN",
+        content: `备份 ${opts.fileKey} 推送多节点前读取失败（磁盘异常或文件被移动），副本未创建。`,
+        resourceType: "BACKUP",
+        resourceId: opts.backupId,
+        dedupeKey: `backup-replica-read-${opts.backupId}`,
+      }).catch(() => null)
+      return
+    }
+
+    const replicas: Array<{ nodeUuid: string; state: string; skip?: string; at?: string }> = []
+    for (const uuid of nodeUuids) {
+      const node = byUuid.get(uuid)
+      if (!node || node.status === "EVICTED" || !node.enabled) {
+        replicas.push({ nodeUuid: uuid, state: "SKIP", skip: node ? "节点已禁用/驱逐" : "节点未注册", at: new Date().toISOString() })
+        continue
+      }
+      // 分块指令（顺序入队；Worker 心跳按序执行）
+      await db.workNodeCommand.create({
+        data: { nodeUuid: uuid, cmd: "backup.replica.begin", payloadJson: JSON.stringify({ fileKey: opts.fileKey, sizeBytes: opts.sizeBytes, sha256: opts.checksum, backupId: opts.backupId }) },
+      })
+      for (let off = 0; off < data.length; off += REPLICA_CHUNK_BYTES) {
+        const chunk = data.subarray(off, Math.min(off + REPLICA_CHUNK_BYTES, data.length))
+        await db.workNodeCommand.create({
+          data: {
+            nodeUuid: uuid,
+            cmd: "backup.replica.append",
+            payloadJson: JSON.stringify({
+              fileKey: opts.fileKey,
+              offset: off,
+              contentB64: chunk.toString("base64"),
+              chunkSha256: crypto.createHash("sha256").update(chunk).digest("hex"),
+            }),
+          },
+        })
+      }
+      await db.workNodeCommand.create({
+        data: { nodeUuid: uuid, cmd: "backup.replica.finish", payloadJson: JSON.stringify({ fileKey: opts.fileKey, sha256: opts.checksum, backupId: opts.backupId }) },
+      })
+      replicas.push({ nodeUuid: uuid, state: "SENT" })
+    }
+
+    await db.backupRecord.update({ where: { id: opts.backupId }, data: { replicasJson: JSON.stringify(replicas) } }).catch(() => null)
+    await writeAudit({
+      operationType: "BACKUP_REPLICA_PUSH",
+      resourceType: "BACKUP",
+      resourceId: opts.backupId,
+      resourceName: opts.fileKey,
+      after: { nodes: nodeUuids.join(","), chunks: Math.ceil(opts.sizeBytes / REPLICA_CHUNK_BYTES), sizeBytes: opts.sizeBytes },
+      severity: "INFO",
+    }).catch(() => null)
+  } catch (e) {
+    await raiseAlert({
+      title: "备份副本推送异常",
+      level: "WARN",
+      content: `多节点备份推送出现异常：${e instanceof Error ? e.message : String(e)}（主备份本体已落盘不受影响）`,
+      resourceType: "BACKUP",
+      resourceId: opts.backupId,
+      dedupeKey: `backup-replica-err-${opts.backupId}`,
+    }).catch(() => null)
   }
 }
 

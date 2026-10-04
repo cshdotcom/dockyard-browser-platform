@@ -5,7 +5,8 @@
 import * as React from "react"
 import { PlaybackPolicyDialog } from "@/components/recordings/playback-policy-dialog"
 import { HardwarePermsDialog } from "@/components/hardware/hardware-perms-dialog"
-import { Cpu, VenetianMask } from "lucide-react"
+import { UserPolicyControlDialog } from "@/components/admin/user-policy-control-dialog"
+import { Cpu, VenetianMask, ShieldCheck } from "lucide-react"
 import { signIn } from "next-auth/react"
 import { RetentionPolicyDialog } from "@/components/recycle/retention-policy-dialog"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
@@ -157,6 +158,8 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
   const [tokenPolicyUser, setTokenPolicyUser] = React.useState<AdminUserRow | null>(null)
   const [pbPolicyUser, setPbPolicyUser] = React.useState<AdminUserRow | null>(null)
   const [hwPolicyUser, setHwPolicyUser] = React.useState<AdminUserRow | null>(null)
+  // r36：用户级安全隔离 + 硬件透传总控（应用到全部沙箱）
+  const [policyControlUser, setPolicyControlUser] = React.useState<AdminUserRow | null>(null)
   const [retentionTarget, setRetentionTarget] = React.useState<AdminUserRow | null>(null)
 
   const [importOpen, setImportOpen] = React.useState(false)
@@ -616,6 +619,10 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
         <DropdownMenuItem onClick={() => setHwPolicyUser(row)}>
           <Cpu className="mr-1.5 h-4 w-4 text-indigo-600" /> 硬件权限（17 项四级链）
         </DropdownMenuItem>
+        {/* r36：用户级安全隔离 + 硬件透传总控（一键应用到该用户全部沙箱） */}
+        <DropdownMenuItem onClick={() => setPolicyControlUser(row)}>
+          <ShieldCheck className="mr-1.5 h-4 w-4 text-teal-600" /> 隔离与硬件总控（应用到全部沙箱）
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={() => setPbPolicyUser(row)}>
           <Video className="mr-1.5 h-4 w-4 text-teal-600" /> 回放安全策略（水印/导出）
         </DropdownMenuItem>
@@ -811,6 +818,16 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
             scope="user"
             targetId={hwPolicyUser.id}
             targetName={hwPolicyUser.username}
+          />
+        )}
+
+        {/* r36：用户级安全隔离 + 硬件透传总控（一键应用到该用户全部沙箱） */}
+        {policyControlUser && (
+          <UserPolicyControlDialog
+            open={!!policyControlUser}
+            onOpenChange={(v) => !v && setPolicyControlUser(null)}
+            userId={policyControlUser.id}
+            username={policyControlUser.username}
           />
         )}
 
