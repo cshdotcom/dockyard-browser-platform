@@ -204,6 +204,23 @@ export const PUNCT_CAPS: KeyCap[] = [
   { label: ".", keysym: 0x2e }, { label: "/", keysym: 0x2f }, { label: "\\", keysym: 0x5c },
 ]
 
+// r34：基础符号 → Shift 上档符号映射表（标准 QWERTY 键位）
+// 用途：虚拟键盘/输入通道在 Shift 生效时直接发送上档字符的 keysym（模拟真实键盘
+// key 事件的上档形态），而不是发 Shift+基础键 —— 部分服务器/布局下后者会被
+// 误解成别的符号（用户报障：软键盘打不出点号/符号错乱）。
+export const SHIFT_VARIANTS: Record<string, string> = {
+  "1": "!", "2": "@", "3": "#", "4": "$", "5": "%", "6": "^", "7": "&", "8": "*", "9": "(", "0": ")",
+  "-": "_", "=": "+", "[": "{", "]": "}", "\\": "|", ";": ":", "'": "\"", "`": "~", ",": "<", ".": ">", "/": "?",
+}
+
+// r34：解析按键最终 keysym：Shift 生效时返回上档字符（大写字母/上档符号），
+// 否则返回基础字符；与浏览器物理键盘 key 事件的 key 字符语义完全一致。
+export function resolveKeysym(ch: string, shift: boolean): number {
+  if (shift && /[a-z]/.test(ch)) return ch.toUpperCase().charCodeAt(0)
+  if (shift && SHIFT_VARIANTS[ch] !== undefined) return SHIFT_VARIANTS[ch].charCodeAt(0)
+  return ch.charCodeAt(0)
+}
+
 // r31：上档符号层（Shift+数字 → !@#$%^&*() 等；keysym = 符号本身 ASCII 码）
 export const SHIFT_SYMBOL_CAPS: KeyCap[] = [
   { label: "!", keysym: 0x21 }, { label: "@", keysym: 0x40 }, { label: "#", keysym: 0x23 }, { label: "$", keysym: 0x24 },

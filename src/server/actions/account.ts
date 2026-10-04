@@ -1,5 +1,6 @@
 "use server"
 
+import { extractClientIp } from "@/lib/client-ip"
 import { z } from "zod"
 import { db } from "@/lib/db"
 import { requireAuth } from "@/lib/permissions"
@@ -23,7 +24,7 @@ import { headers } from "next/headers"
 
 async function clientIp() {
   const h = await headers()
-  return h.get("x-forwarded-for")?.split(",")[0]?.trim() || "127.0.0.1"
+  return extractClientIp((name) => h.get(name))
 }
 
 // ---- 2FA 开启：生成密钥 + 二维码（未确认状态） ----

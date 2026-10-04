@@ -67,13 +67,64 @@ export async function GET(req: NextRequest) {
     const sp = req.nextUrl.searchParams
     const domain = (sp.get("domain") || "HOME") as "ROOT_FS" | "STORAGE" | "HOME" | "RECORDING" | "SCREENSHOT"
     const filePath = sp.get("path") || ""
-    const mode = sp.get("mode") || "preview" // preview | download | zip
+    const mode = sp.get("mode") || "preview" // preview | download | zip | batch-zip
     const adminOnly = domain === "ROOT_FS" || domain === "STORAGE"
     const isAdmin = ctx.role === "ADMIN" || ctx.role === "SUPER_ADMIN"
     if (adminOnly && !isAdmin) throw new BizError(ErrorCode.FORBIDDEN, "该域仅管理员可访问")
 
     if (!rateLimit(`file-raw:${ctx.userId}`, 60, 60_000).allowed) {
       throw new BizError(ErrorCode.RATE_LIMITED, "访问过于频繁，请稍后再试")
+    }
+
+    // ---- r34：多选批量 zip 打包下载（用户诉求：批量操作里支持批量下载） ----
+    if (mode === "batch-zip") {
+      const namesRaw = sp.get("names") || ""
+      let names: string[] = []
+      try { names = JSON.parse(namesRaw) } catch { names = namesRaw.split(",") }
+      names = names.map((n) => String(n).trim()).filter(Boolean).slice(0, 100)
+      if (names.length === 0) throw new BizError(ErrorCode.PARAM_ERROR, "缺少 names 参数")
+      const home2 = path.join(ENV.storageLocalPath, "home", ctx.userId)
+      const roots2 = { ROOT_FS: "/", STORAGE: path.resolve(ENV.storageLocalPath), HOME: home2, RECORDING: path.join(ENV.storageLocalPath, "recordings", ctx.userId), SCREENSHOT: path.join(ENV.storageLocalPath, "screenshots", ctx.userId) }
+      const base = resolveDomainPath(roots2, domain, filePath)
+      if (!base.ok) throw new BizError(ErrorCode.FORBIDDEN, "非法路径")
+      const absList: string[] = []
+      for (const n of names) {
+        if (n.includes("..") || n.startsWith("/")) continue
+        const child = path.join(base.abs, n)
+        if (!child.startsWith(base.abs)) continue
+        if (await fsp.stat(child).catch(() => null)) absList.push(child)
+      }
+      if (absList.length === 0) throw new BizError(ErrorCode.NOT_FOUND, "所选文件均不存在")
+      void writeAudit({
+        operatorUserId: ctx.userId, operatorName: ctx.username,
+        operationType: "FILE_DOWNLOAD", resourceType: "FILE", resourceName: `batch-zip(${absList.length})`,
+        after: { domain, path: filePath, count: absList.length, mode: "batch-zip" }, severity: "INFO",
+      }).catch(() => null)
+      const tmpZip = path.join((await import("os")).tmpdir(), `dy-batch-${Date.now()}-${randomBytes(4).toString("hex")}.zip`)
+      const { zipPaths } = await import("@/lib/file-explorer")
+      const r = await zipPaths(absList, tmpZip)
+      if (!r.ok) throw new BizError(ErrorCode.PARAM_ERROR, r.error || "打包失败")
+      const size = (await fsp.stat(tmpZip)).size
+      // 流式回传 + 结束后自动清理临时包（此前目录 zip 无清理 → /tmp 残留膨胀）
+      const selfDestruct = async (p: string) => { for (let i = 0; i < 3; i++) { try { await fsp.rm(p, { force: true }); return } catch { await new Promise((res) => setTimeout(res, 500)) } } }
+      const stream = readChunks(tmpZip, 256 * 1024)
+      const wrapped = new ReadableStream({
+        async pull(controller) {
+          try {
+            const chunk = await stream.next()
+            if (chunk.done) { controller.close(); void selfDestruct(tmpZip) } else controller.enqueue(chunk.value)
+          } catch (e) { controller.error(e); void selfDestruct(tmpZip) }
+        },
+        cancel() { void selfDestruct(tmpZip) },
+      })
+      const stamp = new Date().toISOString().slice(0, 10)
+      return new Response(wrapped as unknown as ReadableStream, {
+        headers: {
+          "Content-Type": "application/zip",
+          "Content-Disposition": `attachment; filename="batch-${stamp}.zip"; filename*=UTF-8''${encodeURIComponent(`批量下载-${stamp}.zip`)}`,
+          "Content-Length": String(size),
+        },
+      })
     }
 
     const home = path.join(ENV.storageLocalPath, "home", ctx.userId)

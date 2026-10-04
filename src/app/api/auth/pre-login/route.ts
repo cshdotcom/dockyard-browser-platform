@@ -34,7 +34,9 @@ const schema = z.discriminatedUnion("mode", [
 
 export async function POST(req: NextRequest) {
   const traceId = crypto.randomUUID()
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || "127.0.0.1"
+  // r34: real client IP (CDN edge headers → XFF multi-hop right-to-left public determination → intranet leftmost original client → X-Real-IP)
+  const { extractClientIp } = await import("@/lib/client-ip")
+  const ip = extractClientIp((name) => req.headers.get(name))
   const ua = req.headers.get("user-agent") || "unknown"
 
   const respond = (body: Record<string, unknown>) => Response.json({ ...body, traceId })
@@ -75,8 +77,12 @@ export async function POST(req: NextRequest) {
       const allowEmailLogin = await getConfigBool("security.allowEmailCodeLogin", true)
       if (!allowEmailLogin) return respond({ code: 40300, msg: "管理员已禁用邮箱验证码登录" })
 
+      // r34：最近一条验证码（含已消费）—— 支持"登录落定失败后的重试"语义：
+      //   首次提交成功（票据签发、验证码置 consumed）但客户端会话建立失败时，
+      //   用户在原有效期内再次提交同一验证码 → 视为幂等重入（重新签发票据），
+      //   不再报"验证码失效"死循环；跨用户绝不共享（按邮箱精确查找）。
       const codeRow = await db.emailVerificationCode.findFirst({
-        where: { email: input.email.toLowerCase(), purpose: "LOGIN", consumedAt: null },
+        where: { email: input.email.toLowerCase(), purpose: "LOGIN" },
         orderBy: { createdAt: "desc" },
       })
       const genericFail = { code: 41002, msg: "邮箱或验证码错误" }
@@ -93,6 +99,11 @@ export async function POST(req: NextRequest) {
         await recordIpLoginFail(ip, "LOGIN", "邮箱验证码错误")
         await writeSecurityEvent({ username: input.email, eventType: "LOGIN_FAILED", success: false, detail: "邮箱验证码错误", ip, userAgent: ua })
         return respond(genericFail)
+      }
+      // 幂等重入窗口：已消费但仍在有效期内且哈希命中 → 放行重新签发票据（同一邮箱本人重试）
+      const isRetry = !!codeRow.consumedAt
+      if (isRetry) {
+        await writeSecurityEvent({ username: input.email, eventType: "LOGIN_EMAIL_CODE", success: true, detail: "验证码幂等重入（会话建立失败后的重试）", ip, userAgent: ua })
       }
       const user = await db.user.findFirst({
         where: { email: input.email.toLowerCase(), deletedAt: null },

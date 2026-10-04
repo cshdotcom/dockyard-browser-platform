@@ -85,6 +85,7 @@ RUN apt-get update -o Acquire::Retries=5 \
       fcitx5-frontend-qt5 \
       fcitx5-config-qt \
       x11-xkb-utils \
+      xclip \
       locales \
       dbus-x11 \
     && (apt-get install -y --no-install-recommends fcitx5-mozc \

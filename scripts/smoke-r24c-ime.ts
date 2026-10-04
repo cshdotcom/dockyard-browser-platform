@@ -25,7 +25,7 @@ const ok = (name: string, cond: boolean, detail = "") => {
 
 // 0. 组件可用性
 console.log("【0】组件")
-ok("setxkbmap 可用", setxkbmapInstalled())
+ok("setxkbmap 可用", await setxkbmapInstalled())
 ok("fcitx5 未安装（开发环境预期，容器内才有）", !fcitx5Installed())
 
 // 1. fcitx5 .conf 解析（fixture）
@@ -99,14 +99,14 @@ try {
   ok("初始键位图 A 可读", a0 === "us", a0 ?? "null")
   ok("初始键位图 B 可读", b0 === "us", b0 ?? "null")
 
-  const r1 = applyKbLayout(handleA, "de")
+  const r1 = await applyKbLayout(handleA, "de")
   ok("A 切换命令执行成功（exit 0）", r1.ok, r1.error)
   const a1 = keymapOf(101)
   if (a1 === "de") {
     // 环境（生产容器形态）：键位图真实落效 → 全量读回断言
-    ok("A 读回 de（服务器键位图已切换）", imeCurrentKbLayout(handleA) === "de", imeCurrentKbLayout(handleA) ?? "null")
-    ok("B 保持 us（跨沙箱隔离不受影响）", imeCurrentKbLayout(handleB) === "us")
-    const r2 = applyKbLayout(handleB, "fr")
+    ok("A 读回 de（服务器键位图已切换）", await imeCurrentKbLayout(handleA) === "de", await imeCurrentKbLayout(handleA) ?? "null")
+    ok("B 保持 us（跨沙箱隔离不受影响）", await imeCurrentKbLayout(handleB) === "us")
+    const r2 = await applyKbLayout(handleB, "fr")
     ok("B 切换 fr 成功", r2.ok)
     ok("B 读回 fr", keymapOf(102) === "fr")
     ok("A 保持 de（B 的切换不影响 A）", keymapOf(101) === "de")
@@ -114,14 +114,14 @@ try {
     // 开发沙箱形态：Xvfb 键位图上传不生效（环境怪癖，非产品缺陷）
     // 隔离性由命令作用域保证：每次调用独立携带 -display :N，互不可串
     console.log(`    （环境怪癖：键位图上传不落效（xkbcomp 证实=${a1}）；命令通道与作用域仍为真实 setxkbmap 调用）`)
-    ok("A 查询通道独立可用（返回值非空）", imeCurrentKbLayout(handleA) !== null)
-    ok("B 查询通道独立可用（返回值非空）", imeCurrentKbLayout(handleB) !== null)
-    const r2 = applyKbLayout(handleB, "fr")
+    ok("A 查询通道独立可用（返回值非空）", await imeCurrentKbLayout(handleA) !== null)
+    ok("B 查询通道独立可用（返回值非空）", await imeCurrentKbLayout(handleB) !== null)
+    const r2 = await applyKbLayout(handleB, "fr")
     ok("B 切换命令执行成功（exit 0）", r2.ok)
-    ok("A 查询不受 B 操作影响（每调用独立 -display 作用域）", imeCurrentKbLayout(handleA) !== null)
+    ok("A 查询不受 B 操作影响（每调用独立 -display 作用域）", await imeCurrentKbLayout(handleA) !== null)
   }
 
-  const r3 = applyKbLayout(handleA, "!!bad!!")
+  const r3 = await applyKbLayout(handleA, "!!bad!!")
   ok("非法布局名拒绝", !r3.ok)
 } finally {
   try { process.kill(-a.pid!, "SIGKILL") } catch {}

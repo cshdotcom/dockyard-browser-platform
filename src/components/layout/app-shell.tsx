@@ -465,6 +465,14 @@ function NotificationBell({ initial }: { initial: number }) {
                   >
                     清除全部
                   </button>
+                  {/* r34：消息记录入口（清除的记录仍可在公告页「消息记录」永久回查） */}
+                  <a
+                    href="/announcements?tab=notices"
+                    className="text-teal-600 underline"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    消息记录
+                  </a>
                 </>
               )}
             </span>

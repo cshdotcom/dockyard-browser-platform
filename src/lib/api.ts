@@ -1,3 +1,4 @@
+import { extractClientIp } from "@/lib/client-ip"
 import { NextResponse } from "next/server"
 import { BizError, ErrorCode } from "./errors"
 import { getTraceId } from "./trace"
@@ -14,7 +15,7 @@ async function anonymousRateGuard(): Promise<void> {
     const hasSession = !!h.get("cookie")?.includes("dockyard-session")
     const hasApiKey = !!(h.get("x-api-key") || h.get("authorization"))
     if (hasSession || hasApiKey) return
-    const ip = h.get("x-forwarded-for")?.split(",")[0]?.trim() || h.get("x-real-ip") || "unknown"
+    const ip = extractClientIp((name) => h.get(name))
     if (ip === "unknown" || ip === "127.0.0.1") return
     const { getConfigNumber } = await import("./config")
     const { rateLimit } = await import("./rate-limit")

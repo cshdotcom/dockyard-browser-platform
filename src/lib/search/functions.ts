@@ -36,7 +36,7 @@ const PAGE_ENTRIES: SearchableFunction[] = [
   { id: "p-templates", title: "会话模板", desc: "预置规格（分辨率/代理/首页）快速创建沙箱", href: "/templates", group: "工作台", keywords: ["模板", "template", "规格", "预设"], roles: ALL },
   { id: "p-snapshots", title: "Profile 快照", desc: "浏览器资料归档：导出 / 恢复 / 过期管理", href: "/snapshots", group: "工作台", keywords: ["快照", "snapshot", "profile", "归档", "备份资料"], roles: ALL },
   { id: "p-announcements", title: "平台公告", desc: "平台通知与公告（弹窗/跑马灯/常驻）", href: "/announcements", group: "工作台", keywords: ["公告", "通知", "announcement", "notice"], roles: ALL },
-  { id: "p-my-recordings", title: "我的录像", desc: "我的工作区 VNC 会话录像：回放 / 下载（用户空间）", href: "/recordings", group: "工作台", keywords: ["我的录像", "录像", "回放", "录屏", "my recording", "会话录像", "播放"], roles: ALL },
+  { id: "p-my-recordings", title: "我的记录（录像/截图）", desc: "我的工作区录像与截图记录：回放 / 下载（云端存储）", href: "/recordings", group: "工作台", keywords: ["我的记录", "记录存储", "我的录像", "录像", "截图", "回放", "录屏", "my recording", "会话录像", "播放"], roles: ALL },
   { id: "p-my-files", title: "我的文件", desc: "专属文件空间：编辑器 / 预览 / 上传下载 / 分享链接", href: "/files", group: "工作台", keywords: ["我的文件", "文件", "上传", "下载", "分享", "编辑器", "files", "网盘", "云盘"], roles: ALL },
   { id: "p-my-browsing", title: "我的浏览数据", desc: "本人沙箱的浏览历史 / 书签（沙箱隔离）", href: "/browsing", group: "工作台", keywords: ["浏览历史", "历史记录", "书签", "收藏", "我的浏览", "history", "bookmark"], roles: ALL },
 

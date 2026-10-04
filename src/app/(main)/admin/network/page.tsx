@@ -245,6 +245,7 @@ async function HostTab({ q, f }: { q: ReturnType<typeof parseListQuery>; f: Reco
     cpuUsedPct: r.cpuUsedPct,
     memUsedMb: r.memUsedMb,
     diskUsedPct: r.diskUsedPct,
+    diskTotalMb: r.diskTotalMb || 0,
     reservedCpu: r.reservedCpu,
     reservedMemMb: r.reservedMemMb,
     grayGroup: r.grayGroup,

@@ -39,7 +39,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         { key: "workspaces", label: "浏览器工作区", href: "/workspaces", icon: <Globe className="h-4 w-4" /> },
         { key: "templates", label: "会话模板", href: "/templates", icon: <FileCode2 className="h-4 w-4" /> },
         { key: "announcements", label: "平台公告", href: "/announcements", icon: <Megaphone className="h-4 w-4" /> },
-        { key: "my-recordings", label: "我的录像", href: "/recordings", icon: <Video className="h-4 w-4" /> },
+        { key: "my-recordings", label: "我的记录（录像/截图）", href: "/recordings", icon: <Video className="h-4 w-4" /> },
         { key: "my-browsing", label: "我的浏览数据", href: "/browsing", icon: <History className="h-4 w-4" /> },
         { key: "my-files", label: "我的文件", href: "/files", icon: <FolderOpen className="h-4 w-4" /> },
       ],

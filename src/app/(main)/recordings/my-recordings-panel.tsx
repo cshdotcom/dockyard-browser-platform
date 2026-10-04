@@ -6,7 +6,8 @@
 import { useState, useTransition, useRef, useMemo } from "react"
 import { useRouter } from "next/navigation"
 import { playbackRecordingAction, type RecordingRow, type PlaybackTicketInfo } from "@/server/actions/recordings"
-import { WatermarkOverlay, PlaybackSpeedBar } from "@/components/recordings/watermark-overlay"
+import { WatermarkOverlay } from "@/components/recordings/watermark-overlay"
+import { CustomVideoPlayer } from "@/components/recordings/custom-video-player"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { MultiSelectPopover, type MultiOption } from "@/components/shared/multi-select-popover"
 import { Button } from "@/components/ui/button"
@@ -40,7 +41,6 @@ export function MyRecordingsPanel({ rows, keyword, wsIds, workspaces, quotaPct }
   const [playRow, setPlayRow] = useState<RecordingRow | null>(null)
   const [playUrl, setPlayUrl] = useState<string | null>(null)
   const [playTicket, setPlayTicket] = useState<PlaybackTicketInfo | null>(null)
-  const videoRef = useRef<HTMLVideoElement | null>(null)
   const [dlUrl, setDlUrl] = useState<string | null>(null)
   const [sel, setSel] = useState<string[]>(wsIds)
 
@@ -230,9 +230,12 @@ export function MyRecordingsPanel({ rows, keyword, wsIds, workspaces, quotaPct }
               {playRow && fmtBytes(playRow.sizeBytes)}
             </DialogDescription>
           </DialogHeader>
-          <div className="relative rounded-lg overflow-hidden bg-black">
-            <video key={playUrl || "none"} ref={videoRef} src={playUrl || undefined} controls autoPlay className="w-full max-h-[60vh]" preload="metadata" controlsList="nodownload" disablePictureInPicture />
-            {playTicket && (
+          {/* r34：自研品牌播放器（完全自绘控件：进度拖拽/倍速/音量/全屏/键盘控制）—— 替代 Chrome 内核原生 video 控件 */}
+          <CustomVideoPlayer
+            src={playUrl || ""}
+            title={playRow?.workspaceName}
+            subtitle={`${playRow ? new Date(playRow.startedAt).toLocaleString("zh-CN") : ""} · ${playRow ? fmtDur(playRow.durationSec) : ""} · ${playRow ? fmtBytes(playRow.sizeBytes) : ""}`}
+            watermark={playTicket ? (
               <WatermarkOverlay
                 mode={playTicket.watermark}
                 viewerName={playTicket.viewerName}
@@ -240,10 +243,10 @@ export function MyRecordingsPanel({ rows, keyword, wsIds, workspaces, quotaPct }
                 serverNow={playTicket.serverNow}
                 serverTz={playTicket.serverTz}
               />
-            )}
-          </div>
+            ) : undefined}
+          />
           <div className="flex items-center justify-between gap-2 flex-wrap">
-            <PlaybackSpeedBar videoRef={videoRef} />
+            <span className="text-[11px] text-muted-foreground">键盘：空格播放/暂停 · ←/→ 快退/快进 · M 静音 · F 全屏</span>
             {playTicket && !playTicket.allowExport && <span className="text-xs text-muted-foreground">该录像仅允许在线回放（禁止导出）</span>}
           </div>
           <DialogFooter className="sm:justify-between">

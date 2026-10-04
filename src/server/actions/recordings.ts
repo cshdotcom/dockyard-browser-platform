@@ -99,7 +99,7 @@ export async function listRecordingsAction(input: unknown): Promise<ActionResult
       deletedAt: null,
       ...(p.userId && (ctx.role === "ADMIN" || ctx.role === "SUPER_ADMIN") ? { userId: p.userId } : {}),
       ...(p.status && p.status !== "ALL" ? { status: p.status } : {}),
-      ...(p.keyword ? { OR: [{ workspaceName: { contains: p.keyword } }, { username: { contains: p.keyword } }, { sessionId: { contains: p.keyword } }] } : {}),
+      ...(p.keyword ? { OR: [{ workspaceName: { contains: p.keyword } }, { username: { contains: p.keyword } }, { sessionId: { contains: p.keyword } }, { note: { contains: p.keyword } }] } : {}),
       ...(p.from ? { startedAt: { gte: new Date(p.from) } } : {}),
       ...(p.to ? { startedAt: { lte: new Date(p.to) } } : {}),
       ...(p.from && p.to ? { startedAt: { gte: new Date(p.from), lte: new Date(p.to) } } : {}),

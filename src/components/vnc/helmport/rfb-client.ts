@@ -284,7 +284,8 @@ export class HelmPortRfb {
         this.sendRaw(setEnc)
         this.requestedEds = true
 
-        // QEMU 扩展剪贴板能力宣告
+        // QEMU 扩展剪贴板能力宣告（探测性质：服务端若支持会回 Caps；
+        //   不支持的服务器（如部分 x11vnc 版本）会忽略/容错 —— 后续 PROVIDE 仅在确认支持后发送）
         this.sendExtClipboard(CLIP_ACTION_CAPS | CLIP_ACTION_REQUEST | CLIP_ACTION_NOTIFY | CLIP_ACTION_PROVIDE, CLIP_FORMAT_TEXT, new Uint8Array(0))
 
         // 全量帧请求
@@ -617,16 +618,25 @@ export class HelmPortRfb {
 
   // ================= 剪贴板（QEMU 扩展 + 经典降级） =================
 
+  // r34：服务端扩展剪贴板能力标记 —— 收到服务端 Caps 响应才启用扩展通道。
+  //   x11vnc 类服务器不支持 QEMU 扩展剪贴板时，负长度 ClientCutText 可能被当作协议错误断连
+  //   （用户报障：点发送/拉取即断连重连、内容传不过去）→ 未确认支持时改用经典通道 + 平台 xclip 中转。
+  private serverExtClipboard = false
+  get extClipboardEnabled(): boolean {
+    return this.serverExtClipboard
+  }
+
   async sendClipboard(text: string): Promise<"extended" | "classic" | "failed"> {
     if (this.state !== State.Running || this.opts.viewOnly) return "failed"
     const sliced = text.slice(0, 5000)
     if (!sliced) return "failed"
-    // 扩展通道：zlib(u32 size + utf8 + \0)
-    if (typeof CompressionStream !== "undefined") {
+    // 扩展通道：仅服务端已确认支持（Caps 响应）时使用；zlib(u32 size + utf8 + \0)
+    if (this.serverExtClipboard && typeof CompressionStream !== "undefined") {
       try {
-        const body = new Uint8Array(4 + new TextEncoder().encode(sliced).length + 1)
-        set32(body, 0, new TextEncoder().encode(sliced).length + 1)
-        body.set(new TextEncoder().encode(sliced), 4)
+        const encoded = new TextEncoder().encode(sliced)
+        const body = new Uint8Array(4 + encoded.length + 1)
+        set32(body, 0, encoded.length + 1)
+        body.set(encoded, 4)
         const compressed = await deflateZlib(body)
         this.sendExtClipboard(CLIP_ACTION_PROVIDE, CLIP_FORMAT_TEXT, compressed)
         return "extended"
@@ -649,7 +659,9 @@ export class HelmPortRfb {
   }
 
   requestRemoteClipboard() {
-    // 服务端有内容时触发 Provide 回传
+    // r34：未确认服务端支持扩展剪贴板时，不发送负长度 REQUEST（防断连）——
+    //   拉取改由平台中转通道（GET /api/vnc-proxy/clipboard → xclip 真实读取）完成
+    if (!this.serverExtClipboard) return
     this.sendExtClipboard(CLIP_ACTION_REQUEST, CLIP_FORMAT_TEXT, new Uint8Array(0))
   }
 
@@ -671,6 +683,11 @@ export class HelmPortRfb {
     const action = flags & 0xff000000
     const formats = flags & 0xffff
     const payload = data.subarray(4)
+    // r34：服务端 Caps 响应 = 扩展剪贴板能力确认（此后 PROVIDE/REQUEST 才走扩展通道）
+    if (action === CLIP_ACTION_CAPS) {
+      if ((formats & CLIP_FORMAT_TEXT) !== 0) this.serverExtClipboard = true
+      return
+    }
     // 动作精确匹配（与桥服务端一致）：CAPS 混合位不被误判为 PROVIDE（避免对空负载误 zlib）
     if (action === CLIP_ACTION_PROVIDE && (formats & CLIP_FORMAT_TEXT) !== 0) {
       // 服务端提供文本：zlib 解压 → u32 size + utf8（解压失败静默降级）

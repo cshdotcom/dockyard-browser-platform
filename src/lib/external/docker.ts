@@ -328,7 +328,7 @@ function simContainers() {
   return g.__dySimContainers
 }
 
-async function dockerFetch(path: string, init?: RequestInit, timeoutMs = ENV.dockerApiTimeout): Promise<Response> {
+export async function dockerFetch(path: string, init?: RequestInit, timeoutMs = ENV.dockerApiTimeout): Promise<Response> {
   const url = ENV.dockerApiUrl.replace(/\/$/, "") + path
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)

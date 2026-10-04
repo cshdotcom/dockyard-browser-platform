@@ -927,6 +927,7 @@ model HostNode {
   cpuUsedPct    Float    @default(0) // 0.001 精度
   memUsedMb     Float    @default(0)
   diskUsedPct   Float    @default(0)
+  diskTotalMb   Float    @default(0) // r34：磁盘总容量（Docker data-root 文件系统；用户诉求：宿主机磁盘显示总容量）
   reservedCpu   Float    @default(0) // 资源预留
   reservedMemMb Float    @default(0)
   grayGroup     String   @default("PROD")

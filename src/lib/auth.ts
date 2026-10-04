@@ -1,3 +1,4 @@
+import { extractClientIp } from "@/lib/client-ip"
 import type { NextAuthOptions } from "next-auth"
 import CredentialsProvider from "next-auth/providers/credentials"
 import { db } from "./db"
@@ -222,10 +223,7 @@ export const authOptions: NextAuthOptions = {
         if (user.lockedUntil && user.lockedUntil > new Date()) return null
 
         const reqAny = req as unknown as { headers?: Record<string, string | undefined> }
-        const ip =
-          reqAny?.headers?.["x-forwarded-for"]?.split(",")[0]?.trim() ||
-          reqAny?.headers?.["x-real-ip"] ||
-          "127.0.0.1"
+        const ip = extractClientIp((name) => reqAny?.headers?.[name] || null)
         const ua = reqAny?.headers?.["user-agent"] || "unknown"
         const deviceId = deviceFingerprint(ua, ip)
 

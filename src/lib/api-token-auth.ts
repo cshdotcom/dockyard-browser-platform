@@ -1,3 +1,4 @@
+import { extractClientIp } from "@/lib/client-ip"
 import { NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { sha256 } from "./crypto"
@@ -60,7 +61,7 @@ export async function authenticateApiToken(
   requiredScope?: string | null
 ): Promise<AuthResult> {
   const traceId = trace()
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || "127.0.0.1"
+  const ip = extractClientIp((name) => req.headers.get(name))
   const apiKey = req.headers.get("x-api-key") || req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || ""
   const path = req.nextUrl.pathname
 

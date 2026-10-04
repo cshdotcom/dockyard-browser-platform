@@ -5,6 +5,7 @@ import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import {
+  Activity,
   ArrowLeft, Globe, MonitorPlay, Share2, FileJson, Terminal, Clipboard, MousePointer2, Hand,
   RefreshCw, ShieldCheck, Wifi, Loader2, Trash2, Lock, Play, StopCircle, Copy, Anchor,
   RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon, Network, FileLock2, Link2, Plus, Cable,
@@ -16,6 +17,7 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { TimelinePanel } from "./timeline-panel"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
@@ -250,6 +252,7 @@ export function WorkspaceDetail({
           <TabsTrigger value="network"><Wifi className="h-3.5 w-3.5 mr-1" />网络与代理</TabsTrigger>
           <TabsTrigger value="script"><Terminal className="h-3.5 w-3.5 mr-1" />脚本注入</TabsTrigger>
           <TabsTrigger value="har"><FileJson className="h-3.5 w-3.5 mr-1" />HAR / 录播</TabsTrigger>
+          <TabsTrigger value="timeline"><Activity className="h-3.5 w-3.5 mr-1" />时间轴</TabsTrigger>
           <TabsTrigger value="shares"><Share2 className="h-3.5 w-3.5 mr-1" />共享授权</TabsTrigger>
         </TabsList>
 
@@ -272,6 +275,9 @@ export function WorkspaceDetail({
         </TabsContent>
         <TabsContent value="har" className="mt-4">
           <HarPanel workspace={workspace} harRecords={harRecords} />
+        </TabsContent>
+        <TabsContent value="timeline" className="mt-4">
+          <TimelinePanel workspaceId={workspace.id} workspaceName={workspace.name} isAdmin={workspace.isAdmin} />
         </TabsContent>
         <TabsContent value="shares" className="mt-4">
           <SharesPanel workspace={workspace} shares={shares} shareLinks={shareLinks} />

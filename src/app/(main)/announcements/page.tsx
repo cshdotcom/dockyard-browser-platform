@@ -2,14 +2,17 @@ import { db } from "@/lib/db"
 import { requireAuth, userGroupIds } from "@/lib/permissions"
 import { announcementTargetsUser } from "@/lib/announcement-targets"
 import { fmtDate } from "@/lib/utils-server"
-import { Megaphone, Globe2, Users } from "lucide-react"
+import { Megaphone, Globe2, Users, Inbox } from "lucide-react"
 import { StatCard } from "@/components/shared/confirm"
 import { AnnouncementsView, type AnnouncementRow } from "./announcements-view"
+import { NoticesRecordView, type NoticeRecordRow } from "./notices-record-view"
 
 // 用户侧公告页：对当前用户可见的公告（GLOBAL / GROUP∈我的组 / USER=我）
 // 展示形态：POPUP 弹窗（未读自动弹出）/ MARQUEE 跑马灯 / FORCE_VIEW 全屏强制阅读
 // r22：支持 ?focus=<id> 定位（站内信「查看详情」落地：自动打开详情弹窗）；仅站内信公告也纳入列表回看
-export const metadata = { title: "平台公告" }
+// r34：新增「消息记录」页签 —— 全量站内信/通知历史（含已清除；清除只在铃铛列表隐藏，记录页永久可查）
+//      支持类型筛选（公告/告警/系统/安全/录像/截图/文件/令牌）、关键词搜索、日期范围筛选
+export const metadata = { title: "平台公告与消息记录" }
 
 const DISPLAY_LABEL: Record<string, string> = { POPUP: "弹窗", MARQUEE: "跑马灯", FORCE_VIEW: "强制阅读" }
 const TYPE_LABEL: Record<string, string> = { GLOBAL: "全站", GROUP: "用户组", USER: "定向" }
@@ -25,6 +28,8 @@ export default async function AnnouncementsPage({
   const sp = await searchParams
   const focusRaw = sp.focus
   const focusId = typeof focusRaw === "string" && focusRaw ? focusRaw : Array.isArray(focusRaw) ? focusRaw[0] : undefined
+  const tabRaw = sp.tab
+  const tab = tabRaw === "notices" ? "notices" : "announcements"
 
   const now = new Date()
   // r30：范围多选 union 匹配 —— 先取时间窗内全部启用公告（量级小），
@@ -82,12 +87,32 @@ export default async function AnnouncementsPage({
 
   const unreadCount = rows.filter((r) => !r.read).length
 
+  // ---- r34：消息记录（全量站内信含已清除；审计/回溯语义） ----
+  const notices = await db.notice.findMany({
+    where: { userId: ctx.userId },
+    orderBy: { createdAt: "desc" },
+    take: 500,
+  })
+  const noticeRows: NoticeRecordRow[] = notices.map((n) => ({
+    id: n.id,
+    title: n.title,
+    content: n.content,
+    type: n.type,
+    link: n.link,
+    cleared: !!n.clearedAt,
+    read: !!n.readAt,
+    createdAt: fmtDate(n.createdAt),
+    createdAtIso: n.createdAt.toISOString(),
+  }))
+  const noticeUnread = noticeRows.filter((n) => !n.read && !n.cleared).length
+  const noticeCleared = noticeRows.filter((n) => n.cleared).length
+
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">平台公告</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">平台公告与消息记录</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          面向你的全站通知、组通知与定向消息；重要公告会以强制阅读方式呈现
+          面向你的全站通知、组通知与定向消息；消息记录页保存你收到的全部站内信历史（含铃铛内已清除的记录）
         </p>
       </div>
 
@@ -98,7 +123,23 @@ export default async function AnnouncementsPage({
         <StatCard title="组 / 定向" value={groupCount + userCount} sub={`组 ${groupCount} · 定向 ${userCount}`} icon={<Users className="h-4 w-4" />} />
       </div>
 
-      <AnnouncementsView rows={listRows} focusId={focusId} />
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
+        <StatCard title="站内信总数" value={noticeRows.length} sub="全部消息（含已清除）" icon={<Inbox className="h-4 w-4" />} />
+        <StatCard title="未读站内信" value={noticeUnread} sub="铃铛列表内" icon={<Inbox className="h-4 w-4" />} tone={noticeUnread > 0 ? "warning" : "success"} />
+        <StatCard title="已清除" value={noticeCleared} sub="仅铃铛隐藏 · 记录页可查" icon={<Inbox className="h-4 w-4" />} tone="muted" />
+      </div>
+
+      {tab === "notices" ? (
+        <NoticesRecordView rows={noticeRows} />
+      ) : (
+        <AnnouncementsView rows={listRows} focusId={focusId} />
+      )}
+
+      {tab === "announcements" && (
+        <p className="text-xs text-muted-foreground">
+          想查看全部站内信历史（含已清除）？<a className="text-teal-600 hover:underline" href="/announcements?tab=notices">切换到消息记录页 →</a>
+        </p>
+      )}
     </div>
   )
 }

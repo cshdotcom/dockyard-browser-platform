@@ -16,7 +16,7 @@
 import * as React from "react"
 import { toast } from "sonner"
 import {
-  Anchor, Camera, Clipboard, Expand, Minimize2, RefreshCw, Loader2,
+  Anchor, Camera, Clipboard, ClipboardPaste, Expand, Minimize2, RefreshCw, Loader2,
   MousePointer2, Hand, ShieldCheck, Eye, TriangleAlert, Zap, Radio, Keyboard, ShipWheel, Monitor,
   Languages, Timer, GripVertical, Send, PanelRightClose, PanelRightOpen, Lock, ChevronsUp,
   Crosshair, CircleDot, AppWindow,
@@ -214,6 +214,7 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
   const [lastKeys, setLastKeys] = React.useState<string[]>([])
   const [clipboardText, setClipboardText] = React.useState("")
   const [clipboardReceived, setClipboardReceived] = React.useState("")
+  const [pulling, setPulling] = React.useState(false)
   const [serverName, setServerName] = React.useState("")
   // —— 多监视器分辨率切换 ——
   const [desktop, setDesktop] = React.useState<RfbDesktopSize | null>(null)
@@ -905,6 +906,35 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
     }
   }
 
+  // ---- 拉取远程剪贴板（r34：双通道 —— RFB 扩展（已确认支持时）+ 平台 xclip 真实读取） ----
+  const pullClipboard = async () => {
+    if (pulling) return
+    setPulling(true)
+    try {
+      // 通道1：RFB 扩展（服务端 Caps 已确认支持时才发送，防 x11vnc 断连）
+      try { rfbRef.current?.requestRemoteClipboard() } catch { /* 降级平台通道 */ }
+      // 通道2：平台中转（xclip 直读沙箱 X 剪贴板 —— r34 真实落地）
+      try {
+        const res = await fetch(`/api/vnc-proxy/clipboard?workspaceId=${encodeURIComponent(workspace.id)}`, { cache: "no-store" })
+        const json = (await res.json()) as { code?: number; msg?: string; data?: { text?: string; channel?: string; reason?: string } }
+        if (json.code === 0) {
+          if (json.data?.text) {
+            setClipboardReceived(json.data.text)
+            toast.success(`已拉取沙箱剪贴板 ${json.data.text.length} 字（${json.data.channel}）`)
+          } else {
+            toast.info(json.data?.reason || "沙箱剪贴板当前为空")
+          }
+        } else {
+          toast.error(json.msg || "拉取失败")
+        }
+      } catch {
+        toast.error("平台中转通道不可用")
+      }
+    } finally {
+      setPulling(false)
+    }
+  }
+
   // ---- 控制坞拖动（桌面）：拖动中跟随指针，松开停靠较近侧 ----
   const onDockHeaderPointerDown = (e: React.PointerEvent) => {
     if (isMobile) return
@@ -1467,8 +1497,9 @@ export function HelmPortViewer({ workspace, serverPolicy }: { workspace: HelmPor
                       <Button size="sm" onClick={sendClipboard} disabled={!canOperate} className="bg-teal-600 text-white hover:bg-teal-500 h-8">
                         <Clipboard className="h-3.5 w-3.5 mr-1" /> 投递
                       </Button>
-                      <Button size="sm" variant="outline" onClick={() => rfbRef.current?.requestRemoteClipboard()} disabled={!canOperate} className="h-8">
-                        拉取远程剪贴板
+                      <Button size="sm" variant="outline" onClick={pullClipboard} disabled={!canOperate || pulling} className="h-8">
+                        {pulling ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <ClipboardPaste className="h-3.5 w-3.5 mr-1" />}
+                        {pulling ? "拉取中…" : "拉取远程剪贴板"}
                       </Button>
                     </div>
                   </div>

@@ -7,7 +7,7 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { Loader2, Save, RotateCcw, History, Wrench, Lock, ShieldAlert, Mail, Siren, ShieldBan, ListChecks, ChevronDown } from "lucide-react"
+import { Loader2, Save, RotateCcw, History, Wrench, Lock, ShieldAlert, Mail, Siren, ShieldBan, ListChecks, ChevronDown, Search, X, ChevronRight } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -126,6 +126,9 @@ export function ConfigPanel({
   const [busyKey, setBusyKey] = React.useState<string>("")
   const [rollbackTarget, setRollbackTarget] = React.useState<ConfigVersionRow | null>(null)
   const [rollbackBusy, setRollbackBusy] = React.useState(false)
+  // r34：全局配置搜索状态
+  const [configSearch, setConfigSearch] = React.useState("")
+  const [configHits, setConfigHits] = React.useState<ConfigItem[]>([])
   // SMTP 当前生效值（回显：保存前可见当前库内配置，避免空表单误保存/无法保存）
   const smtpInitial = React.useMemo(() => ({
     enabled: items.find((i) => i.key === "smtp.enabled")?.value === true,
@@ -441,9 +444,39 @@ export function ConfigPanel({
         </div>
       </div>
 
+      {/* ---- r34：全局配置搜索框（用户诉求：系统配置里专门搜配置的搜索框） ----
+          跨全部分类：键名/描述实时匹配，命中时切换到虚拟「搜索结果」页签渲染，
+          点选任意结果深链跳到所属分类页签并滚动定位高亮 ---- */}
+      <div className="relative max-w-md">
+        <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+        <Input
+          value={configSearch}
+          onChange={(e) => {
+            setConfigSearch(e.target.value)
+            const q = e.target.value.trim().toLowerCase()
+            setConfigHits(q ? items.filter((i) => i.key.toLowerCase().includes(q) || (i.description || "").toLowerCase().includes(q)).slice(0, 50) : [])
+            setTab(q && configHits.length >= 0 ? "__SEARCH__" : CATEGORY_ORDER[0])
+          }}
+          placeholder="搜索配置项（键名 / 描述，跨全部分类）…"
+          className="pl-8"
+          aria-label="搜索配置"
+        />
+        {configSearch && (
+          <button type="button" aria-label="清空搜索" onClick={() => { setConfigSearch(""); setTab(CATEGORY_ORDER[0]) }} className="absolute right-2.5 top-2.5 text-muted-foreground hover:text-foreground">
+            <X className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+
       {/* ---- 分类 Tabs（r25-a 受控：支持 ?tab= 深链） ---- */}
       <Tabs value={tab} onValueChange={setTab} className="w-full">
         <TabsList className="flex-wrap h-auto gap-1">
+          {configSearch.trim() && (
+            <TabsTrigger value="__SEARCH__" className="data-[state=active]:bg-teal-50 data-[state=active]:text-teal-700">
+              <Search className="mr-1 h-3.5 w-3.5" />
+              搜索结果 {configHits.length}
+            </TabsTrigger>
+          )}
           {CATEGORY_ORDER.filter((c) => byCategory.has(c)).map((c) => (
             <TabsTrigger key={c} value={c}>
               {CATEGORY_LABEL[c] || c}
@@ -455,6 +488,44 @@ export function ConfigPanel({
             版本历史
           </TabsTrigger>
         </TabsList>
+
+        {/* ---- r34：搜索结果页签（跨分类命中清单） ---- */}
+        {configSearch.trim() && (
+          <TabsContent value="__SEARCH__" className="space-y-2 mt-4">
+            <p className="text-sm text-muted-foreground">
+              匹配「{configSearch.trim()}」的配置项 {configHits.length} 个（跨全部分类）；点击任意项跳转到所属分类并定位
+            </p>
+            {configHits.length === 0 && (
+              <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
+                未找到匹配的配置项（可尝试英文键名或简短关键词）
+              </div>
+            )}
+            <div className="rounded-lg border divide-y">
+              {configHits.map((i) => (
+                <button
+                  key={i.key}
+                  type="button"
+                  className="w-full flex items-center gap-3 p-3 text-left hover:bg-muted/40"
+                  onClick={() => {
+                    setConfigSearch("")
+                    setTab(i.category)
+                    setTimeout(() => {
+                      const el = document.getElementById(`cfg-row-${encodeURIComponent(i.key)}`)
+                      if (el) { el.scrollIntoView({ block: "center", behavior: "smooth" }); el.classList.add("ring-2", "ring-teal-400"); setTimeout(() => el.classList.remove("ring-2", "ring-teal-400"), 2000) }
+                    }, 200)
+                  }}
+                >
+                  <Badge variant="outline" className="shrink-0">{CATEGORY_LABEL[i.category] || i.category}</Badge>
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-mono text-xs truncate">{i.key}</span>
+                    <span className="block text-xs text-muted-foreground truncate">{i.description || ""}</span>
+                  </span>
+                  <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+                </button>
+              ))}
+            </div>
+          </TabsContent>
+        )}
 
         {CATEGORY_ORDER.filter((c) => byCategory.has(c)).map((c) => {
           const allList = byCategory.get(c) || []
@@ -1111,9 +1182,11 @@ function SelfCheckBlock({ data }: { data: SelfCheckData }) {
           </CollapsibleTrigger>
         </div>
         <CollapsibleContent>
-          <div className="max-h-[60vh] overflow-y-auto border-t">
+          {/* r34：改用 ScrollArea 修复「自检清单滑不动」 —— 原 max-h+overflow-y 在 CollapsibleContent
+              动画容器内滚动失效（Radix 动画期间的 height 约束与原生滚动冲突）；ScrollArea 为独立滚动区 */}
+          <ScrollArea className="h-[60vh] border-t">
             <Table>
-              <TableHeader className="sticky top-0 bg-card z-10">
+              <TableHeader>
                 <TableRow>
                   <TableHead className="w-[30%]">配置键</TableHead>
                   <TableHead className="w-[18%]">当前值</TableHead>
@@ -1138,7 +1211,7 @@ function SelfCheckBlock({ data }: { data: SelfCheckData }) {
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </ScrollArea>
           <p className="px-4 py-2 border-t text-[11px] text-muted-foreground">
             「生效中」= 存在真实读取点（任务调度 / 请求链路 / 策略门控等）；「功能预留」= 已落库但暂无运行时读取点，调整后不改变当前行为。
           </p>

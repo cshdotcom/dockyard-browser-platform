@@ -13,7 +13,7 @@ import * as React from "react"
 import { cn } from "@/lib/utils"
 import {
   KS_CTRL, KS_ALT, KS_SHIFT, KS_SUPER, KS,
-  SHIFT_SYMBOL_CAPS, EXTENDED_CAPS, type KeyCap,
+  SHIFT_SYMBOL_CAPS, EXTENDED_CAPS, PUNCT_CAPS, resolveKeysym, type KeyCap,
 } from "@/lib/vnc-shortcuts"
 
 interface KeySender {
@@ -32,7 +32,11 @@ const LETTER_ROWS: string[][] = [
 const SHIFT_ROW = SHIFT_SYMBOL_CAPS.slice(0, 10).map((c) => c.label)
 const NUM_ROW = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
 
-const BOTTOM_SYMBOLS = SHIFT_SYMBOL_CAPS.slice(10)
+// r34：主层底行 = 标准 QWERTY 标点（- [ ] ; ' , . /），Shift 生效时显示上档形态（_ { } : " < > ?）
+// （此前主层底行误用上档符号行 → 点号/逗号在主层根本找不到 —— 用户报障“软键盘打不出点号”）
+const PUNCT_ROW_KEYS = ["-", "[", "]", ";", "'", ",", ".", "/"]
+const punctLabel = (ch: string, shift: boolean) =>
+  shift ? { "-": "_", "[": "{", "]": "}", ";": ":", "'": "\"", ",": "<", ".": ">", "/": "?" }[ch] || ch : ch
 
 function fireCombo(sendKey: KeySender, keys: number[]) {
   for (const k of keys) sendKey(k, true)
@@ -98,13 +102,20 @@ export function VirtualKeyboard({ sendKey, disabled, onClose }: {
     setTimeout(() => setFlash((f) => (f === label ? null : f)), 160)
   }
 
-  // 普通字符键：修饰键组合发送（一次性）后清除粘滞
+  // 普通字符键：r34 Shift 语义修正 —— 直接发送上档字符的 keysym（真实键盘 key 事件形态），
+  // 不再发送 Shift+基础键组合（部分服务器布局会错位成其他符号）；修饰键组合仍走 fireCombo
   const pressChar = (ch: string) => {
     if (disabled) return
-    const cp = ch.charCodeAt(0)
-    const keys = [...effectiveMods, cp]
-    fireCombo(sendKey, keys)
-    doFlash(ch.toUpperCase())
+    const finalKeysym = resolveKeysym(ch, effectiveShift)
+    const hasNonShiftMods = effectiveMods.length > 0
+    if (hasNonShiftMods) {
+      fireCombo(sendKey, [...effectiveMods, finalKeysym])
+    } else {
+      sendKey(finalKeysym, true)
+      setTimeout(() => sendKey(finalKeysym, false), 60)
+    }
+    const shown = effectiveShift ? ch.toUpperCase() : ch
+    doFlash(shown.length === 1 ? shown : ch)
     setMods([])
     if (!shiftLocked) setShiftOn(false)
   }
@@ -196,15 +207,13 @@ export function VirtualKeyboard({ sendKey, disabled, onClose }: {
               {ri === 2 && <VKeyBtn label="⌫" onPress={() => pressNamed(KS.BackSpace, "Backspace")} wide={1.6} />}
             </div>
           ))}
+          {/* r34：主层底行 = 标准标点行（含点号/逗号；Shift 显示上档形态） */}
           <div className="flex gap-1">
             <VKeyBtn label="符号" onPress={() => setLayer("nums")} wide={1.1} />
-            {BOTTOM_SYMBOLS.slice(0, 6).map((c) => (
-              <VKeyBtn key={c.label} label={c.label} onPress={() => pressChar(c.label)} />
+            {PUNCT_ROW_KEYS.map((ch) => (
+              <VKeyBtn key={ch} label={punctLabel(ch, effectiveShift)} onPress={() => pressChar(ch)} />
             ))}
-            <VKeyBtn label="␣ Space" onPress={() => pressNamed(0x20, "Space")} wide={3.2} />
-            {BOTTOM_SYMBOLS.slice(6, 9).map((c) => (
-              <VKeyBtn key={c.label} label={c.label} onPress={() => pressChar(c.label)} />
-            ))}
+            <VKeyBtn label="␣ Space" onPress={() => pressNamed(0x20, "Space")} wide={2.6} />
             <VKeyBtn label="⏎ Enter" onPress={() => pressNamed(KS.Enter, "Enter")} wide={1.8} />
           </div>
         </div>
@@ -220,14 +229,16 @@ export function VirtualKeyboard({ sendKey, disabled, onClose }: {
             {SHIFT_ROW.map((ch) => <VKeyBtn key={ch} label={ch} onPress={() => pressChar(ch)} />)}
           </div>
           <div className="flex gap-1">
-            {BOTTOM_SYMBOLS.map((c) => <VKeyBtn key={c.label} label={c.label} onPress={() => pressChar(c.label)} />)}
+            {PUNCT_CAPS.map((c) => <VKeyBtn key={c.label} label={c.label} onPress={() => pressChar(c.label)} />)}
+          </div>
+          <div className="flex gap-1">
+            {SHIFT_SYMBOL_CAPS.slice(10).map((c) => <VKeyBtn key={c.label} label={c.label} onPress={() => pressChar(c.label)} />)}
           </div>
           <div className="flex gap-1">
             <VKeyBtn label="←" onPress={() => pressNamed(KS.Left, "←")} />
             <VKeyBtn label="↑" onPress={() => pressNamed(KS.Up, "↑")} />
             <VKeyBtn label="↓" onPress={() => pressNamed(KS.Down, "↓")} />
             <VKeyBtn label="→" onPress={() => pressNamed(KS.Right, "→")} />
-            <VKeyBtn label=".,;'" onPress={() => pressChar(".")} wide={1} />
             <VKeyBtn label="字母层" onPress={() => setLayer("main")} wide={1.4} />
           </div>
         </div>

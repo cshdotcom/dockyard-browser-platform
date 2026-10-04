@@ -4,7 +4,9 @@ import { rateLimit } from "@/lib/rate-limit"
 
 // 图形验证码下发：SVG 返回前端，答案仅存服务端内存
 export async function GET(req: NextRequest) {
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "127.0.0.1"
+  // r34: real client IP (CDN edge headers → XFF multi-hop right-to-left public determination → intranet leftmost original client → X-Real-IP)
+  const { extractClientIp } = await import("@/lib/client-ip")
+  const ip = extractClientIp((name) => req.headers.get(name))
   if (!rateLimit(`captcha:${ip}`, 30, 60_000).allowed) {
     return NextResponse.json({ code: 42900, msg: "请求过于频繁" })
   }

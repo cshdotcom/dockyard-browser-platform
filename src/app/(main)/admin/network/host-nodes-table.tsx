@@ -32,6 +32,7 @@ export interface HostNodeRow {
   cpuUsedPct: number
   memUsedMb: number
   diskUsedPct: number
+  diskTotalMb: number // r34：磁盘总容量（用户诉求：显示磁盘总容量）
   reservedCpu: number
   reservedMemMb: number
   grayGroup: string
@@ -152,9 +153,9 @@ export function HostNodesTable(props: Props) {
     callAction(`probe-${row.id}`, async () => {
       const res = await probeHostNodeAction({ id: row.id })
       if (res.code === 0 && res.data) {
-        const d = res.data as { simulated: boolean; cpuCores: number; memTotalMb: number; cpuUsedPct: number; memUsedMb: number; diskUsedPct: number; alert?: string }
+        const d = res.data as { simulated: boolean; cpuCores: number; memTotalMb: number; cpuUsedPct: number; memUsedMb: number; diskUsedPct: number; diskTotalMb?: number; alert?: string }
         toast.success(
-          `采集完成${d.simulated ? "（模拟水位）" : ""}：CPU ${d.cpuCores} 核 / ${d.cpuUsedPct.toFixed(1)}%，内存 ${fmtMem(d.memUsedMb)}/${fmtMem(d.memTotalMb)}，磁盘 ${d.diskUsedPct.toFixed(1)}%${d.alert ? ` ⚠ ${d.alert}` : ""}`
+          `采集完成${d.simulated ? "（模拟水位）" : ""}：CPU ${d.cpuCores} 核 / ${d.cpuUsedPct.toFixed(1)}%，内存 ${fmtMem(d.memUsedMb)}/${fmtMem(d.memTotalMb)}，磁盘 ${d.diskUsedPct.toFixed(1)}%${d.diskTotalMb ? `（总容量 ${fmtMem(d.diskTotalMb)}）` : ""}${d.alert ? ` ⚠ ${d.alert}` : ""}`
         )
         router.refresh()
         return { code: 0, msg: "ok" }
@@ -222,7 +223,9 @@ export function HostNodesTable(props: Props) {
       sortable: true,
       render: (row: HostNodeRow) => (
         <div className="min-w-28">
-          <p className={`text-xs tabular-nums mb-1 ${row.diskUsedPct > 85 ? "text-red-600 font-medium" : ""}`}>{row.diskUsedPct.toFixed(1)}%</p>
+          <p className={`text-xs tabular-nums mb-1 ${row.diskUsedPct > 85 ? "text-red-600 font-medium" : ""}`}>
+            {row.diskUsedPct.toFixed(1)}%{row.diskTotalMb > 0 && <span className="text-muted-foreground font-normal">（已用 {fmtMem(row.diskUsedPct / 100 * row.diskTotalMb)} / 总 {fmtMem(row.diskTotalMb)}）</span>}
+          </p>
           <Progress value={row.diskUsedPct} className="h-1.5" />
         </div>
       ),

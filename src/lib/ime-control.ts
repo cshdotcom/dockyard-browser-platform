@@ -14,7 +14,7 @@
 //   各语言键盘布局（xkb layouts：us/cn/de/fr/es/it/ru/jp/kr/ar/…）
 // ============================================================
 
-import { spawnSync } from "child_process"
+import { spawn } from "child_process"
 import fs from "fs"
 import { readFile } from "fs/promises"
 import { join } from "path"
@@ -164,7 +164,40 @@ export interface ImeRuntimeHandle {
   sandboxDir: string
 }
 
-function runAsSandboxUser(handle: ImeRuntimeHandle, cmd: string, args: string[], timeoutMs = 8000): { code: number; stdout: string; stderr: string } {
+// r34：spawnSync → 异步 spawn（永不抛异常；不阻塞事件循环）。
+// 此前 spawnSync 同步阻塞 Next.js 事件循环最長 8 秒 —— 并发请求全部冻结，
+// 且部分环境下 spawn 异常未被捕获 → actionHandler 兜底成“服务内部错误”（用户报障“选完输入法就报内部错误”）。
+export interface RunResult { code: number; stdout: string; stderr: string }
+
+function runCmd(cmd: string, args: string[], opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number }): Promise<RunResult> {
+  return new Promise((resolve) => {
+    let stdout = ""
+    let stderr = ""
+    let settled = false
+    const finish = (code: number) => {
+      if (settled) return
+      settled = true
+      resolve({ code, stdout: stdout.slice(0, 64_000), stderr: stderr.slice(0, 64_000) })
+    }
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(cmd, args, { env: opts.env, stdio: ["ignore", "pipe", "pipe"] })
+    } catch {
+      finish(-1)
+      return
+    }
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL") } catch { /* noop */ }
+      finish(-1)
+    }, opts.timeoutMs ?? 6000)
+    child.stdout?.on("data", (d: Buffer) => { stdout += d.toString("utf8") })
+    child.stderr?.on("data", (d: Buffer) => { stderr += d.toString("utf8") })
+    child.on("error", () => { clearTimeout(timer); finish(-1) })
+    child.on("close", (code) => { clearTimeout(timer); finish(code ?? -1) })
+  })
+}
+
+async function runAsSandboxUser(handle: ImeRuntimeHandle, cmd: string, args: string[], timeoutMs = 6000): Promise<RunResult> {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     DISPLAY: `:${handle.display}`,
@@ -173,11 +206,9 @@ function runAsSandboxUser(handle: ImeRuntimeHandle, cmd: string, args: string[],
   }
   if (handle.linuxUser && process.getuid?.() === 0) {
     // root 环境以沙箱专用用户执行（fcitx5 归属用户；X 显示访问一致性）
-    const full = spawnSync("setpriv", ["--reuid", handle.linuxUser, "--regid", handle.linuxUser, "--init-groups", "--", cmd, ...args], { env, timeout: timeoutMs, encoding: "utf8" })
-    return { code: full.status ?? -1, stdout: full.stdout || "", stderr: full.stderr || "" }
+    return runCmd("setpriv", ["--reuid", handle.linuxUser, "--regid", handle.linuxUser, "--init-groups", "--", cmd, ...args], { env, timeoutMs })
   }
-  const r = spawnSync(cmd, args, { env, timeout: timeoutMs, encoding: "utf8" })
-  return { code: r.status ?? -1, stdout: r.stdout || "", stderr: r.stderr || "" }
+  return runCmd(cmd, args, { env, timeoutMs })
 }
 
 // fcitx5 组件是否可用（容器内安装检测；未安装时 UI 显示降级说明）
@@ -192,33 +223,33 @@ export function fcitx5Installed(): boolean {
 }
 
 // setxkbmap 是否可用
-export function setxkbmapInstalled(): boolean {
-  const r = spawnSync("which", ["setxkbmap"], { timeout: 3000, encoding: "utf8" })
-  return (r.status ?? 1) === 0
+export async function setxkbmapInstalled(): Promise<boolean> {
+  const r = await runCmd("which", ["setxkbmap"], { timeoutMs: 3000 })
+  return r.code === 0 && r.stdout.trim().length > 0
 }
 
 // 查询当前输入法（fcitx5-remote -n；无 fcitx5 返回 null）
-export function imeCurrentEngine(handle: ImeRuntimeHandle): string | null {
+export async function imeCurrentEngine(handle: ImeRuntimeHandle): Promise<string | null> {
   if (!fcitx5Installed()) return null
-  const r = runAsSandboxUser(handle, "fcitx5-remote", ["-n"], 5000)
+  const r = await runAsSandboxUser(handle, "fcitx5-remote", ["-n"], 5000)
   if (r.code !== 0) return null
   return r.stdout.trim() || null
 }
 
 // 切换输入法引擎（fcitx5-remote -s <name>；作用域=该显示的 fcitx5 实例）
-export function applyImeEngine(handle: ImeRuntimeHandle, engine: string): { ok: boolean; error?: string } {
+export async function applyImeEngine(handle: ImeRuntimeHandle, engine: string): Promise<{ ok: boolean; error?: string }> {
   if (!fcitx5Installed()) return { ok: false, error: "容器未安装 fcitx5 输入法组件（镜像需包含 fcitx5 全家桶）" }
   if (!/^[\w.-]{1,64}$/.test(engine)) return { ok: false, error: `输入法名非法：${engine}` }
-  const r = runAsSandboxUser(handle, "fcitx5-remote", ["-s", engine])
+  const r = await runAsSandboxUser(handle, "fcitx5-remote", ["-s", engine])
   if (r.code !== 0) return { ok: false, error: `fcitx5-remote 切换失败（exit=${r.code}${r.stderr ? `：${r.stderr.slice(0, 120)}` : ""}）` }
   return { ok: true }
 }
 
 // 切换键盘布局（setxkbmap；作用域=该显示）
-export function applyKbLayout(handle: ImeRuntimeHandle, layout: string): { ok: boolean; error?: string } {
-  if (!setxkbmapInstalled()) return { ok: false, error: "容器未安装 setxkbmap（x11-xkb-utils）" }
+export async function applyKbLayout(handle: ImeRuntimeHandle, layout: string): Promise<{ ok: boolean; error?: string }> {
+  if (!(await setxkbmapInstalled())) return { ok: false, error: "容器未安装 setxkbmap（x11-xkb-utils）" }
   if (!/^[a-z]{2,8}$/.test(layout)) return { ok: false, error: `布局名非法：${layout}` }
-  const r = runAsSandboxUser(handle, "setxkbmap", ["-display", `:${handle.display}`, layout])
+  const r = await runAsSandboxUser(handle, "setxkbmap", ["-display", `:${handle.display}`, layout])
   if (r.code !== 0) return { ok: false, error: `setxkbmap 失败（exit=${r.code}${r.stderr ? `：${r.stderr.slice(0, 120)}` : ""}）` }
   return { ok: true }
 }
@@ -227,9 +258,9 @@ export function applyKbLayout(handle: ImeRuntimeHandle, layout: string): { ok: b
 // 优先 setxkbmap -print 解析 xkb_symbols 实际生效 include（如 pc+de+inet(evdev)）——
 // 部分 X 服务器的 _XKB_RULES_NAMES 属性更新滞后（-query 读到旧值），-print 为真实生效键位证据；
 // 回退 -query 的 layout 字段。
-export function imeCurrentKbLayout(handle: ImeRuntimeHandle): string | null {
-  if (!setxkbmapInstalled()) return null
-  const print = runAsSandboxUser(handle, "setxkbmap", ["-display", `:${handle.display}`, "-print"], 6000)
+export async function imeCurrentKbLayout(handle: ImeRuntimeHandle): Promise<string | null> {
+  if (!(await setxkbmapInstalled())) return null
+  const print = await runAsSandboxUser(handle, "setxkbmap", ["-display", `:${handle.display}`, "-print"], 6000)
   if (print.code === 0) {
     // xkb_symbols { include "pc+de+inet(evdev)" } → 取主布局段（pc 与 inet 之间）
     const m = /include\s*"pc\+([a-z-]+)\+/.exec(print.stdout)
@@ -237,7 +268,7 @@ export function imeCurrentKbLayout(handle: ImeRuntimeHandle): string | null {
     const m2 = /xkb_symbols[^}]*include\s*"([a-z-]+)/.exec(print.stdout)
     if (m2) return m2[1]
   }
-  const q = runAsSandboxUser(handle, "setxkbmap", ["-display", `:${handle.display}`, "-query"], 6000)
+  const q = await runAsSandboxUser(handle, "setxkbmap", ["-display", `:${handle.display}`, "-query"], 6000)
   if (q.code !== 0) return null
   const m = /layout:\s*(\S+)/.exec(q.stdout)
   return m ? m[1] : null

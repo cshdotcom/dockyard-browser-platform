@@ -75,7 +75,7 @@ export async function getWorkspaceImeAction(input: unknown): Promise<ActionResul
 
     const runtime = await resolveRuntime(ws)
     const fcitx = fcitx5Installed()
-    const xkb = setxkbmapInstalled()
+    const xkb = await setxkbmapInstalled()
     const engines = listImeEngines()
     const layouts = await listKbLayouts()
 
@@ -90,7 +90,7 @@ export async function getWorkspaceImeAction(input: unknown): Promise<ActionResul
       setxkbmapInstalled: xkb,
       engines,
       layouts,
-      current: runtime ? { engine: fcitx ? imeCurrentEngine(runtime) : null, kbLayout: imeCurrentKbLayout(runtime) } : { engine: null, kbLayout: null },
+      current: runtime ? { engine: fcitx ? await imeCurrentEngine(runtime) : null, kbLayout: await imeCurrentKbLayout(runtime) } : { engine: null, kbLayout: null },
       preferred: { engine: ws.imeEngine, kbLayout: ws.kbLayout },
     }
   })
@@ -120,14 +120,14 @@ export async function setWorkspaceImeAction(input: unknown): Promise<ActionResul
     if (p.engine) {
       const engines = listImeEngines()
       if (!engines.some((e) => e.name === p.engine)) throw bizError(ErrorCode.PARAM_ERROR, `未知输入法：${p.engine}`)
-      const r = applyImeEngine(runtime, p.engine)
+      const r = await applyImeEngine(runtime, p.engine)
       if (!r.ok) throw bizError(ErrorCode.EXTERNAL_SERVICE, r.error || "输入法切换失败")
       appliedEngine = p.engine
     }
     if (p.kbLayout) {
       const layouts = await listKbLayouts()
       if (!layouts.some((l) => l.name === p.kbLayout)) throw bizError(ErrorCode.PARAM_ERROR, `未知键盘布局：${p.kbLayout}`)
-      const r = applyKbLayout(runtime, p.kbLayout)
+      const r = await applyKbLayout(runtime, p.kbLayout)
       if (!r.ok) throw bizError(ErrorCode.EXTERNAL_SERVICE, r.error || "键盘布局切换失败")
       appliedKbLayout = p.kbLayout
     }
@@ -160,7 +160,7 @@ export async function setWorkspaceImeAction(input: unknown): Promise<ActionResul
       appliedEngine,
       appliedKbLayout,
       persisted,
-      current: { engine: fcitx5Installed() ? imeCurrentEngine(runtime) : null, kbLayout: imeCurrentKbLayout(runtime) },
+      current: { engine: fcitx5Installed() ? await imeCurrentEngine(runtime) : null, kbLayout: await imeCurrentKbLayout(runtime) },
     }
   })
 }

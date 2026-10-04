@@ -164,13 +164,14 @@ export function StatCard({
   value: React.ReactNode
   sub?: string
   icon?: React.ReactNode
-  tone?: "default" | "success" | "warning" | "danger"
+  tone?: "default" | "success" | "warning" | "danger" | "muted"
 }) {
   const toneClass = {
     default: "text-foreground",
     success: "text-emerald-600",
     warning: "text-amber-600",
     danger: "text-red-600",
+    muted: "text-muted-foreground",
   }[tone]
   return (
     <div className="rounded-lg border bg-card p-4">

@@ -16,7 +16,9 @@ const schema = z.object({
 
 export async function POST(req: NextRequest) {
   const traceId = crypto.randomUUID()
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "127.0.0.1"
+  // r34: real client IP (CDN edge headers → XFF multi-hop right-to-left public determination → intranet leftmost original client → X-Real-IP)
+  const { extractClientIp } = await import("@/lib/client-ip")
+  const ip = extractClientIp((name) => req.headers.get(name))
   const respond = (body: Record<string, unknown>) => NextResponse.json({ ...body, traceId })
 
   try {

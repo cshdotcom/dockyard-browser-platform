@@ -1180,3 +1180,31 @@ Work Log:
 
 Stage Summary:
 - R33 全链路收尾：代码→质量门→QA→浏览器实证→推送→CI 全绿→v1.9.0 双镜像可拉取
+
+---
+Task ID: 34
+Agent: main
+Task: r34 — 用户报障根因修复大批次（闲置回收误杀/邮箱验证码重入/软键盘点号/剪贴板真实落地/IME内部错误/真实IP识别/自研播放器/文件名溢出）+ 站内信消息记录 + 文件管理增强 + 时间轴UI + 配置搜索
+
+Work Log:
+- 【P0-1 闲置回收误杀根因】novnc_health 看门狗闲置判定恒用全局 session.novncIdleTimeoutMin（30分钟默认）→ 用户设置"永久无限"的沙箱仍被回收（用户报障"明明设置了永久无限时间还是被回收"）。修复：effectiveIdleMin = ws.idleTimeoutMinutes===0 ? 0 : (ws.idleTimeoutMinutes ?? 全局)；0=永不闲置回收
+- 【P0-2 邮箱验证码重试死循环】首次提交成功（票据签发+验证码置consumed）后客户端会话建立失败 → 二次点击报"验证码失效"。修复：幂等重入窗口（已消费但仍在有效期内+哈希命中 → 重新签发票据；按邮箱精确查找跨用户绝不共享；错误次数 5 次上限保持）
+- 【P0-3 软键盘点号缺失+Shift错乱】主层底行误用上档符号行 → 点号/逗号在主层根本不存在；Shift+基础键组合在部分服务器布局下错位。修复：主层底行改为标准 QWERTY 标点行（- [ ] ; ' , . /）；新增 SHIFT_VARIANTS 映射表 + resolveKeysym（Shift 生效直发上档字符 keysym，模拟真实键盘 key 事件形态）；数字符号层补全 PUNCT_CAPS 全行。桥侧实证：点号 keysym 直达（keys 计数）+ Shift 后键帽显示 >（上档形态）
+- 【P0-4 剪贴板真实落地】根因三层：①/api/vnc-proxy/clipboard 为"模拟投递"（文本从未写入沙箱 X 剪贴板）②RFB 扩展剪贴板对 x11vnc 类服务器发送负长度消息可能被当协议错误断连 ③无回退。修复：新建 src/lib/sandbox-clipboard.ts（内嵌沙箱同容器 xclip 写入 CLIPBOARD+PRIMARY 双选择区 / docker 形态 exec 容器内 xclip / 异步 spawn 永不阻塞）；POST/GET 路由接入真实通道；RFB 客户端 serverExtClipboard 能力门控（仅服务端 Caps 响应确认后走扩展通道，否则经典 latin1+平台通道；拉取改平台 xclip 直读）；Dockerfile +xclip
+- 【P0-5 IME内部错误】ime-control runAsSandboxUser 用 spawnSync 同步阻塞 Next.js 事件循环最长 8 秒（并发请求全部冻结+异常兜底成"服务内部错误"）。修复：全量异步化（runCmd：spawn+SIGKILL 超时+永不抛异常）；actions 调用点 await 化；smoke 脚本同步修正
+- 【P0-6 真实IP识别】各处只取 XFF 第一跳（可伪造+内网访问记成网关IP）。新建 src/lib/client-ip.ts：CDN 边缘头（CF-Connecting-IP/True-Client-IP/Fly/Fastly）→ XFF 多跳右→左跳过可信内网代理首个公网（伪造左侧免疫）→ 全段内网取最左侧（回答"是内网哪个IP"）→ X-Real-IP；isPrivateIp 全形态（RFC1918/回环/链路本地/CGNAT 100.64/IPv6 ULA fc00::/7/fe80）；接入 12 处（trace/api/auth/pre-login/email-code/register/refresh/captcha/reset-password/ip-ban链路）；实证：伪造 XFF 登录失败安全事件记录真实 5.6.7.8 而非伪造 1.1.1.1
+- 【P0-7 录像自研播放器】回放弹窗原生 <video controls>（Chrome 内核控件）。新建 CustomVideoPlayer（完全自绘：进度条拖拽 seek+缓冲可视化/播放暂停/倍速 0.5-3x/音量+静音/全屏/键盘控制 空格←→MF/品牌条 DOCKYARD PLAYER/加载错误自绘态/右键禁用）；接入用户回放弹窗
+- 【P1-8 站内信消息记录】/announcements 新增"消息记录"页签（tab=notices）：全量站内信历史含已清除（用户诉求"清除之后仍可在公告记录里看到"）；类型筛选（公告/告警/系统/安全/录像/截图/文件/令牌）+状态筛选（未读/已读/已清除）+关键词搜索+日期范围+分页；通知铃新增"消息记录"入口；3 张统计卡（总数/未读/已清除）；移动端 375px 无溢出
+- 【P1-9 文件管理修复】①文件名溢出：table-fixed+名称列 w-0 max-w-0 truncate+操作列 210px 固定（实测超长文件名截断+5 个操作按钮完整可见）②收藏夹>8 条自动折叠（+N 收藏展开/收起）+搜索（名称/路径过滤结果胶囊）③标签页搜索（标题/路径/域过滤）+多选批量关闭（保底 1 个）
+- 【P1-10 记录存储改名+截图】"我的录像"→"我的记录（录像/截图）"（导航/页面/搜索）；/recordings 集成截图统计卡+最近截图 8 宫格（点击深链 /files?focus 定位）；录像取证备注纳入 keyword 搜索（note OR 条件）
+- 【P1-11 时间轴UI落地】buildBehaviorTimeline 后端存在但无前端消费+行为事件变量名损坏行。新建 timeline-panel（工作区详情"时间轴"页签）：四类事件合并（浏览/文件/网络/系统）+时间范围下拉（1h~30天）+类型筛选徽章+关键词防抖搜索+详情弹窗（点击可查详情 —— 用户报障"点不了"）+CSV 导出；权限放宽：所有者本人可查自己沙箱（action 校验 userId）
+- 【P1-12 配置搜索+自检滚动】配置页新增全局搜索框（跨全部分类键名/描述匹配→虚拟"搜索结果"页签→点选深链跳分类+滚动高亮 2s）；自检清单改 ScrollArea（CollapsibleContent 动画容器内 max-h+overflow 滚动失效根因）
+- 【P1-13 磁盘总容量】HostNode +diskTotalMb schema；host_probe 持久化；probeHostNodeAction 真实 hostRealMetrics 采集入库；表磁盘列显示"已用 X / 总 Y"+采集 toast 带总容量
+- 【P1-14 上传进度】file-explorer 上传改 XHR（progress 事件实时进度+字节显示+可取消 abort；批量取消跳过后续）+上传任务面板（进度条/状态徽章/8 秒自动清理）
+- 【P1-15 批量下载】raw 路由 +batch-zip 模式（names JSON 数组≤100/防穿越校验/zipPaths 打包/流式回传+临时包 selfDestruct 清理——顺手修复目录 zip 无清理的 /tmp 残留膨胀）；文件管理批量操作栏新增"批量下载"按钮；实测 zip magic 504b0304 + RFC5987 双文件名
+- 【质量门】tsc 29=基线31-2（净减 2：修复 r29 入库损坏行顺手）；eslint 0 error 0 warning；next build 全绿（78 路由 44s）；QA 脚本 48/48；浏览器 E2E 15 项实证（登录/消息记录筛选/配置搜索跳转/长文件名/时间轴点击详情/通知清除+回查/软键盘点号+Shift上档/批量下载 zip/移动端 375px 双页无溢出）；QA 数据全清
+
+Stage Summary:
+- r34 交付：7 大报障根因修复（闲置回收/验证码/键盘/剪贴板/IME/IP/播放器）+ 8 项功能增强（消息记录/文件管理/记录存储/时间轴/配置搜索/磁盘容量/上传进度/批量下载）
+- 核心架构升级：剪贴板真实 X 通道（xclip）+ RFB 能力协商门控；IME 全异步化；IP 解析全形态统一库
+- 截图存档 download/qa-r34/（15 张）；测试脚本 scripts/qa-r34.ts（48 断言）

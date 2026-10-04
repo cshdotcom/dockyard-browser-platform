@@ -445,7 +445,7 @@ export const TASKS: Record<string, (log: (m: string) => void, params?: unknown) 
           where: { id: h.id },
           data: {
             cpuUsedPct: m.cpuUsedPct, memUsedMb: m.memUsedMb, diskUsedPct: m.diskUsedPct,
-            cpuCores: m.cpuCores, memTotalMb: m.memTotalMb, status: "ONLINE",
+            cpuCores: m.cpuCores, memTotalMb: m.memTotalMb, diskTotalMb: m.diskTotalMb, status: "ONLINE",
           },
         })
         log(`${h.name}: CPU ${m.cpuUsedPct}% · 内存 ${(m.memUsedMb / 1024).toFixed(1)}/${(m.memTotalMb / 1024).toFixed(1)}GB · 磁盘 ${m.diskUsedPct}%（${m.diskSource === "docker-data-root" ? `Docker存储 ${m.diskPath}` : m.diskSource === "storage-path" ? `存储目录 ${m.diskPath}` : "根文件系统"}）`)
@@ -609,10 +609,14 @@ export const TASKS: Record<string, (log: (m: string) => void, params?: unknown) 
         if (health.lastInputAt != null && health.lastInputAt > wsLast) {
           await db.browserWorkspace.update({ where: { id: ws.id }, data: { lastActiveAt: new Date(health.lastInputAt) } }).catch(() => {})
         }
+        // r34：闲置判定尊重沙箱级策略 —— idleTimeoutMinutes=0（永久无限）绝不回收；
+        // 仅当沙箱未单独配置（null）时才回退全局默认 session.novncIdleTimeoutMin。
+        // （此前恒用全局默认 → 用户设置"永久无限"的沙箱 30 分钟后仍被误回收 —— 用户报障根因）
+        const effectiveIdleMin = ws.idleTimeoutMinutes === 0 ? 0 : (ws.idleTimeoutMinutes ?? idleMin)
         // 闲置判定：真实输入信号优先，回退工作区自身活跃记录（无桥统计时不误判）
         const lastInput = health.lastInputAt ?? (ws.lastActiveAt ?? ws.updatedAt ?? ws.createdAt).getTime()
         const idleMs = Date.now() - lastInput
-        if (idleMs > idleMin * 60_000 && ws.status === "RUNNING") {
+        if (effectiveIdleMin > 0 && idleMs > effectiveIdleMin * 60_000 && ws.status === "RUNNING") {
           await destroyNovncSession(ws.novncSessionId!, ws.containerRef).catch(() => {})
           await db.browserWorkspace.update({ where: { id: ws.id }, data: { status: "DESTROYED", crashCategory: "NoVNC闲置回收" } })
           n++

@@ -24,10 +24,11 @@ import { getFileExplorerPrefsAction, saveFileExplorerPrefsAction, type ExplorerF
 import {
   Folder, File, FileText, Image as ImageIcon, Video, Music, Archive, Binary,
   ChevronLeft, ChevronRight, Trash2, RotateCcw, Search, Download, Upload, Plus, Pencil,
-  Copy, MoveRight, PackageOpen, Share2, X, Loader2, Home, HardDrive, Server, Eye, Save, ChevronUp, Clock,
+  Copy, MoveRight, PackageOpen, Share2, X, Loader2, Home, HardDrive, Server, Eye, Save, ChevronUp, ChevronDown, Clock,
   Star, MoreVertical, FolderInput,
 } from "lucide-react"
 import { toast } from "sonner"
+import { cn } from "@/lib/utils"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
@@ -163,6 +164,14 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
   const [tabs, setTabs] = useState<ExplorerTabPref[]>([{ id: "t1", domain: initialDomain, path: initialPath ? initialPath.replace(/^\/+/, "").replace(/\/+$/, "") : "" }])
   const [activeTabId, setActiveTabId] = useState("t1")
   const [favorites, setFavorites] = useState<ExplorerFavorite[]>([])
+  // r34：收藏夹折叠（>8 条）与搜索
+  const [favExpanded, setFavExpanded] = useState(false)
+  const [favSearchOpen, setFavSearchOpen] = useState(false)
+  const [favSearch, setFavSearch] = useState("")
+  // r34：标签页搜索 + 多选批量关闭
+  const [tabSearchOpen, setTabSearchOpen] = useState(false)
+  const [tabSearch, setTabSearch] = useState("")
+  const [tabSelIds, setTabSelIds] = useState<Set<string>>(new Set())
   const prefsLoadedRef = useRef(false)
   const prefsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const allowedDomains = useMemo(() => new Set(domains.map((d) => d.key)), [domains])
@@ -248,6 +257,31 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
       schedulePrefsSave({ tabs: next, activeTabId: fallback.id })
     }
   }
+  // r34：标签多选切换
+  const toggleTabSel = (tabId: string) => {
+    setTabSelIds((s) => {
+      const next = new Set(s)
+      if (next.has(tabId)) next.delete(tabId)
+      else next.add(tabId)
+      return next
+    })
+  }
+
+  // r34：批量关闭选中标签（至少保留 1 个）
+  const closeTabBatch = (ids: string[]) => {
+    if (ids.length >= tabs.length) { toast.info("至少保留一个标签页（可先新建再批量关闭）"); return }
+    const next = tabs.filter((t) => !ids.includes(t.id))
+    setTabs(next)
+    setTabSelIds(new Set())
+    if (ids.includes(activeTabId)) {
+      setActiveTabId(next[0].id)
+      setDomain(next[0].domain as Domain)
+      setCurPath(next[0].path)
+    }
+    schedulePrefsSave({ tabs: next, activeTabId: ids.includes(activeTabId) ? next[0].id : activeTabId })
+    toast.success(`已批量关闭 ${ids.length} 个标签页`)
+  }
+
   const closeOtherTabs = () => {
     const active = tabs.find((t) => t.id === activeTabId)!
     const next = [active]
@@ -448,21 +482,60 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
     } else toast.error(res.msg || "解压失败")
   }
 
+  // r34：上传进度跟踪 + 可取消（用户诉求：上传进度查看并可操作）
+  const [uploads, setUploads] = useState<Array<{ name: string; size: number; sent: number; status: "uploading" | "done" | "error" | "cancelled"; msg?: string }>>([])
+  const activeXhrRef = useRef<XMLHttpRequest | null>(null) // 当前正在上传的 XHR（可中断）
+
   const handleUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return
+    const initial = Array.from(files).map((f) => ({ name: f.name, size: f.size, sent: 0, status: "uploading" as const }))
+    setUploads(initial)
     let ok = 0
-    for (const f of Array.from(files)) {
-      const fd = new FormData()
-      fd.append("file", f)
-      fd.append("domain", domain)
-      fd.append("dir", curPath)
-      const res = await fetch("/api/files/upload-explorer", { method: "POST", body: fd }).then((r) => r.json()).catch(() => null)
-      if (res?.code === 0) ok++
-      else toast.error(`${f.name}: ${res?.msg || "上传失败"}`)
+    for (let idx = 0; idx < files.length; idx++) {
+      const f = files[idx]
+      const patch = (up: Partial<{ sent: number; status: "uploading" | "done" | "error" | "cancelled"; msg?: string }>) =>
+        setUploads((us) => us.map((u, i) => (i === idx ? { ...u, ...up } : u)))
+      // 前序已被取消的文件直接跳过（不发起请求）
+      if (uploadsRef.current?.[idx]?.status === "cancelled") continue
+      // XHR：progress 事件 + 可 abort（fetch 无进度且不可取消）
+      const result = await new Promise<{ code: number; msg?: string }>((resolve) => {
+        const fd = new FormData()
+        fd.append("file", f)
+        fd.append("domain", domain)
+        fd.append("dir", curPath)
+        const xhr = new XMLHttpRequest()
+        activeXhrRef.current = xhr
+        xhr.open("POST", "/api/files/upload-explorer")
+        xhr.upload.onprogress = (ev) => {
+          if (ev.lengthComputable) patch({ sent: ev.loaded })
+        }
+        xhr.onload = () => {
+          try { resolve(JSON.parse(xhr.responseText)) } catch { resolve({ code: 1, msg: "上传响应解析失败" }) }
+        }
+        xhr.onerror = () => resolve({ code: 1, msg: "网络错误" })
+        xhr.onabort = () => resolve({ code: 1, msg: "已取消" })
+        xhr.send(fd)
+      })
+      activeXhrRef.current = null
+      if (result.code === 0) { ok++; patch({ status: "done", sent: f.size }) }
+      else patch({ status: result.msg === "已取消" ? "cancelled" : "error", msg: result.msg })
     }
     toast.success(`上传完成 ${ok}/${files.length}`)
     setUploadArmed(false)
+    // 保留进度条 8 秒供查看后自动清理
+    setTimeout(() => setUploads([]), 8000)
     void reload()
+  }
+
+  // 上传状态只读镜像（串行批次里读取当前标记）
+  const uploadsRef = useRef<Array<{ name: string; size: number; sent: number; status: string; msg?: string }>>([])
+  useEffect(() => { uploadsRef.current = uploads }, [uploads])
+
+  const cancelUpload = (name: string) => {
+    // 中断进行中的 XHR + 标记批次中同名目标为取消（串行队列后续跳过）
+    try { activeXhrRef.current?.abort() } catch { /* noop */ }
+    setUploads((us) => us.map((u) => (u.name === name && u.status === "uploading" ? { ...u, status: "cancelled", msg: "已取消" } : u)))
+    toast.info(`已取消：${name}`)
   }
 
   useEffect(() => {
@@ -597,24 +670,32 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
       </div>
 
       {/* ====== r31：多标签页条（新建/切换/关闭/关闭其他/全部关闭；会话跨设备同步） ====== */}
+      {/* r34：新增标签搜索 + 多选批量关闭（用户诉求：标签页太多可搜索/批量操作） */}
       <div className="flex items-center gap-1 border-b pb-1.5 overflow-x-auto scrollbar-none">
         <div className="flex items-center gap-0.5 min-w-0">
-          {tabs.map((t) => (
+          {(tabSearchOpen ? tabs.filter((t) => {
+            const q = tabSearch.trim().toLowerCase()
+            if (!q) return true
+            return (tabTitle(t) || "").toLowerCase().includes(q) || (t.path || "").toLowerCase().includes(q) || domainLabel(t.domain as Domain).toLowerCase().includes(q)
+          }) : tabs).map((t) => (
             <div
               key={t.id}
               role="button"
               tabIndex={0}
-              onClick={() => switchTab(t.id)
+              onClick={() => tabSelIds.size > 0 ? toggleTabSel(t.id) : switchTab(t.id)
               }
               onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") switchTab(t.id) }}
               className={`group flex shrink-0 items-center gap-1.5 rounded-t-md border border-b-0 px-2.5 py-1.5 text-xs cursor-pointer transition-colors ${
                 t.id === activeTabId ? "bg-primary/10 border-primary/30 text-primary font-medium" : "bg-muted/40 border-border text-muted-foreground hover:bg-muted"
-              }`}
+              } ${tabSelIds.has(t.id) ? "ring-1 ring-teal-400" : ""}`}
               title={`${domainLabel(t.domain as Domain)}${t.path ? ` / ${t.path}` : ""}`}
             >
+              {tabSelIds.size > 0 && (
+                <Checkbox checked={tabSelIds.has(t.id)} onCheckedChange={() => toggleTabSel(t.id)} className="h-3 w-3" />
+              )}
               {t.domain === "ROOT_FS" ? <Server className="h-3 w-3 shrink-0" /> : t.domain === "STORAGE" ? <HardDrive className="h-3 w-3 shrink-0" /> : <Home className="h-3 w-3 shrink-0" />}
               <span className="max-w-28 truncate">{tabTitle(t)}</span>
-              {tabs.length > 1 && (
+              {tabs.length > 1 && tabSelIds.size === 0 && (
                 <button
                   type="button"
                   aria-label="关闭标签"
@@ -631,6 +712,44 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
           className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground">
           <Plus className="h-3.5 w-3.5" />
         </button>
+        {/* r34：标签搜索切换 */}
+        <button type="button" onClick={() => { setTabSearchOpen((v) => !v); if (tabSearchOpen) setTabSearch("") }}
+          title={tabSearchOpen ? "退出标签搜索" : "搜索标签页"}
+          className={`shrink-0 rounded-md p-1 ${tabSearchOpen ? "text-teal-600 bg-teal-50" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}>
+          <Search className="h-3.5 w-3.5" />
+        </button>
+        {tabSearchOpen && (
+          <input
+            value={tabSearch}
+            onChange={(e) => setTabSearch(e.target.value)}
+            placeholder="搜索标签…"
+            className="shrink-0 w-28 h-7 rounded-md border bg-background px-2 text-xs"
+          />
+        )}
+        {/* r34：多选批量关闭 */}
+        <button type="button" onClick={() => { setTabSelIds(tabSelIds.size > 0 ? new Set() : new Set()) }}
+          title={tabSelIds.size > 0 ? "退出多选" : "多选标签"}
+          className={`shrink-0 rounded-md p-1 ${tabSelIds.size > 0 ? "text-teal-600 bg-teal-50" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}>
+          <MoreVertical className="h-3.5 w-3.5" />
+        </button>
+        {tabSelIds.size > 0 && (
+          <>
+            <button
+              type="button"
+              onClick={() => closeTabBatch([...tabSelIds])}
+              className="shrink-0 rounded-md border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-600 hover:bg-red-100"
+            >
+              批量关闭（{tabSelIds.size}）
+            </button>
+            <button
+              type="button"
+              onClick={() => setTabSelIds(new Set(tabs.map((t) => t.id)))}
+              className="shrink-0 rounded-md border px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-muted"
+            >
+              全选
+            </button>
+          </>
+        )}
         <div className="ml-auto flex items-center gap-1 shrink-0">
           <button
             type="button"
@@ -656,21 +775,74 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
         </div>
       </div>
 
-      {/* ====== r31：收藏夹快捷条 ====== */}
+      {/* ====== 收藏夹快捷条（r34：>8 条自动折叠 + 展开可搜索收藏） ====== */}
       {favorites.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] text-muted-foreground shrink-0">收藏夹</span>
-          {favorites.map((f) => (
-            <span key={f.id} className="group inline-flex max-w-44 items-center gap-1 rounded-full border border-amber-200/60 bg-amber-50/60 dark:bg-amber-950/20 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-400">
-              <button type="button" onClick={() => gotoFavorite(f)} className="flex min-w-0 items-center gap-1" title={`${domainLabel(f.domain)}${f.path ? ` / ${f.path}` : ""}`}>
-                <Star className="h-3 w-3 shrink-0" />
-                <span className="truncate">{f.title || domainLabel(f.domain)}</span>
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] text-muted-foreground shrink-0">收藏夹</span>
+            {(() => {
+              // 折叠：超过 8 条默认只显示前 8（用户诉求：收藏夹太多自动折叠）
+              const shown = favExpanded ? favorites : favorites.slice(0, 8)
+              return shown.map((f) => (
+                <span key={f.id} className="group inline-flex max-w-44 items-center gap-1 rounded-full border border-amber-200/60 bg-amber-50/60 dark:bg-amber-950/20 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-400">
+                  <button type="button" onClick={() => gotoFavorite(f)} className="flex min-w-0 items-center gap-1" title={`${domainLabel(f.domain)}${f.path ? ` / ${f.path}` : ""}`}>
+                    <Star className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{f.title || domainLabel(f.domain)}</span>
+                  </button>
+                  <button type="button" aria-label="移除收藏" className="shrink-0 rounded-full p-0.5 hover:bg-amber-100" onClick={() => removeFavorite(f.id)}>
+                    <X className="h-2.5 w-2.5" />
+                  </button>
+                </span>
+              ))
+            })()}
+            {favorites.length > 8 && (
+              <button
+                type="button"
+                onClick={() => setFavExpanded((v) => !v)}
+                className="inline-flex items-center gap-1 rounded-full border border-dashed border-amber-300/60 px-2 py-0.5 text-[10px] text-amber-600 hover:bg-amber-50"
+              >
+                {favExpanded ? <><ChevronUp className="h-3 w-3" />收起</> : <>+{favorites.length - 8} 收藏 <ChevronDown className="h-3 w-3" /></>}
               </button>
-              <button type="button" aria-label="移除收藏" className="shrink-0 rounded-full p-0.5 hover:bg-amber-100" onClick={() => removeFavorite(f.id)}>
-                <X className="h-2.5 w-2.5" />
-              </button>
-            </span>
-          ))}
+            )}
+            {/* 收藏夹搜索（展开态可用；用户诉求：点击收藏夹可搜索） */}
+            <button
+              type="button"
+              onClick={() => { setFavExpanded(true); setFavSearchOpen((v) => !v) }}
+              className="inline-flex items-center gap-1 rounded-full border border-amber-200/60 px-2 py-0.5 text-[10px] text-amber-600 hover:bg-amber-50"
+              title="搜索收藏"
+            >
+              <Search className="h-3 w-3" />搜索
+            </button>
+          </div>
+          {favSearchOpen && (
+            <div className="relative max-w-xs">
+              <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" />
+              <Input
+                value={favSearch}
+                onChange={(e) => setFavSearch(e.target.value)}
+                placeholder="搜索收藏（名称/路径）…"
+                className="pl-8 h-8 text-xs"
+                autoFocus
+              />
+              {favSearch && (
+                <div className="mt-1 flex flex-wrap gap-1.5 rounded-md border bg-card p-1.5 max-h-28 overflow-y-auto">
+                  {favorites
+                    .filter((f) => !favSearch.trim() || (f.title || "").toLowerCase().includes(favSearch.toLowerCase()) || (f.path || "").toLowerCase().includes(favSearch.toLowerCase()))
+                    .slice(0, 20)
+                    .map((f) => (
+                      <button key={f.id} type="button" onClick={() => { gotoFavorite(f); setFavSearchOpen(false) }} className="inline-flex max-w-52 items-center gap-1 rounded-full border border-amber-200/60 bg-amber-50/60 px-2 py-0.5 text-xs text-amber-700 hover:bg-amber-100">
+                        <Star className="h-3 w-3 shrink-0" />
+                        <span className="truncate">{f.title || domainLabel(f.domain)}</span>
+                        <span className="text-[10px] text-amber-500/70 truncate hidden sm:inline">{f.path}</span>
+                      </button>
+                    ))}
+                  {favorites.filter((f) => !favSearch.trim() || (f.title || "").toLowerCase().includes(favSearch.toLowerCase()) || (f.path || "").toLowerCase().includes(favSearch.toLowerCase())).length === 0 && (
+                    <p className="p-2 text-xs text-muted-foreground">无匹配收藏</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -709,6 +881,18 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
       {selected.size > 0 && (
         <div className="flex flex-wrap items-center gap-2 p-2 rounded-lg bg-muted/50 border">
           <span className="text-sm font-medium">已选 {selected.size} 项</span>
+          {/* r34：批量下载（多选打包 zip —— 用户诉求：批量操作里支持批量下载） */}
+          <Button variant="outline" size="sm" className="gap-1" onClick={() => {
+            const names = JSON.stringify([...selected])
+            const url = `/api/files/raw?domain=${encodeURIComponent(domain)}&path=${encodeURIComponent(curPath)}&mode=batch-zip&names=${encodeURIComponent(names)}`
+            const a = document.createElement("a")
+            a.href = url
+            a.download = ""
+            a.click()
+            toast.success(`正在打包下载 ${selected.size} 项（zip）`)
+          }}>
+            <Download className="h-3.5 w-3.5" />批量下载
+          </Button>
           {canWrite && (
             <>
               <Button variant="outline" size="sm" className="gap-1" onClick={() => { setMoveMode("move"); setMoveOpen(true) }}><MoveRight className="h-3.5 w-3.5" />移动</Button>
@@ -771,15 +955,16 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
       {/* 文件列表 */}
       <div className="rounded-lg border bg-card">
         <div className={entries.length > 10 ? "max-h-[58vh] overflow-y-auto" : ""}>
-          <table className="w-full text-sm">
+          {/* r34：table-fixed + 名称列 max-w-0 —— 超长文件名强制截断，操作栏永不被挤出屏幕（用户报障：文件名溢出致操作栏消失） */}
+          <table className="w-full table-fixed text-sm">
             <thead className="sticky top-0 bg-muted/95 backdrop-blur z-10">
               <tr className="border-b">
                 <th className="w-10 p-2"><Checkbox checked={allChecked} onCheckedChange={toggleAll} /></th>
-                <th className="text-left p-2 font-medium">名称</th>
-                <th className="text-left p-2 font-medium w-24 hidden sm:table-cell">大小</th>
-                <th className="text-left p-2 font-medium w-36 hidden md:table-cell">修改时间</th>
-                <th className="text-left p-2 font-medium w-24 hidden lg:table-cell">类型</th>
-                <th className="text-right p-2 font-medium w-52">操作</th>
+                <th className="text-left p-2 font-medium w-auto">名称</th>
+                <th className="text-left p-2 font-medium w-20 hidden sm:table-cell">大小</th>
+                <th className="text-left p-2 font-medium w-32 hidden md:table-cell">修改时间</th>
+                <th className="text-left p-2 font-medium w-20 hidden lg:table-cell">类型</th>
+                <th className="p-2 font-medium w-[210px] text-right">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -790,9 +975,9 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
                 return (
                   <tr key={e.name} ref={isFocus ? focusRowRef : undefined} className={`border-b last:border-0 hover:bg-muted/40 ${isSel ? "bg-primary/5" : ""} ${isFocus ? "ring-2 ring-teal-400 ring-inset" : ""}`}>
                     <td className="p-2"><Checkbox checked={isSel} onCheckedChange={() => toggleOne(e.name)} /></td>
-                    <td className="p-2 max-w-0">
-                      <button className="flex items-center gap-2 text-left min-w-0 group" onClick={() => { if (e.isDir) go(path); else openPreview(e) }}>
-                        {KIND_ICON[e.kind] || <File className="h-4 w-4" />}
+                    <td className="p-2 w-0 max-w-0 truncate">
+                      <button className="flex items-center gap-2 text-left min-w-0 w-full group" onClick={() => { if (e.isDir) go(path); else openPreview(e) }}>
+                        {KIND_ICON[e.kind] || <File className="h-4 w-4 shrink-0" />}
                         <span className="truncate font-medium group-hover:underline" title={path}>{e.name}</span>
                         {isFocus && <span className="ml-1 shrink-0 rounded bg-teal-500/15 px-1.5 py-0.5 text-[10px] font-medium text-teal-700 dark:text-teal-300">定位</span>}
                       </button>
@@ -800,8 +985,8 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
                     <td className="p-2 text-xs text-muted-foreground hidden sm:table-cell">{e.isDir ? "-" : fmtBytes(e.size)}</td>
                     <td className="p-2 text-xs text-muted-foreground hidden md:table-cell">{fmtTime(e.mtime)}</td>
                     <td className="p-2 text-xs text-muted-foreground hidden lg:table-cell">{e.isDir ? "目录" : e.kind}</td>
-                    <td className="p-2">
-                      <div className="flex items-center justify-end gap-0.5">
+                    <td className="p-2 w-[210px]">
+                      <div className="flex items-center justify-end gap-0.5 flex-wrap">
                         {!e.isDir && (
                           <>
                             <Button variant="ghost" size="icon" className="h-7 w-7" title="预览" onClick={() => openPreview(e)}><Eye className="h-3.5 w-3.5" /></Button>
@@ -860,6 +1045,33 @@ export function FileExplorerPanel({ initialDomain, initialPath, domains, focusFi
 
       {/* 隐藏上传 input */}
       <input ref={uploadRef} type="file" multiple className="hidden" onChange={(e) => void handleUpload(e.target.files)} />
+
+      {/* r34：上传进度条（进度可视 + 取消操作） */}
+      {uploads.length > 0 && (
+        <div className="rounded-lg border bg-card p-3 space-y-2" data-testid="upload-progress-panel">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-medium flex items-center gap-1.5"><Upload className="h-3.5 w-3.5" />上传任务（{uploads.filter((u) => u.status === "uploading").length} 个进行中）</p>
+          </div>
+          {uploads.map((u) => {
+            const pct = u.size > 0 ? Math.min(100, Math.round((u.sent / u.size) * 100)) : 0
+            return (
+              <div key={u.name} className="flex items-center gap-2">
+                <span className="text-xs truncate flex-1 min-w-0" title={u.name}>{u.name}</span>
+                <span className={cn("text-[10px] tabular-nums shrink-0",
+                  u.status === "done" ? "text-emerald-600" : u.status === "error" ? "text-red-600" : u.status === "cancelled" ? "text-muted-foreground" : "text-muted-foreground")}>
+                  {u.status === "done" ? "完成" : u.status === "error" ? u.msg || "失败" : u.status === "cancelled" ? "已取消" : `${pct}% · ${fmtBytes(u.sent)}/${fmtBytes(u.size)}`}
+                </span>
+                {u.status === "uploading" && (
+                  <button type="button" onClick={() => cancelUpload(u.name)} className="text-[10px] text-red-500 underline shrink-0">取消</button>
+                )}
+                <div className="w-24 h-1.5 rounded-full bg-muted overflow-hidden shrink-0">
+                  <div className={cn("h-full transition-all", u.status === "done" ? "bg-emerald-500" : u.status === "error" ? "bg-red-500" : u.status === "cancelled" ? "bg-muted-foreground/30" : "bg-teal-500")} style={{ width: `${u.status === "done" ? 100 : pct}%` }} />
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
 
       {/* ====== 编辑器弹窗 ====== */}
       {editor && (

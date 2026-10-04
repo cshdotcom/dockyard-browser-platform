@@ -510,7 +510,7 @@ export async function deleteHostNodeAction(input: unknown): Promise<ActionResult
 }
 
 // 采集宿主机资源：真实模式读 NCPU/MemTotal；模拟模式更新水位（CPU 20-70、内存按比例）
-export async function probeHostNodeAction(input: unknown): Promise<ActionResult<{ id: string; simulated: boolean; cpuCores: number; memTotalMb: number; cpuUsedPct: number; memUsedMb: number; diskUsedPct: number; alert?: string }>> {
+export async function probeHostNodeAction(input: unknown): Promise<ActionResult<{ id: string; simulated: boolean; cpuCores: number; memTotalMb: number; cpuUsedPct: number; memUsedMb: number; diskUsedPct: number; diskTotalMb: number; alert?: string }>> {
   return actionHandler(async () => {
     const ctx = await requireAdmin()
     const { id } = zodValidate(z.object({ id: zId }), input)
@@ -522,6 +522,7 @@ export async function probeHostNodeAction(input: unknown): Promise<ActionResult<
     let cpuUsedPct = node.cpuUsedPct
     let memUsedMb = node.memUsedMb
     let diskUsedPct = node.diskUsedPct
+    let diskTotalMb = node.diskTotalMb || 0
 
     if (info.simulated) {
       // 模拟模式：刷新模拟水位
@@ -529,16 +530,24 @@ export async function probeHostNodeAction(input: unknown): Promise<ActionResult<
       const ratio = 0.3 + Math.random() * 0.5
       memUsedMb = round3(info.memTotalMb * ratio)
       diskUsedPct = round3(Math.min(95, Math.max(5, (node.diskUsedPct || 30) + (Math.random() * 12 - 6))))
+      if (!diskTotalMb) diskTotalMb = round3(1024 * 1024 * (0.5 + Math.random() * 1.5)) // 模拟 512GB~2TB
     } else {
-      // 真实模式：/info 的 NCPU / MemTotal 更新容量（使用率由容器 stats 汇聚，此处保持）
+      // 真实模式：/info 的 NCPU / MemTotal + hostRealMetrics 磁盘（r34：总容量一并采集入库）
       cpuUsedPct = node.cpuUsedPct
       memUsedMb = node.memUsedMb
       diskUsedPct = node.diskUsedPct
+      try {
+        const { hostRealMetrics } = await import("@/lib/external/docker")
+        const { ENV } = await import("@/lib/env")
+        const m = await hostRealMetrics({ storageFallbackPath: ENV.storageLocalPath })
+        diskUsedPct = m.diskUsedPct
+        diskTotalMb = m.diskTotalMb
+      } catch { /* 磁盘采集失败保持原值 */ }
     }
 
     const updated = await db.hostNode.update({
       where: { id },
-      data: { cpuCores: info.cpuCores, memTotalMb: info.memTotalMb, cpuUsedPct, memUsedMb, diskUsedPct },
+      data: { cpuCores: info.cpuCores, memTotalMb: info.memTotalMb, cpuUsedPct, memUsedMb, diskUsedPct, diskTotalMb },
     })
 
     // 水位告警：CPU>80% 或磁盘>85%
@@ -567,6 +576,6 @@ export async function probeHostNodeAction(input: unknown): Promise<ActionResult<
       severity: alertMsg ? "WARN" : "INFO",
       after: { simulated: info.simulated, cpuCores: updated.cpuCores, memTotalMb: updated.memTotalMb, cpuUsedPct: updated.cpuUsedPct, memUsedMb: updated.memUsedMb, diskUsedPct: updated.diskUsedPct, waterLevelAlert: alertMsg || null },
     })
-    return { id, simulated: info.simulated, cpuCores: updated.cpuCores, memTotalMb: updated.memTotalMb, cpuUsedPct: updated.cpuUsedPct, memUsedMb: updated.memUsedMb, diskUsedPct: updated.diskUsedPct, alert: alertMsg }
+    return { id, simulated: info.simulated, cpuCores: updated.cpuCores, memTotalMb: updated.memTotalMb, cpuUsedPct: updated.cpuUsedPct, memUsedMb: updated.memUsedMb, diskUsedPct: updated.diskUsedPct, diskTotalMb: updated.diskTotalMb || 0, alert: alertMsg }
   })
 }
