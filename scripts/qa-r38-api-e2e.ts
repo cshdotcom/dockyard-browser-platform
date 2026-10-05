@@ -56,24 +56,43 @@ async function main() {
       st = await (await fetch(BASE + "/api/admin/database", { headers: H, cache: "no-store" })).json()
     }
   }
+  // 【r39】会话轮换如实上报验证：GET 触发热切（active=mysql）时 sessionRotation 必须为 true
+  check("热切后如实上报 sessionRotation", st.data?.active?.provider !== "mysql" ? st.code === 0 : st.data?.sessionRotation === true, `provider=${st.data?.active?.provider} rotation=${String(st.data?.sessionRotation)} switched=${String(st.data?.switchedNow)}`)
+
+  // 【r39】POST 动作 401 自愈 helper（热切后旧库会话失效 → 重登录重试一次，模拟真实用户）
+  let cookie = H.Cookie
+  async function postAction(payload: Record<string, unknown>) {
+    let res = await fetch(BASE + "/api/admin/database", {
+      method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+    let body = await res.json()
+    if (body.code === 40100) {
+      const re = await login("admin", "Admin@2026")
+      if (re.ok) {
+        cookie = re.cookie
+        H.Cookie = cookie
+        res = await fetch(BASE + "/api/admin/database", {
+          method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        })
+        body = await res.json()
+      }
+    }
+    return body
+  }
   check("数据库状态 API", st.code === 0, `active=${st.data?.active?.provider} connectable=${st.data?.active?.connectable}`)
   check("运行库 = mysql（db-active）", st.data?.active?.provider === "mysql" && st.data?.active?.connectable === true, `${st.data?.active?.version} · ${st.data?.active?.latencyMs}ms · 用户 ${st.data?.active?.userCount}`)
   check("回滚可用（prev=sqlite 窗口内）", st.data?.rollback?.available === true && st.data?.rollback?.prevProvider === "sqlite", `窗口至 ${String(st.data?.rollback?.rollbackUntil).slice(0, 10)}`)
   check("mismatch 状态上报", typeof st.data?.mismatch?.detected === "boolean", `env=${st.data?.mismatch?.envProvider} active=${st.data?.mismatch?.activeProvider}`)
   check("迁移完成态上报", st.data?.migration?.phase === "done", `phase=${st.data?.migration?.phase} switched=${!!st.data?.migration?.switchedAt}`)
 
-  // ---- 3. POST test：探测 PG 空库 ----
-  const t1 = await (await fetch(BASE + "/api/admin/database", {
-    method: "POST", headers: H,
-    body: JSON.stringify({ action: "test", provider: "postgres", url: "postgresql://dockyard:DyPg2026pw@127.0.0.1:5433/dockyard" }),
-  })).json()
+  // ---- 3. POST test：探测 PG 空库（401 自愈链路内置）----
+  const t1 = await postAction({ action: "test", provider: "postgres", url: "postgresql://dockyard:DyPg2026pw@127.0.0.1:5433/dockyard" })
   check("test 动作（PG 探测）", t1.code === 0 && t1.data?.probe?.ok === true && t1.data?.probe?.hasSchema === false, t1.data?.probe?.version ? `${t1.data.probe.version} ${t1.data.probe.latencyMs}ms` : JSON.stringify(t1).slice(0, 100))
 
   // ---- 4. POST test：坏连接（拒绝路径）----
-  const t2 = await (await fetch(BASE + "/api/admin/database", {
-    method: "POST", headers: H,
-    body: JSON.stringify({ action: "test", provider: "mysql", url: "mysql://nobody:nope@127.0.0.1:3307/nope" }),
-  })).json()
+  const t2 = await postAction({ action: "test", provider: "mysql", url: "mysql://nobody:nope@127.0.0.1:3307/nope" })
   check("test 动作（坏凭证失败上报）", t2.code === 0 && t2.data?.probe?.ok === false, String(t2.data?.probe?.error).slice(0, 60))
 
   // ---- 5. 未登录门禁 ----
@@ -81,9 +100,7 @@ async function main() {
   check("未登录 401 门禁", noAuth.code === 40100, `code=${noAuth.code}`)
 
   // ---- 6. rollback：一键回滚到 sqlite ----
-  const rb = await (await fetch(BASE + "/api/admin/database", {
-    method: "POST", headers: H, body: JSON.stringify({ action: "rollback" }),
-  })).json()
+  const rb = await postAction({ action: "rollback" })
   check("rollback 动作（mysql → sqlite 热切换）", rb.code === 0 && rb.data?.provider === "sqlite", rb.msg || JSON.stringify(rb).slice(0, 100))
 
   // ---- 7. 回滚后：会话随库切换失效（正确语义 —— 会话存于库中）→ 重登录验证 ----

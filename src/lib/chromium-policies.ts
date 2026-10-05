@@ -1,7 +1,9 @@
 // ============================================================
-// Chromium 企业策略目录（r27-d）
-// 1. 策略目录 CHROMIUM_POLICY_CATALOG：36 项 Linux/Chromium 实际支持的企业
+// Chromium 企业策略目录（r27-d 初建 / r39 颗粒度大补强）
+// 1. 策略目录 CHROMIUM_POLICY_CATALOG：89 项 Linux/Chromium 实际支持的企业
 //    托管策略（Managed Preferences JSON 注入），供模板编辑器选择 + 校验。
+//    r39 新增 6 大 URL 级内容颗粒度分类（JS/Cookie/弹窗/通知/位置/打印/
+//    剪贴板/混合内容/站点隔离）—— 企业最小权限浏览，精确到站点模式。
 // 2. validateExtraPolicies：模板 policyJson 入库/编辑前校验（键存在性 + 值类型），
 //    未知键/类型不符直接拒绝 —— 杜绝拼错键名导致策略静默失效。
 // 3. exitGuardManagedPolicy：防退出档位附加策略（封堵账号/无痕/访客等逃逸路径）。
@@ -30,6 +32,7 @@ export const CHROMIUM_POLICY_CATALOG: ChromiumPolicyItem[] = [
   { key: "SafeBrowsingExtendedReportingEnabled", name: "安全浏览扩展报告", category: "隐私与遥测", description: "false=不向 Google 回传可疑页面细节", valueType: "boolean" },
   { key: "SearchSuggestEnabled", name: "搜索建议", category: "隐私与遥测", description: "false=地址栏输入不外发搜索建议请求", valueType: "boolean" },
   { key: "SpellCheckServiceEnabled", name: "拼写检查服务", category: "隐私与遥测", description: "false=禁用联网拼写检查（输入内容不外发）", valueType: "boolean" },
+  { key: "PasswordLeakDetectionEnabled", name: "密码泄漏检测", category: "隐私与遥测", description: "false=关闭密码泄漏检测（输入凭据不回传 Google 对照泄露库；沙箱凭据隔离场景建议关闭）", valueType: "boolean", example: "false" },
   { key: "UrlKeyedAnonymizedDataCollectionEnabled", name: "匿名化数据采集", category: "隐私与遥测", description: "false=关闭 URL 键控匿名数据采集", valueType: "boolean" },
   // —— 账户与同步 ——
   { key: "BrowserSignin", name: "浏览器登录", category: "账户与同步", description: "0=禁用登录入口（沙箱内不允许登录个人 Google 账号）", valueType: "enum", options: [{ value: 0, label: "禁用" }, { value: 1, label: "允许" }, { value: 2, label: "强制" }] },
@@ -88,6 +91,41 @@ export const CHROMIUM_POLICY_CATALOG: ChromiumPolicyItem[] = [
   { key: "SSLVersionMin", name: "TLS 最低版本", category: "媒体捕获与安全", description: "tls1=1.0（不推荐）/ tls1.1 / tls1.2 —— 企业 TLS 地板（防降级攻击）", valueType: "string", example: "tls1.2", securityNote: true },
   { key: "AutoSelectCertificateForUrls", name: "自动选择客户端证书站点", category: "媒体捕获与安全", description: "匹配的站点免弹窗自动选择客户端证书（列表项须为 URL 模式）", valueType: "list", example: "[\"https://cert.example.com/*\"]", securityNote: true },
   { key: "FileSystemWriteBlockedForUrls", name: "文件系统写入封禁站点", category: "媒体捕获与安全", description: "封禁 File System Access API 写入的站点（数据落地面收敛）", valueType: "list", example: "[\"https://untrusted.example.com\"]", securityNote: true },
+  { key: "SitePerProcess", name: "站点进程隔离", category: "媒体捕获与安全", description: "true=每站点独立渲染进程（强化隔离，防跨站侧信道与渲染层逃逸，内存开销略增）", valueType: "boolean", example: "true", securityNote: true },
+
+  // —— 内容颗粒度（脚本）【r39：URL 级 JS 管控 —— 企业最小权限浏览】 ——
+  { key: "DefaultJavaScriptSetting", name: "JavaScript 默认策略", category: "内容颗粒度（脚本）", description: "1=全站允许 / 2=全站禁用（再以 URL 白名单放行 —— 最小权限）", valueType: "enum", options: [{ value: 1, label: "允许" }, { value: 2, label: "阻止" }] },
+  { key: "JavaScriptAllowedForUrls", name: "JS 白名单站点", category: "内容颗粒度（脚本）", description: "允许执行 JS 的站点模式（[*.]host 或 URL 模式 https://example.com/*）", valueType: "list", example: "[\"[*.]intra.example.com\"]" },
+  { key: "JavaScriptBlockedForUrls", name: "JS 黑名单站点", category: "内容颗粒度（脚本）", description: "禁止执行 JS 的站点模式（优先于白名单）", valueType: "list", example: "[\"https://evil.example.com/*\"]" },
+
+  // —— 内容颗粒度（Cookie）【r39：URL 级 Cookie 管控 —— 防持久化追踪】 ——
+  { key: "DefaultCookiesSetting", name: "Cookie 默认策略", category: "内容颗粒度（Cookie）", description: "1=允许 / 2=阻止（再以 URL 白名单放行）", valueType: "enum", options: [{ value: 1, label: "允许" }, { value: 2, label: "阻止" }] },
+  { key: "CookiesAllowedForUrls", name: "Cookie 白名单站点", category: "内容颗粒度（Cookie）", description: "允许写入 Cookie 的站点模式", valueType: "list", example: "[\"[*.]sso.example.com\"]" },
+  { key: "CookiesBlockedForUrls", name: "Cookie 黑名单站点", category: "内容颗粒度（Cookie）", description: "禁止 Cookie 的站点模式（优先于白名单）", valueType: "list", example: "[\"https://tracker.example.com/*\"]" },
+  { key: "CookiesSessionOnlyForUrls", name: "会话 Cookie 站点", category: "内容颗粒度（Cookie）", description: "匹配站点 Cookie 仅存会话期（关闭浏览器即焚 —— 平衡可用与防追踪）", valueType: "list", example: "[\"[*.]example.com\"]" },
+
+  // —— 内容颗粒度（媒体体验）【r39：图像/弹窗/自动播放管控】 ——
+  { key: "ImagesBlockedForUrls", name: "图像封禁站点", category: "内容颗粒度（媒体体验）", description: "禁止加载图像的站点模式（带宽收敛/强制纯文本场景）", valueType: "list", example: "[\"https://heavy.example.com/*\"]" },
+  { key: "DefaultPopupsSetting", name: "弹窗默认策略", category: "内容颗粒度（媒体体验）", description: "1=允许 / 2=阻止（默认建议阻止）", valueType: "enum", options: [{ value: 1, label: "允许" }, { value: 2, label: "阻止" }] },
+  { key: "PopupsAllowedForUrls", name: "弹窗白名单站点", category: "内容颗粒度（媒体体验）", description: "允许弹窗的站点模式（企业 SSO/办公门户常见需要）", valueType: "list", example: "[\"https://portal.example.com/*\"]" },
+  { key: "PopupsBlockedForUrls", name: "弹窗黑名单站点", category: "内容颗粒度（媒体体验）", description: "禁止弹窗的站点模式", valueType: "list", example: "[\"https://ads.example.com/*\"]" },
+  { key: "AutoplayAllowed", name: "自动播放总闸", category: "内容颗粒度（媒体体验）", description: "false=禁止页面媒体自动播放（噪音/带宽管控；用户手动点击仍可播）", valueType: "boolean", example: "false" },
+
+  // —— 内容颗粒度（通知与位置）【r39：防骚扰 + 位置泄漏颗粒度】 ——
+  { key: "DefaultNotificationsSetting", name: "通知默认策略", category: "内容颗粒度（通知与位置）", description: "1=允许 / 2=阻止 / 3=每次询问（默认建议 2 阻止）", valueType: "enum", options: [{ value: 1, label: "允许" }, { value: 2, label: "阻止" }, { value: 3, label: "询问" }] },
+  { key: "NotificationsAllowedForUrls", name: "通知白名单站点", category: "内容颗粒度（通知与位置）", description: "允许 Web 通知的站点模式（内部告警/IM 门户）", valueType: "list", example: "[\"https://im.example.com/*\"]" },
+  { key: "NotificationsBlockedForUrls", name: "通知黑名单站点", category: "内容颗粒度（通知与位置）", description: "禁止 Web 通知的站点模式", valueType: "list", example: "[\"https://news.example.com/*\"]" },
+  { key: "DefaultGeolocationSetting", name: "地理位置默认策略", category: "内容颗粒度（通知与位置）", description: "1=允许 / 2=阻止 / 3=每次询问（防位置泄漏建议 2）", valueType: "enum", options: [{ value: 1, label: "允许" }, { value: 2, label: "阻止" }, { value: 3, label: "询问" }] },
+  { key: "GeolocationAllowedForUrls", name: "地理位置白名单站点", category: "内容颗粒度（通知与位置）", description: "允许地理定位的站点模式（地图类业务放行）", valueType: "list", example: "[\"https://maps.example.com/*\"]" },
+
+  // —— 内容颗粒度（打印）【r39：URL 级打印管控 —— 与远程打印/审计联动】 ——
+  { key: "PrintingAllowedForUrls", name: "打印白名单站点", category: "内容颗粒度（打印）", description: "允许打印的站点模式（未匹配则受 PrintingEnabled 总闸控制）", valueType: "list", example: "[\"https://docs.example.com/*\"]" },
+  { key: "PrintingBlockedForUrls", name: "打印黑名单站点", category: "内容颗粒度（打印）", description: "禁止打印的站点模式（敏感系统防纸质泄漏，优先于白名单）", valueType: "list", example: "[\"https://hr-payroll.example.com/*\"]" },
+
+  // —— 内容颗粒度（剪贴板与混合内容）【r39：数据外发与降级内容收敛】 ——
+  { key: "ClipboardAllowedForUrls", name: "剪贴板读取白名单", category: "内容颗粒度（剪贴板与混合内容）", description: "允许通过剪贴板 API 读取的站点模式（默认全拒 —— 密码/内容防读出）", valueType: "list", example: "[\"https://paste.example.com/*\"]", securityNote: true },
+  { key: "DefaultInsecureContentSetting", name: "混合内容默认策略", category: "内容颗粒度（剪贴板与混合内容）", description: "2=阻止 / 3=允许（HTTPS 页内加载 HTTP 资源 —— 建议阻止防中间人注入）", valueType: "enum", options: [{ value: 2, label: "阻止" }, { value: 3, label: "允许" }] },
+  { key: "InsecureContentAllowedForUrls", name: "混合内容白名单站点", category: "内容颗粒度（剪贴板与混合内容）", description: "允许加载混合内容的站点模式（遗留内网系统兼容）", valueType: "list", example: "[\"https://legacy.example.com/*\"]" },
 ]
 
 export const CHROMIUM_POLICY_CATEGORIES = [...new Set(CHROMIUM_POLICY_CATALOG.map((p) => p.category))]
@@ -120,8 +158,13 @@ export function validateExtraPolicies(json: Record<string, unknown>): { ok: bool
     if (item.valueType === "number" && (item.options?.length ? t !== "number" : t !== "number")) errors.push(`${key} 需要 number 值`)
     if (item.valueType === "string" && t !== "string") errors.push(`${key} 需要 string 值`)
     if (item.valueType === "list" && !Array.isArray(value)) errors.push(`${key} 需要 array 值`)
-    if (item.valueType === "enum" && item.options && t === "number" && !item.options.some((o) => o.value === value)) {
-      errors.push(`${key} 的值 ${value} 不在允许选项内（${item.options.map((o) => o.value).join("/")}）`)
+    // r39：enum 严格数字类型（此前 string 值如 "2" 落空未拒 → 注入后策略静默失效）
+    if (item.valueType === "enum") {
+      if (t !== "number" && item.options) {
+        errors.push(`${key} 需要 number 值（枚举）`)
+      } else if (item.options && t === "number" && !item.options.some((o) => o.value === value)) {
+        errors.push(`${key} 的值 ${value} 不在允许选项内（${item.options.map((o) => o.value).join("/")}）`)
+      }
     }
   }
   return { ok: errors.length === 0, errors }

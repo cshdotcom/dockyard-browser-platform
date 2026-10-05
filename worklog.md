@@ -1345,3 +1345,33 @@ Stage Summary:
 - r38 交付：MySQL 第三引擎（类型映射根治 + 自动初始化 + 真实实例 14/14）+ 数据库 GUI 双通道全生命周期（向导绑定/env 自动/二次初始化迁移 2 秒 81 表/一键回滚源库零损）+ PG schema 过期修复 + 硬件申请审批流（UI 闭环实证）+ 打印内网穿透 8/8 + 企业策略 8 项 + QA 3h+ 编排
 - 关键架构：Proxy 热切换（全站零重启切库）/ db-active.json 配置链 / pin 锚定防空库切换 / createRequire 绕过打包器 / CONFIG_DEFAULTs 零依赖抽层
 - 测试证据：A 1-6 全绿（16+14+12+10+16+8）+ B 13/13 + soak 170min + 浏览器 8 截图（download/qa-r38/）
+---
+Task ID: r39
+Agent: main
+Task: r39 验收批次 —— 用户点名：全功能零错误验收 + 远程硬件静默/申请完整（管理员可监控）+ 企业管理颗粒度精化 + MySQL/PG 完整性复验 + 3 小时全功能 QA（无一遗漏）+ 打新 tag
+
+Work Log:
+- 【P0 基线复验】r38 全套件回归：db-proxy 16/16 · hardware 12/12 · migrate 10/10 · print-intranet 8/8 · 三库矩阵 13/13 · mysql-crud 14/14（env 连接串按编排器形态注入）；CDP 网关 :3006 旧进程未随 r37+ 代码更新 → 重启后 r36 67/67、r37 61/61
+- 【热切换竞态根因修复】/api/admin/database GET 对账 rebuildDbClient() 后 activeInfo 未刷新 → 响应报旧库（active=sqlite、switched=false）但库已切走 mysql → 前端误判 + 会话跨库 401 无从解释；修复：rebuild 后立即刷新 activeInfo（probe/mismatch/响应全用切换后真实运行库）+ state.switchedAt 内存对象同步（本响应如实上报 switched=true）+ sessionRotation 标志（前端 /admin/database 收到后 toast 引导重新登录，1.5s 跳转 /login?next=）；api-e2e 升级 POST 401 自动重登录重试（模拟真实用户自愈）；16→17 断言全绿
+- 【网关防爆破误伤根治】r36 负向安全用例（12 次故意失败）触发 IP 封禁 127.0.0.1（600s）→ r37 后续正向 ECHO 建连全部被拒（3 失败根因）；网关新增受密钥保护 POST /unban 端点（生产等价 fail2ban unbanip：单 IP 或全清 + 失败计数同步清零 + 坏密钥 403）；r36 加解封链路 3 用例（坏密钥拒绝/正确解封/解封后票据恢复）→ 70 断言；r37 E 段前防御性预解封（幂等）→ 62 断言
+- 【企业管理颗粒度大补强】策略目录 55→78 键（+24）：6 大 URL 级内容颗粒度分类 —— 脚本（DefaultJavaScriptSetting/JS 黑白名单）、Cookie（默认/黑白/会话即焚）、媒体体验（图像/弹窗/自动播放）、通知与位置（通知黑白/地理默认与白名单）、打印（URL 级黑白名单 —— 与远程打印审计联动）、剪贴板与混合内容（ClipboardAllowed 白名单/InsecureContent）+ SitePerProcess 站点隔离 + PasswordLeakDetectionEnabled 凭据不回传；15 个 ForUrls 键全部带 URL 模式示例（[*.]host / scheme://host/* 语法）—— 企业最小权限浏览精确到站点模式
+- 【enum 严格校验漏洞修复】validateExtraPolicies 对 enum 传 string（如 "2"）落空未拒 → 注入后策略静默失效；修复：enum 必须 number + 选项白名单（3 类越界实测拒绝）
+- 【PG 迁移链路 8/8 新脚本】qa-r39-pg-migrate.ts：psql 多 -c 逐条建库（DROP DATABASE 不能在事务块 —— psql -c 单事务限制根因）→ sqlite→PG 82 表 2 秒全量 → 逐表计数对账 → 中文无损 + SystemConfig 180 → 审计不可篡改触发器自动应用（3 触发器）→ 主线 sqlite 零影响
+- 【模板编辑器 UI 修复】"36 项目录校验"硬编码文案 → 动态派生（78 项/14 分类/URL 颗粒度提示）；浏览器实测：含 5 个新键的模板 UI→action→校验→入库全链成功
+- 【dev OOM 韧性】next-server RSS 2GB 触发容器 global OOM（dmesg 实证 3 次：06:41/06:43/09:33）→ dev-guard 自动重启全部自愈（soak 记录失败窗口 20 行后 175 分钟零新增）；内存上限 1536→1024MB 调优后终验迷你 soak 零失败
+- 【3 小时全功能 QA（无一遗漏）】qa-r39-full.ts 编排（176 分钟）+ B 补录 + 终验（206 分钟墙钟）：
+  A 核心引擎 85 断言（db-proxy 16/mysql-crud 14/hardware 12/migrate 10/api-e2e 17/print 8/pg-migrate 8）
+  B Web 功能回归 132 断言（r36 70 —— 网关安全/声音/备份/worknode/解封链路；r37 62 —— 票据地址/访客/分类/打印/组筛选/预解封）
+  C 三库矩阵 13（sqlite/mysql/pg 连接写入读出更新删除 Json 往返）
+  D 企业策略 18（目录/校验/注入/落盘/防退出档位）
+  E soak 175 分钟持续负载（登录/会话/探测轮询 + 401 自愈 + guard 守护）
+  F 终验 6（迷你 soak 10min 零失败 + 修复点定向复验 65 断言）
+  最终 report.json 13/13 套件 allOk=true · 总墙钟 206 分钟
+- 【浏览器可视化验证】/admin/hardware 硬件透传监控（双模式+审批队列+活跃授权+17 项分布）· /admin/database（三库状态卡+迁移完成态+回滚窗口）· 模板策略编辑器 78 项动态文案 —— 截图存档 download/qa-r39/
+- 【质量门】tsc src 基线 23 零新增；eslint 0/0；next build 47s 86 页全绿 standalone
+
+Stage Summary:
+- r39 交付：热切换竞态根因修复（响应如实+会话轮换引导）+ 网关 unban 端点（防爆破误伤根治，r36/r37 全绿闭环）+ 企业策略 78 键/14 分类（24 项 URL 级颗粒度）+ enum 严格校验 + PG 迁移链路 8/8 + 模板 UI 动态化 + dev OOM 调优
+- 测试证据：3 小时全功能 QA 13/13 套件（A85+B132+C13+D18+F71 ≈ 319 断言 + 175min soak）+ 4 张浏览器截图
+- 已确认完整：MySQL 三库引擎/start.sh 三形态对称（env 预置管理员 ADMIN_USERNAME/PASSWORD 链路 + SEED_SKIP_ADMIN 向导门 + 二次初始化安全门）/远程硬件静默申请双模式+管理员监控/打印内网穿透
+- 发布：tag v1.14.0

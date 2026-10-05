@@ -27,7 +27,9 @@ import { validateExtraPolicies, CHROMIUM_POLICY_CATALOG } from "@/lib/chromium-p
 import { cn } from "@/lib/utils"
 
 // 目录键提示（按分类压缩展示）
-const POLICY_KEY_HINT = [...new Set(CHROMIUM_POLICY_CATALOG.map((p) => p.key))].slice(0, 12).join(" / ") + " 等36项"
+const POLICY_CATALOG_COUNT = CHROMIUM_POLICY_CATALOG.length
+const POLICY_CATEGORY_COUNT = new Set(CHROMIUM_POLICY_CATALOG.map((p) => p.category)).size
+const POLICY_KEY_HINT = [...new Set(CHROMIUM_POLICY_CATALOG.map((p) => p.key))].slice(0, 12).join(" / ") + ` 等${POLICY_CATALOG_COUNT}项（${POLICY_CATEGORY_COUNT} 分类，含 URL 级内容颗粒度键）`
 
 export interface TemplateConfig {
   ua: string
@@ -572,7 +574,7 @@ export function TemplatesTable({ rows, total, page, pageSize, keyword, sortField
 
               {/* ---- r27-d：Chromium 企业策略项 ---- */}
               <div className="space-y-1.5">
-                <Label htmlFor="tpl-policies">Chromium 企业策略项（JSON，36 项目录校验）</Label>
+                <Label htmlFor="tpl-policies">{`Chromium 企业策略项（JSON，${POLICY_CATALOG_COUNT} 项目录校验）`}</Label>
                 <Textarea
                   id="tpl-policies"
                   value={fPolicies}

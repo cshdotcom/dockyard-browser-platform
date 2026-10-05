@@ -209,6 +209,15 @@ async function main() {
     })
     const bannedResp = await fetch(`${GW_HTTP}/health`) // health 不受封禁影响（探测端点）
     ok("网关健康探测不受封禁影响（守护可用）", bannedResp.ok)
+    // r39：受密钥保护的解封端点（生产 unbanip 等价物）—— 负向用例后自解封，防后续套件被防爆破误伤
+    const unbanBad = await fetch(`${GW_HTTP}/unban`, { method: "POST", headers: { "Content-Type": "application/json", "X-Gateway-Secret": "wrong-secret" }, body: "{}" }).then((r) => r.status).catch(() => 0)
+    ok("解封端点坏密钥拒绝（403）", unbanBad === 403, `status=${unbanBad}`)
+    const unbanOk = await fetch(`${GW_HTTP}/unban`, { method: "POST", headers: { "Content-Type": "application/json", "X-Gateway-Secret": SECRET }, body: JSON.stringify({ ip: "127.0.0.1" }) }).then((r) => r.json().catch(() => null)).catch(() => null)
+    ok("解封端点正确密钥解封本机 IP", !!unbanOk?.ok, JSON.stringify(unbanOk))
+    // 解封后合法票据恢复可用（封禁不再误伤）
+    const afterUnban = signTicket({ v: "qa-unbanned", u: "u", tgt: "ws://127.0.0.1:9333/x", exp: Math.floor(Date.now() / 1000) + 60, dur: 0, n: randomBytes(8).toString("hex") })
+    const pAfter = await wsProbe(`${GW}/t/${afterUnban}`)
+    ok("解封后票据握手恢复（不再被防爆破误伤）", pAfter.code !== 429, JSON.stringify(pAfter).slice(0, 60))
 
     // C8. 时长上限（dur=1s）
     // （本机 IP 可能已被封禁 → 等待封禁过期不现实；改为单元级验证：dur 字段语义已由 smoke-r28 覆盖）

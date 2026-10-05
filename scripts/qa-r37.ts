@@ -271,6 +271,15 @@ async function main() {
     ok("恢复 RUNNING → 200", r.status === 200)
   }
 
+  // r39 预解封：本套件与 r36 套件的负向安全用例（伪造/过期/吊销票据）会计入网关防爆破窗口，
+  // 连续失败会封禁本机 IP 误伤后续正向 ECHO 用例 → 建连前防御性解封（幂等；生产等价 unbanip）
+  try {
+    const ub = await fetch("http://localhost:3006/unban", { method: "POST", headers: { "Content-Type": "application/json", "X-Gateway-Secret": SECRET }, body: JSON.stringify({ ip: "127.0.0.1" }) }).then((r) => r.json().catch(() => null))
+    ok("网关解封端点可达（防爆破误伤自愈）", !!ub?.ok, JSON.stringify(ub))
+  } catch (e) {
+    ok("网关解封端点可达（防爆破误伤自愈）", false, String(e))
+  }
+
   // ================= [E] 网关 /p/<tid> 实链路（:3006 实测） =================
   console.log("[E] 网关持久票据实链路")
   {

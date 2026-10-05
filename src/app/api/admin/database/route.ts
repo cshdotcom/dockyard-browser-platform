@@ -79,19 +79,22 @@ export async function GET() {
   try {
     const activeCfg = await readDbActive()
     const eff = effectiveDatabaseConfig()
-    const activeInfo = getActiveDbInfo()
+    let activeInfo = getActiveDbInfo() // let：对账热切换后需刷新（否则响应/探测报旧库 —— r39 修复）
     const envProvider = databaseProvider()
     const envUrl = process.env.DATABASE_URL || ""
     const state = readMigrationState()
     const job = readMigrationJob()
 
     // ---- 完成对账：迁移 done 且运行库未切换 → 热切换（幂等；切换痕迹 switchedAt 落盘）----
+    // 【r39 修复】rebuild 后立即刷新 activeInfo（响应/probe/ mismatch 必须反映切换后的真实运行库）
+    //            原缺陷：响应报旧库（active=sqlite、switched=false）但库已切走 → 前端误判 + 会话跨库失效无从解释
     let switchedNow = false
     if (state && state.phase === "done" && activeCfg) {
       const same = activeInfo.provider === activeCfg.provider && activeInfo.url === activeCfg.url
       if (!same || !state.switchedAt) {
         if (!same) {
           await rebuildDbClient()
+          activeInfo = getActiveDbInfo() // ★ 刷新：以切换后的运行库为准
         }
         // 记录切换时间（幂等 —— 重复 GET 只补写字段，不重复 rebuild；tmp+rename 原子写防并发读半文件）
         if (!state.switchedAt) {
@@ -101,6 +104,7 @@ export async function GET() {
             const tmpS = STATE_FILE() + ".tmp"
             writeFileSync(tmpS, JSON.stringify(st, null, 2))
             renameSync(tmpS, STATE_FILE())
+            state.switchedAt = st.switchedAt // ★ 同步内存对象：本响应如实上报 switched=true
           } catch {
             /* 状态补写失败无碍 */
           }
@@ -172,6 +176,8 @@ export async function GET() {
           : null,
         rollback,
         switchedNow,
+        // 【r39】刚发生热切换时会话存于旧库（跨库失效为正确语义）→ 前端引导重新登录
+        sessionRotation: switchedNow,
       },
     })
   } catch (e) {

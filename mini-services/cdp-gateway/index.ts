@@ -215,6 +215,34 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     res.end(JSON.stringify({ ok: true, service: "cdp-gateway", ...stats, failWindowSec: Math.round(FAIL_WINDOW_MS / 1000), failThreshold: FAIL_THRESHOLD, banSec: Math.round(BAN_MS / 1000), bind: BIND, uptimeSec: Math.floor((Date.now() - stats.started) / 1000) }))
     return
   }
+  // r39：受密钥保护的解封端点（生产等价 fail2ban unbanip —— 管理员远程解封误封 IP；
+  //       QA 负向用例（伪造票据/过期/吊销等）后自解封，避免后续正向用例被防爆破误伤）
+  if (req.method === "POST" && req.url === "/unban") {
+    const auth = String(req.headers["x-gateway-secret"] || "")
+    if (!SECRET || auth !== SECRET) {
+      res.writeHead(403).end(JSON.stringify({ ok: false, error: "bad secret" }))
+      return
+    }
+    let body = ""
+    req.on("data", (c) => { body += c })
+    req.on("end", () => {
+      let ip = ""
+      try { ip = String((JSON.parse(body) || {}).ip || "") } catch { ip = "" }
+      let unbanned = 0
+      if (ip) {
+        if (bannedIp.delete(ip)) unbanned++
+        if (failByIp.delete(ip)) unbanned++
+      } else {
+        unbanned = bannedIp.size + failByIp.size
+        bannedIp.clear()
+        failByIp.clear()
+      }
+      console.log(`[cdp-gateway] 解封 ${ip || "全部 IP"}（清除 ${unbanned} 条记录）`)
+      res.writeHead(200, { "Content-Type": "application/json" })
+      res.end(JSON.stringify({ ok: true, unbanned, ip: ip || "*" }))
+    })
+    return
+  }
   res.writeHead(404).end("not found")
 })
 

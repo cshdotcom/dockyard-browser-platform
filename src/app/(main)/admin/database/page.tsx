@@ -35,6 +35,7 @@ interface DbStatus {
   } | null
   rollback: { available: boolean; prevProvider: string | null; prevUrlMasked: string; rollbackUntil: string | null; migratedAt: string | null; warning: string }
   switchedNow: boolean
+  sessionRotation?: boolean
 }
 
 export default function AdminDatabasePage() {
@@ -63,10 +64,16 @@ export default function AdminDatabasePage() {
       if (body.code === 0) {
         setStatus(body.data as DbStatus)
         setError("")
-        // 迁移完成热切换后提示刷新
+        // 迁移完成热切换后提示刷新（r39：会话存于旧库，跨库失效为正确语义 → 引导重新登录）
+        const rotated = (body.data as DbStatus).sessionRotation
         if ((body.data as DbStatus).switchedNow) {
-          setToast("数据库已热切换到新库 ✓（页面数据即将刷新）")
-          setTimeout(() => router.refresh(), 1200)
+          setToast(rotated
+            ? "数据库已热切换到新库 ✓（会话已随库切换失效，即将引导重新登录）"
+            : "数据库已热切换到新库 ✓（页面数据即将刷新）")
+          setTimeout(() => {
+            if (rotated) router.push("/login?next=/admin/database")
+            else router.refresh()
+          }, rotated ? 1500 : 1200)
         }
       } else {
         setError(body.msg || "状态查询失败")
