@@ -200,7 +200,7 @@ export function PlaygroundConsole({ enabled, workspaces }: { enabled: boolean; w
             </div>
           )}
           {result?.kind === "image" && (
-            // eslint-disable-next-line @next/next/no-img-element
+             
             <img src={`data:image/png;base64,${result.b64}`} alt="页面截图" className="max-w-full rounded-md border" />
           )}
           {result?.kind === "pdf" && (

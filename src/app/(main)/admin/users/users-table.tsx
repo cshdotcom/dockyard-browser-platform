@@ -1325,7 +1325,7 @@ function GroupUserFilter({
       setDraft(selected)
       setSearch("")
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [open])
 
   const kw = search.trim().toLowerCase()

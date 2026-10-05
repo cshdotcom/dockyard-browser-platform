@@ -1586,7 +1586,7 @@ function GroupFilterPopover({
       setDraft((filters.groups || "").split(",").map((s) => s.trim()).filter(Boolean))
       setSearch("")
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [open])
 
   const kw = search.trim().toLowerCase()
