@@ -1,5 +1,6 @@
-// [r14] 本文件由 scripts/db/sync-postgres-schema.ts 从 schema.prisma 自动派生 —— 请勿手工编辑模型
-// （模型变更请改 schema.prisma 后重新执行同步脚本；本文件仅 datasource provider 不同）
+// [r38] 本文件由 scripts/db/sync-mysql-schema.ts 从 schema.prisma 自动派生 —— 请勿手工编辑模型
+// （模型变更请改 schema.prisma 后重新执行同步脚本；本文件仅 datasource provider 与 @db 类型标注不同）
+// MySQL 兼容性：所有 String 字段注入 @db.VarChar(n)/@db.Text（Prisma MySQL 默认 VARCHAR(191) 会截断长内容）
 // Dockyard — 企业级远程浏览器工作平台
 // 完整数据模型：认证安全 / 组织权限 / 审计 / Token / 系统 / 定时任务 / 文件 / 备份 / 告警
 // 浏览器工作区 / 模板 / 快照 / 脚本 / 规则 / 浏览器节点 / 代理 / 宿主机 / SingBox / MCP / 回收站 / 风控
@@ -9,12 +10,12 @@
 generator client {
   provider = "prisma-client-js"
 
-  // [22-d] 独立产物目录：node_modules/@prisma/client-postgres（与 sqlite 默认 client 并存）
-  output   = "../node_modules/@prisma/client-postgres"
+  // [r38] 独立产物目录：node_modules/@prisma/client-mysql（与 sqlite/postgres client 并存）
+  output   = "../node_modules/@prisma/client-mysql"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "mysql"
   url      = env("DATABASE_URL")
 }
 
@@ -23,27 +24,27 @@ datasource db {
 // ============================================================
 
 model User {
-  id                  String    @id @default(cuid())
-  username            String    @unique
-  email               String?   @unique
-  displayName         String?
-  avatarPath          String?   // 用户头像存储相对路径（独立空间：storage/avatars/<userId>/avatar.webp）
+  id                  String    @id @default(cuid()) @db.VarChar(64)
+  username            String    @unique @db.VarChar(255)
+  email               String?   @unique @db.VarChar(320)
+  displayName         String? @db.VarChar(255)
+  avatarPath          String? @db.VarChar(700) // 用户头像存储相对路径（独立空间：storage/avatars/<userId>/avatar.webp）
   avatarUpdatedAt     DateTime? // 头像更新时间（ETag/缓存失效用）
-  passwordHash        String?
-  role                String    @default("USER") // SUPER_ADMIN | ADMIN | GROUP_ADMIN | USER
+  passwordHash        String? @db.VarChar(255)
+  role                String    @default("USER") @db.VarChar(255) // SUPER_ADMIN | ADMIN | GROUP_ADMIN | USER
   enabled             Boolean   @default(true)
   emailVerified       Boolean   @default(false)
   mustChangePassword  Boolean   @default(false)
   twoFactorEnabled    Boolean   @default(false)
   force2faSetup       Boolean   @default(false) // 强制2FA策略命中标记
-  managedPolicyOverrides String? // r35：用户级 Chromium 企业策略覆盖（JSON 键值；合并链：沙箱>用户>用户组>模板）
+  managedPolicyOverrides String? @db.Text // r35：用户级 Chromium 企业策略覆盖（JSON 键值；合并链：沙箱>用户>用户组>模板）
   lockedUntil         DateTime?
   failedLoginCount    Int       @default(0)
   preferences          Json? // { pageSize, theme, columns, sidebarCollapsed }
   quota               Json? // { sessions, novncSessions, diskMb, proxyBandwidthMb }
   lastLoginAt         DateTime?
-  lastLoginIp         String?
-  lastLoginCountry    String?
+  lastLoginIp         String? @db.Text
+  lastLoginCountry    String? @db.Text
   frozen              Boolean   @default(false) // 永久冻结
   permissionLocks     Json? // 用户级权限锁覆盖
   shareAllowed        Boolean? // r13c：用户级共享开关（null=继承用户组，true=强制允许，false=强制禁止）
@@ -86,22 +87,22 @@ model User {
 }
 
 model PasswordHistory {
-  id           String   @id @default(cuid())
-  userId       String
-  passwordHash String
+  id           String   @id @default(cuid()) @db.VarChar(64)
+  userId       String @db.VarChar(64)
+  passwordHash String @db.VarChar(255)
   createdAt    DateTime @default(now())
 
   @@index([userId, createdAt])
 }
 
 model RefreshToken {
-  id         String    @id @default(cuid())
-  userId     String
-  tokenHash  String    @unique
+  id         String    @id @default(cuid()) @db.VarChar(64)
+  userId     String @db.VarChar(64)
+  tokenHash  String    @unique @db.VarChar(255)
   expiresAt  DateTime
   revokedAt  DateTime?
-  clientIp   String?
-  userAgent  String?
+  clientIp   String? @db.Text
+  userAgent  String? @db.Text
   createdAt  DateTime  @default(now())
 
   @@index([userId])
@@ -109,21 +110,21 @@ model RefreshToken {
 }
 
 model LoginSession {
-  id              String    @id @default(cuid())
-  userId          String
-  refreshTokenId  String?
-  sessionHash     String    @unique
-  ip              String?
-  userAgent       String?
-  deviceLabel     String?
-  deviceId        String? // 设备指纹（哈希）
+  id              String    @id @default(cuid()) @db.VarChar(64)
+  userId          String @db.VarChar(64)
+  refreshTokenId  String? @db.VarChar(64)
+  sessionHash     String    @unique @db.VarChar(255)
+  ip              String? @db.VarChar(64)
+  userAgent       String? @db.Text
+  deviceLabel     String? @db.VarChar(255)
+  deviceId        String? @db.VarChar(64) // 设备指纹（哈希）
   trusted         Boolean   @default(false)
   rememberMe      Boolean   @default(false)
   expiresAt       DateTime
   idleTimeoutSec  Int       @default(1800)
   lastActiveAt    DateTime  @default(now())
   revokedAt       DateTime?
-  revokedReason   String? // LOGOUT | PASSWORD_CHANGE | ADMIN_KICK | IDLE_TIMEOUT | EXPIRED | SECURITY
+  revokedReason   String? @db.Text // LOGOUT | PASSWORD_CHANGE | ADMIN_KICK | IDLE_TIMEOUT | EXPIRED | SECURITY
   createdAt       DateTime  @default(now())
 
   @@index([userId, revokedAt])
@@ -132,12 +133,12 @@ model LoginSession {
 }
 
 model TrustedDevice {
-  id         String    @id @default(cuid())
-  userId     String
-  deviceId   String
-  label      String?
-  ua         String?
-  ip         String?
+  id         String    @id @default(cuid()) @db.VarChar(64)
+  userId     String @db.VarChar(64)
+  deviceId   String @db.VarChar(64)
+  label      String? @db.VarChar(255)
+  ua         String? @db.Text
+  ip         String? @db.VarChar(64)
   expiresAt  DateTime
   revokedAt  DateTime?
   lastUsedAt DateTime?
@@ -148,11 +149,11 @@ model TrustedDevice {
 }
 
 model EmailVerificationCode {
-  id          String    @id @default(cuid())
-  email       String
-  codeHash    String
-  purpose     String // LOGIN | REGISTER | RESET_PASSWORD | CHANGE_EMAIL_OLD | CHANGE_EMAIL_NEW
-  userId      String?
+  id          String    @id @default(cuid()) @db.VarChar(64)
+  email       String @db.VarChar(320)
+  codeHash    String @db.VarChar(255)
+  purpose     String @db.VarChar(255) // LOGIN | REGISTER | RESET_PASSWORD | CHANGE_EMAIL_OLD | CHANGE_EMAIL_NEW
+  userId      String? @db.VarChar(64)
   expiresAt   DateTime
   consumedAt  DateTime?
   attempts    Int       @default(0)
@@ -164,18 +165,18 @@ model EmailVerificationCode {
 }
 
 model TotpSecret {
-  id               String   @id @default(cuid())
-  userId           String   @unique
-  secretEncrypted  String // AES-256-GCM 加密，绝不明文落盘
+  id               String   @id @default(cuid()) @db.VarChar(64)
+  userId           String   @unique @db.VarChar(64)
+  secretEncrypted  String @db.VarChar(255) // AES-256-GCM 加密，绝不明文落盘
   confirmed        Boolean  @default(false)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 }
 
 model TwoFactorBackupCode {
-  id        String    @id @default(cuid())
-  userId    String
-  codeHash  String
+  id        String    @id @default(cuid()) @db.VarChar(64)
+  userId    String @db.VarChar(64)
+  codeHash  String @db.VarChar(255)
   usedAt    DateTime?
   createdAt DateTime  @default(now())
 
@@ -184,15 +185,15 @@ model TwoFactorBackupCode {
 
 // 安全事件（登录成功/失败、2FA、密码修改、邮箱变更、设备下线、管理员安全重置）
 model SecurityEvent {
-  id         String   @id @default(cuid())
-  userId     String?
-  username   String?
-  eventType  String
+  id         String   @id @default(cuid()) @db.VarChar(64)
+  userId     String? @db.VarChar(64)
+  username   String? @db.VarChar(255)
+  eventType  String @db.VarChar(300)
   success    Boolean  @default(true)
-  ip         String?
-  userAgent  String?
-  detail     String?
-  traceId    String?
+  ip         String? @db.VarChar(64)
+  userAgent  String? @db.Text
+  detail     String? @db.Text
+  traceId    String? @db.VarChar(64)
   createdAt  DateTime @default(now())
 
   @@index([userId, createdAt])
@@ -205,18 +206,18 @@ model SecurityEvent {
 // ============================================================
 
 model Group {
-  id               String   @id @default(cuid())
-  name             String   @unique
-  description      String?
-  parentId         String?
+  id               String   @id @default(cuid()) @db.VarChar(64)
+  name             String   @unique @db.VarChar(255)
+  description      String? @db.Text
+  parentId         String? @db.VarChar(64)
   enabled          Boolean  @default(true)
   inheritParentQuota Boolean @default(true)
   quota            Json? // { sessions, novncSessions, diskMb, proxyBandwidthMb, reservedSessions, reservedNovnc }
   reservedQuota    Json? // 预留资源水位
   tags             Json? // ["标签"]
-  webhookUrl       String?
+  webhookUrl       String? @db.VarChar(700)
   force2fa         Boolean  @default(false) // 组级强制2FA
-  managedPolicyOverrides String? // r35：组级 Chromium 企业策略覆盖（JSON 键值；合并链：沙箱>用户>用户组>模板）
+  managedPolicyOverrides String? @db.Text // r35：组级 Chromium 企业策略覆盖（JSON 键值；合并链：沙箱>用户>用户组>模板）
   allowShare       Boolean  @default(true) // r13c：组级共享开关（false=组内成员默认禁止共享工作区；用户级可覆盖）
   allowGuestShare  Boolean  @default(true) // r37：组级访客访问开关（false=组内成员创建的分享链接不允许访客接入；用户级可覆盖）
   allowInternalNetwork       Boolean  @default(false) // 组级：允许访问内网（成员默认继承）
@@ -243,7 +244,7 @@ model Group {
   // —— r33：沙箱最大时长组级基线（null=继承全局；0=不限；用户级可覆盖）——
   maxTtlMinutes      Int?
   allowUnlimitedTtl  Boolean?
-  createdByUserId  String?
+  createdByUserId  String? @db.VarChar(64)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   deletedAt        DateTime?
@@ -253,9 +254,9 @@ model Group {
 }
 
 model GroupUser {
-  id        String   @id @default(cuid())
-  groupId   String
-  userId    String
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  groupId   String @db.VarChar(64)
+  userId    String @db.VarChar(64)
   createdAt DateTime @default(now())
 
   @@unique([groupId, userId])
@@ -263,9 +264,9 @@ model GroupUser {
 }
 
 model GroupAdmin {
-  id             String   @id @default(cuid())
-  groupId        String
-  userId         String
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  groupId        String @db.VarChar(64)
+  userId         String @db.VarChar(64)
   canModifyQuota Boolean  @default(true)
   createdAt      DateTime @default(now())
 
@@ -273,9 +274,9 @@ model GroupAdmin {
 }
 
 model GroupProxy {
-  id           String   @id @default(cuid())
-  groupId      String
-  proxyNodeId  String
+  id           String   @id @default(cuid()) @db.VarChar(64)
+  groupId      String @db.VarChar(64)
+  proxyNodeId  String @db.VarChar(64)
   createdAt    DateTime @default(now())
 
   @@unique([groupId, proxyNodeId])
@@ -286,22 +287,22 @@ model GroupProxy {
 // ============================================================
 
 model AuditLog {
-  id             String   @id @default(cuid())
-  traceId        String?
-  operatorUserId String?
-  operatorName   String?
-  operationType  String
-  resourceType   String
-  resourceId     String?
-  resourceName   String?
-  ownerUserId    String? // 资源当前所有者
-  createdByUserId String? // 资源原始创建人
-  clientIp       String?
-  userAgent      String?
-  severity       String   @default("INFO") // INFO | WARN | CRITICAL | DANGER
-  beforeJson     String?
-  afterJson      String?
-  extraJson      String?
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  traceId        String? @db.VarChar(64)
+  operatorUserId String? @db.VarChar(64)
+  operatorName   String? @db.VarChar(255)
+  operationType  String @db.VarChar(500)
+  resourceType   String @db.VarChar(300)
+  resourceId     String? @db.VarChar(64)
+  resourceName   String? @db.VarChar(255)
+  ownerUserId    String? @db.VarChar(64) // 资源当前所有者
+  createdByUserId String? @db.VarChar(64) // 资源原始创建人
+  clientIp       String? @db.Text
+  userAgent      String? @db.Text
+  severity       String   @default("INFO") @db.VarChar(255) // INFO | WARN | CRITICAL | DANGER
+  beforeJson     String? @db.MediumText
+  afterJson      String? @db.MediumText
+  extraJson      String? @db.MediumText
   createdAt      DateTime @default(now())
 
   @@index([resourceType, resourceId])
@@ -311,22 +312,22 @@ model AuditLog {
 }
 
 model AuditLogArchive {
-  id             String   @id @default(cuid())
-  originId       String
-  traceId        String?
-  operatorUserId String?
-  operatorName   String?
-  operationType  String
-  resourceType   String
-  resourceId     String?
-  resourceName   String?
-  ownerUserId    String?
-  createdByUserId String?
-  clientIp       String?
-  severity       String?
-  beforeJson     String?
-  afterJson      String?
-  extraJson      String?
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  originId       String @db.VarChar(64)
+  traceId        String? @db.VarChar(64)
+  operatorUserId String? @db.VarChar(64)
+  operatorName   String? @db.VarChar(255)
+  operationType  String @db.Text
+  resourceType   String @db.VarChar(300)
+  resourceId     String? @db.VarChar(64)
+  resourceName   String? @db.VarChar(255)
+  ownerUserId    String? @db.VarChar(64)
+  createdByUserId String? @db.VarChar(64)
+  clientIp       String? @db.Text
+  severity       String? @db.VarChar(255)
+  beforeJson     String? @db.MediumText
+  afterJson      String? @db.MediumText
+  extraJson      String? @db.MediumText
   archivedAt     DateTime @default(now())
   createdAt      DateTime
 
@@ -338,11 +339,11 @@ model AuditLogArchive {
 // ============================================================
 
 model ApiToken {
-  id             String    @id @default(cuid())
-  userId         String
-  name           String
-  tokenHash      String    @unique
-  tokenPrefix    String // 前8位用于辨识
+  id             String    @id @default(cuid()) @db.VarChar(64)
+  userId         String @db.VarChar(64)
+  name           String @db.VarChar(255)
+  tokenHash      String    @unique @db.VarChar(255)
+  tokenPrefix    String @db.VarChar(255) // 前8位用于辨识
   permissionsMask Int      @default(0)
   // 功能范围（scope 白名单）：null/[] = 不限（全部授权范围）；
   // 非空数组 = 仅允许调用命中数组内 scope 的功能面（browser/proxy/user/token/recycle/session/crx/resources）
@@ -355,7 +356,7 @@ model ApiToken {
   lastCallAt     DateTime?
   callCount      Int       @default(0)
   failCount      Int       @default(0)
-  createdByUserId String?
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
   deletedAt      DateTime?
@@ -365,16 +366,16 @@ model ApiToken {
 }
 
 model ApiTokenCallLog {
-  id           String   @id @default(cuid())
-  tokenId      String?
-  tokenUserId  String?
-  path         String
-  method       String
+  id           String   @id @default(cuid()) @db.VarChar(64)
+  tokenId      String? @db.VarChar(64)
+  tokenUserId  String? @db.VarChar(64)
+  path         String @db.Text
+  method       String @db.VarChar(255)
   status       Int
   durationMs   Int
   wasExpired   Boolean  @default(false) // 调用时Token是否已过期
-  ip           String?
-  traceId      String?
+  ip           String? @db.VarChar(64)
+  traceId      String? @db.VarChar(64)
   createdAt    DateTime @default(now())
 
   @@index([tokenId, createdAt])
@@ -387,64 +388,64 @@ model ApiTokenCallLog {
 // ============================================================
 
 model SystemConfig {
-  key          String   @id
-  valueJson    String
-  category     String   @default("GENERAL") // SECURITY | SESSION | STORAGE | ALERT | NETWORK | UI | GENERAL | MCP
-  valueType    String   @default("string") // string | number | boolean | json
-  description  String?
+  key          String   @id @db.VarChar(400)
+  valueJson    String @db.MediumText
+  category     String   @default("GENERAL") @db.VarChar(255) // SECURITY | SESSION | STORAGE | ALERT | NETWORK | UI | GENERAL | MCP
+  valueType    String   @default("string") @db.VarChar(255) // string | number | boolean | json
+  description  String? @db.Text
   version      Int      @default(1)
-  updatedByUserId String?
+  updatedByUserId String? @db.VarChar(64)
   updatedAt    DateTime @updatedAt
 
   @@index([category])
 }
 
 model ConfigVersion {
-  id             String   @id @default(cuid())
-  configKey      String
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  configKey      String @db.VarChar(400)
   version        Int
-  beforeJson     String?
-  afterJson      String?
-  operatorUserId String?
+  beforeJson     String? @db.MediumText
+  afterJson      String? @db.MediumText
+  operatorUserId String? @db.VarChar(64)
   createdAt      DateTime @default(now())
 
   @@index([configKey, version])
 }
 
 model ScheduleTask {
-  code             String   @id
-  name             String
-  cronExpr         String
+  code             String   @id @db.VarChar(500)
+  name             String @db.VarChar(255)
+  cronExpr         String @db.Text
   enabled          Boolean  @default(true)
   timeoutSec       Int      @default(300)
-  dependsOn        String?  // 依赖任务code
+  dependsOn        String? @db.Text // 依赖任务code
   consecutiveFails Int      @default(0)
   lastExecuteAt    DateTime?
-  lastResult       String?
+  lastResult       String? @db.Text
   avgDurationMs    Int      @default(0)
   // —— r23：自定时任务（管理员可创建/编辑/删除的自定义调度，基于内置任务类型注册表）——
   isCustom         Boolean  @default(false) // true=自定义任务（code 形如 custom:<cuid>）
-  taskType         String?  // 执行的任务类型（TASKS 注册表键；内置任务=null 即用 code 本身）
-  paramsJson       String?  // 任务参数（预留，目前注册表任务无参数）
-  description      String?  // 自定义任务备注说明
-  createdByUserId  String?  // 创建人（自定义任务审计追溯）
+  taskType         String? @db.Text // 执行的任务类型（TASKS 注册表键；内置任务=null 即用 code 本身）
+  paramsJson       String? @db.MediumText // 任务参数（预留，目前注册表任务无参数）
+  description      String? @db.Text // 自定义任务备注说明
+  createdByUserId  String? @db.VarChar(64) // 创建人（自定义任务审计追溯）
   nextRunAt        DateTime? // r23：按 cron 表达式计算的下次到期时间（到期调度器/接口据此触发）
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 }
 
 model ScheduleTaskLog {
-  id          String   @id @default(cuid())
-  taskCode    String
-  triggerType String   @default("CRON") // CRON | MANUAL
-  status      String   @default("RUNNING") // RUNNING | SUCCESS | FAILED | TIMEOUT
+  id          String   @id @default(cuid()) @db.VarChar(64)
+  taskCode    String @db.VarChar(300)
+  triggerType String   @default("CRON") @db.VarChar(255) // CRON | MANUAL
+  status      String   @default("RUNNING") @db.VarChar(255) // RUNNING | SUCCESS | FAILED | TIMEOUT
   startAt     DateTime @default(now())
   endAt       DateTime?
   durationMs  Int?
-  errorStack  String?
-  summary     String?
+  errorStack  String? @db.Text
+  summary     String? @db.Text
   itemsProcessed Int  @default(0)
-  outputJson  String?  // r24-a：参数化执行体完整输出（脚本 stdout / 响应体，上限 64KB）
+  outputJson  String? @db.MediumText // r24-a：参数化执行体完整输出（脚本 stdout / 响应体，上限 64KB）
 
   @@index([taskCode, startAt])
   @@index([status])
@@ -453,17 +454,17 @@ model ScheduleTaskLog {
 
 // —— r23：IP 自动封禁（登录/API-Key 连续失败计数 → 定时封禁；与手工 RiskListRule 黑名单互补）——
 model IpBanRecord {
-  id            String    @id @default(cuid())
-  ip            String
-  source        String    @default("LOGIN") // LOGIN | API_KEY | MANUAL
+  id            String    @id @default(cuid()) @db.VarChar(64)
+  ip            String @db.VarChar(64)
+  source        String    @default("LOGIN") @db.VarChar(255) // LOGIN | API_KEY | MANUAL
   failCount     Int       @default(0) // 窗口内累计失败次数
   firstFailAt   DateTime?
   lastFailAt    DateTime?
   bannedUntil   DateTime? // null=当前未封禁（仅计数）；非空=封禁生效中
-  reason        String?   // 封禁原因
-  note          String?   // 管理员备注（手动封禁/解封说明）
-  createdByUserId String? // 手动封禁操作人
-  unbannedByUserId String? // 手动解封操作人
+  reason        String? @db.Text // 封禁原因
+  note          String? @db.Text // 管理员备注（手动封禁/解封说明）
+  createdByUserId String? @db.VarChar(64) // 手动封禁操作人
+  unbannedByUserId String? @db.VarChar(64) // 手动解封操作人
   unbannedAt    DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -474,11 +475,11 @@ model IpBanRecord {
 }
 
 model IdempotencyRecord {
-  id          String   @id @default(cuid())
-  fingerprint String   @unique
-  userId      String?
-  action      String
-  resultJson  String?
+  id          String   @id @default(cuid()) @db.VarChar(64)
+  fingerprint String   @unique @db.VarChar(255)
+  userId      String? @db.VarChar(64)
+  action      String @db.VarChar(255)
+  resultJson  String? @db.MediumText
   createdAt   DateTime @default(now())
   expiresAt   DateTime
 
@@ -490,24 +491,24 @@ model IdempotencyRecord {
 // ============================================================
 
 model FileMeta {
-  id            String    @id @default(cuid())
-  fileName      String
-  storageKey    String    @unique
+  id            String    @id @default(cuid()) @db.VarChar(64)
+  fileName      String @db.Text
+  storageKey    String    @unique @db.VarChar(400)
   size          Int       @default(0)
-  mime          String?
-  checksum      String?
-  category      String    @default("GENERAL") // GENERAL | PROFILE | BACKUP | SNAPSHOT | LOG | REPORT | RECORDING | SCREENSHOT | AVATAR
+  mime          String? @db.Text
+  checksum      String? @db.Text
+  category      String    @default("GENERAL") @db.VarChar(255) // GENERAL | PROFILE | BACKUP | SNAPSHOT | LOG | REPORT | RECORDING | SCREENSHOT | AVATAR
   // r32：收藏夹（用户云盘多标签页/收藏夹）+ 分布式节点归属（节点筛选；空 = 主节点本地存储）
   isFavorite    Boolean   @default(false)
-  favoritedBy   String?
+  favoritedBy   String? @db.Text
   favoritedAt   DateTime?
-  storageNodeId String? // GENERAL | PROFILE | BACKUP | SNAPSHOT | LOG | REPORT
-  userId        String?
-  workspaceId   String?
+  storageNodeId String? @db.VarChar(64) // GENERAL | PROFILE | BACKUP | SNAPSHOT | LOG | REPORT
+  userId        String? @db.VarChar(64)
+  workspaceId   String? @db.VarChar(64)
   shareTo       Json?
   expireAt      DateTime?
   virusScanned  Boolean   @default(false)
-  createdByUserId String?
+  createdByUserId String? @db.VarChar(64)
   deletedAt     DateTime?
   purgedAt      DateTime?
   createdAt     DateTime  @default(now())
@@ -520,18 +521,18 @@ model FileMeta {
 }
 
 model BackupRecord {
-  id            String   @id @default(cuid())
-  fileMetaId    String
-  type          String   @default("FULL") // FULL | PARTIAL
+  id            String   @id @default(cuid()) @db.VarChar(64)
+  fileMetaId    String @db.VarChar(64)
+  type          String   @default("FULL") @db.VarChar(255) // FULL | PARTIAL
   tableList     Json?
   encrypted     Boolean  @default(false)
   sizeBytes     Int      @default(0)
-  checksum      String?
-  status        String   @default("SUCCESS") // SUCCESS | FAILED | RESTORING
-  createdByUserId String?
+  checksum      String? @db.Text
+  status        String   @default("SUCCESS") @db.VarChar(255) // SUCCESS | FAILED | RESTORING
+  createdByUserId String? @db.VarChar(64)
   createdAt     DateTime @default(now())
   // r36：多节点副本状态（JSON：[{nodeUuid, state: PENDING|SENT|OK|FAIL, error?, at?}]）
-  replicasJson  String?
+  replicasJson  String? @db.MediumText
 
   @@index([createdAt])
 }
@@ -541,14 +542,14 @@ model BackupRecord {
 // 用途：备份多节点推送（backup.replica.* 分块）、后续调度/控制指令统一通道
 // ============================================================
 model WorkNodeCommand {
-  id          String    @id @default(cuid())
-  nodeUuid    String
-  cmd         String // backup.replica.begin | backup.replica.append | backup.replica.finish | ping ...
-  payloadJson String
+  id          String    @id @default(cuid()) @db.VarChar(64)
+  nodeUuid    String @db.VarChar(64)
+  cmd         String @db.Text // backup.replica.begin | backup.replica.append | backup.replica.finish | ping ...
+  payloadJson String @db.MediumText
   createdAt   DateTime  @default(now())
   sentAt      DateTime? // 心跳携出时间（首次/重试）
   doneAt      DateTime? // Worker 结果回传时间
-  resultJson  String? // { ok, error?, data? }
+  resultJson  String? @db.MediumText // { ok, error?, data? }
   retries    Int       @default(0)
 
   @@index([nodeUuid, sentAt])
@@ -560,18 +561,18 @@ model WorkNodeCommand {
 // ============================================================
 
 model Alert {
-  id             String   @id @default(cuid())
-  title          String
-  level          String   @default("WARN") // INFO | WARN | CRITICAL
-  content        String
-  resourceType   String?
-  resourceId     String?
-  ownerUserId    String?
-  traceId        String?
-  dedupeKey      String?  // 抑制/聚合键
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  title          String @db.VarChar(255)
+  level          String   @default("WARN") @db.VarChar(255) // INFO | WARN | CRITICAL
+  content        String @db.MediumText
+  resourceType   String? @db.Text
+  resourceId     String? @db.VarChar(64)
+  ownerUserId    String? @db.VarChar(64)
+  traceId        String? @db.VarChar(64)
+  dedupeKey      String? @db.VarChar(400) // 抑制/聚合键
   triggerAt      DateTime @default(now())
-  handleStatus   String   @default("PENDING") // PENDING | HANDLED | AUTO_RESOLVED
-  handledByUserId String?
+  handleStatus   String   @default("PENDING") @db.VarChar(255) // PENDING | HANDLED | AUTO_RESOLVED
+  handledByUserId String? @db.VarChar(64)
   handledAt      DateTime?
   createdAt      DateTime @default(now())
 
@@ -581,10 +582,10 @@ model Alert {
 }
 
 model AlertRule {
-  id             String   @id @default(cuid())
-  name           String
-  conditionsJson String // [{field,op,value}] + logic: AND/OR
-  level          String   @default("WARN")
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  name           String @db.VarChar(255)
+  conditionsJson String @db.MediumText // [{field,op,value}] + logic: AND/OR
+  level          String   @default("WARN") @db.VarChar(255)
   silenceWindowMin Int    @default(30)
   webhookEnabled Boolean  @default(true)
   enabled        Boolean  @default(true)
@@ -593,27 +594,27 @@ model AlertRule {
 }
 
 model AlertSubscription {
-  id           String   @id @default(cuid())
-  userId       String?
-  groupId      String?
-  resourceType String
+  id           String   @id @default(cuid()) @db.VarChar(64)
+  userId       String? @db.VarChar(64)
+  groupId      String? @db.VarChar(64)
+  resourceType String @db.Text
   createdAt    DateTime @default(now())
 }
 
 model Notice {
-  id        String    @id @default(cuid())
-  userId    String
-  title     String
-  content   String
-  type      String    @default("ALERT") // ALERT | SYSTEM | ANNOUNCEMENT | TOKEN_EXPIRE | SECURITY | RECORDING_DONE | SCREENSHOT_DONE | FILE_SHARE
-  link      String?
+  id        String    @id @default(cuid()) @db.VarChar(64)
+  userId    String @db.VarChar(64)
+  title     String @db.VarChar(255)
+  content   String @db.MediumText
+  type      String    @default("ALERT") @db.VarChar(255) // ALERT | SYSTEM | ANNOUNCEMENT | TOKEN_EXPIRE | SECURITY | RECORDING_DONE | SCREENSHOT_DONE | FILE_SHARE
+  link      String? @db.VarChar(700)
   // r32：事件溯源（点击通知直达对应资源；RECORDING_DONE → /files?focus=<FileMeta.id> 自动选中）
-  sourceType String?   // WORKSPACE | RECORDING | SCREENSHOT | FILE | SHARE | ANNOUNCEMENT | ...
-  sourceKey  String?   // 对应资源 id
+  sourceType String? @db.Text // WORKSPACE | RECORDING | SCREENSHOT | FILE | SHARE | ANNOUNCEMENT | ...
+  sourceKey  String? @db.VarChar(400) // 对应资源 id
   // r32：通知清除（软删除：用户单条/已读批量/全部；管理员管理）
   clearedAt DateTime?
-  clearedBy String?
-  senderUserId String? // 发送者（管理员按用户/组发送时）
+  clearedBy String? @db.Text
+  senderUserId String? @db.VarChar(64) // 发送者（管理员按用户/组发送时）
   readAt    DateTime?
   createdAt DateTime  @default(now())
 
@@ -623,29 +624,29 @@ model Notice {
 }
 
 model WebhookRule {
-  id          String   @id @default(cuid())
-  name        String
-  url         String
-  secret      String? // HMAC 签名密钥
+  id          String   @id @default(cuid()) @db.VarChar(64)
+  name        String @db.VarChar(255)
+  url         String @db.VarChar(700)
+  secret      String? @db.VarChar(255) // HMAC 签名密钥
   events      Json?    // 触发事件类型列表
-  groupId     String?  // 绑定用户组范围
+  groupId     String? @db.VarChar(64) // 绑定用户组范围
   enabled     Boolean  @default(true)
   failCount   Int      @default(0)
-  createdByUserId String?
+  createdByUserId String? @db.VarChar(64)
   createdAt   DateTime @default(now())
   deletedAt   DateTime?
 }
 
 model WebhookDelivery {
-  id          String   @id @default(cuid())
-  ruleId      String?
-  url         String
-  event       String
-  payloadJson String?
-  status      String   @default("PENDING") // PENDING | SUCCESS | FAILED
+  id          String   @id @default(cuid()) @db.VarChar(64)
+  ruleId      String? @db.VarChar(64)
+  url         String @db.VarChar(700)
+  event       String @db.VarChar(255)
+  payloadJson String? @db.MediumText
+  status      String   @default("PENDING") @db.VarChar(255) // PENDING | SUCCESS | FAILED
   attempts    Int      @default(0)
   nextRetryAt DateTime?
-  lastError   String?
+  lastError   String? @db.Text
   createdAt   DateTime @default(now())
   sentAt      DateTime?
 
@@ -657,23 +658,23 @@ model WebhookDelivery {
 // ============================================================
 
 model BrowserWorkspace {
-  id                 String    @id @default(cuid())
-  uuid               String    @unique @default(cuid())
-  name               String
-  mode               String    @default("cdp_light") // cdp_light | novnc_full
-  status             String    @default("CREATING") // CREATING | RUNNING | IDLE | STOPPED | ERROR | DESTROYED | FROZEN
-  userId             String // 当前所有者
-  groupId            String?
-  proxyNodeId        String?
-  singboxInstanceId  String?
-  browserNodeId      String? // 浏览器执行节点（自研会话引擎调度目标）
-  templateId         String?
-  profileSnapshotId  String?
+  id                 String    @id @default(cuid()) @db.VarChar(64)
+  uuid               String    @unique @default(cuid()) @db.VarChar(64)
+  name               String @db.VarChar(255)
+  mode               String    @default("cdp_light") @db.VarChar(255) // cdp_light | novnc_full
+  status             String    @default("CREATING") @db.VarChar(255) // CREATING | RUNNING | IDLE | STOPPED | ERROR | DESTROYED | FROZEN
+  userId             String @db.VarChar(64) // 当前所有者
+  groupId            String? @db.VarChar(64)
+  proxyNodeId        String? @db.VarChar(64)
+  singboxInstanceId  String? @db.VarChar(64)
+  browserNodeId      String? @db.VarChar(64) // 浏览器执行节点（自研会话引擎调度目标）
+  templateId         String? @db.VarChar(64)
+  profileSnapshotId  String? @db.VarChar(64)
   tags               Json?
-  browserSessionId   String? // 自研浏览器会话引擎会话句柄
-  cdpUrl             String?
-  novncSessionId     String?
-  novncSecret        String? // 加密存储
+  browserSessionId   String? @db.VarChar(64) // 自研浏览器会话引擎会话句柄
+  cdpUrl             String? @db.VarChar(700)
+  novncSessionId     String? @db.VarChar(64)
+  novncSecret        String? @db.VarChar(255) // 加密存储
   novncConnCount     Int       @default(0)
   novncFps           Float     @default(0)
   novncActiveMin     Float     @default(0)
@@ -689,29 +690,29 @@ model BrowserWorkspace {
   sessionSecAccum   Int       @default(0) // VNC 会话累计连接秒数（策略执行统计）
   cdpCallCount       Int       @default(0)
   cdpBlockedCount    Int       @default(0)
-  crashCategory      String?
+  crashCategory      String? @db.Text
   lifecycleRules     Json?    // 定时生命周期策略
-  freezeReason       String?
+  freezeReason       String? @db.Text
   expireAt           DateTime?
   // —— r24-c：每沙箱输入法/键盘布局偏好（独立 X 显示内生效，跨沙箱互不影响）——
-  imeEngine          String?  // 偏好输入法引擎（如 pinyin；空=跟随容器默认）
-  kbLayout           String?  // 偏好键盘布局（如 us/cn/de/fr…；空=跟随默认）
+  imeEngine          String? @db.Text // 偏好输入法引擎（如 pinyin；空=跟随容器默认）
+  kbLayout           String? @db.Text // 偏好键盘布局（如 us/cn/de/fr…；空=跟随默认）
   // —— r27：VNC 会话录像沙箱级覆盖（"on"/"off"；null=继承 用户>组>全局 默认）——
-  recordingOverride  String?
+  recordingOverride  String? @db.Text
   // —— r35：网页模式（kiosk 纯网页内容：Chromium --kiosk 启动指定 URL，无浏览器控制栏）——
   kioskMode          Boolean   @default(false)
-  kioskStartUrl      String?
+  kioskStartUrl      String? @db.VarChar(700)
   // —— r28：回放安全沙箱级覆盖 { watermark: force|on|off, allowExport }（null=继承上层）——
   vncPlayback Json?
   // —— r29：17 项硬件权限沙箱级覆盖（稀疏 JSON；null=继承用户/组/全局）——
   hardwareOverride Json?
-  containerRef       String?  // 自托管硬隔离浏览器容器（name/id，防退出看门狗自愈目标）
+  containerRef       String? @db.Text // 自托管硬隔离浏览器容器（name/id，防退出看门狗自愈目标）
   hardeningJson      Json?    // 隔离防护快照（只读根FS/CapDrop/noexec下载/独立Profile卷/防退出循环）
   networkPolicyJson  Json?    // 生效网络策略快照 { allowInternalNetwork, allowSecureLocationAccess, source, enforcedAt, domainMode, domainBlack, domainWhite, endpointBlack, endpointWhite }
   startedAt          DateTime? // 最近一次启动时间（运行时长计算基准；停止时冻结增量入 runtimeAccumSec）
   runtimeAccumSec    Int       @default(0) // 累计运行秒数（不含当前运行段）
   lastActiveAt       DateTime? // 最近活跃（VNC取票/CDP指令/脚本执行触发）
-  createdByUserId    String?
+  createdByUserId    String? @db.VarChar(64)
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
   deletedAt          DateTime?
@@ -723,17 +724,17 @@ model BrowserWorkspace {
 }
 
 model BrowserTemplate {
-  id             String   @id @default(cuid())
-  name           String
-  description    String?
-  scope          String   @default("PRIVATE") // PRIVATE | GROUP | GLOBAL
-  userId         String?
-  groupId        String?
-  parentId       String? // 模板继承
-  configJson     String // UA/时区/地理/指纹/节流/脚本/域名规则/变量插值
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  name           String @db.VarChar(255)
+  description    String? @db.Text
+  scope          String   @default("PRIVATE") @db.VarChar(255) // PRIVATE | GROUP | GLOBAL
+  userId         String? @db.VarChar(64)
+  groupId        String? @db.VarChar(64)
+  parentId       String? @db.VarChar(64) // 模板继承
+  configJson     String @db.MediumText // UA/时区/地理/指纹/节流/脚本/域名规则/变量插值
   version        Int      @default(1)
   tags           Json?
-  createdByUserId String?
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   deletedAt      DateTime?
@@ -745,14 +746,14 @@ model BrowserTemplate {
 
 // r26：模板版本快照（每次配置变更自动存档 → 差异对比 / 一键回滚）
 model BrowserTemplateVersion {
-  id             String   @id @default(cuid())
-  templateId     String
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  templateId     String @db.VarChar(64)
   version        Int      // 对应 BrowserTemplate.version（快照时点）
-  configJson     String   // 该版本完整配置快照
-  changeNote     String?  // 变更说明（自动生成或人工备注）
+  configJson     String @db.MediumText // 该版本完整配置快照
+  changeNote     String? @db.Text // 变更说明（自动生成或人工备注）
   changedFields  Json?    // 相对上一版本的变更字段清单（差异对比预计算）
-  createdByUserId String?
-  createdByName  String?
+  createdByUserId String? @db.VarChar(64)
+  createdByName  String? @db.Text
   createdAt      DateTime @default(now())
 
   @@unique([templateId, version])
@@ -760,16 +761,16 @@ model BrowserTemplateVersion {
 }
 
 model BrowserProfileSnapshot {
-  id             String   @id @default(cuid())
-  name           String
-  scope          String   @default("PRIVATE") // PRIVATE | GROUP | GLOBAL
-  userId         String?
-  groupId        String?
-  workspaceId    String?
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  name           String @db.VarChar(255)
+  scope          String   @default("PRIVATE") @db.VarChar(255) // PRIVATE | GROUP | GLOBAL
+  userId         String? @db.VarChar(64)
+  groupId        String? @db.VarChar(64)
+  workspaceId    String? @db.VarChar(64)
   sizeBytes      Int      @default(0)
-  storageKey     String?
+  storageKey     String? @db.VarChar(400)
   expireAt       DateTime?
-  createdByUserId String?
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime @default(now())
   deletedAt      DateTime?
 
@@ -777,16 +778,16 @@ model BrowserProfileSnapshot {
 }
 
 model BrowserScriptTemplate {
-  id             String   @id @default(cuid())
-  name           String
-  description    String?
-  code           String
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  name           String @db.VarChar(255)
+  description    String? @db.Text
+  code           String @db.Text
   version        Int      @default(1)
-  scope          String   @default("PRIVATE")
-  userId         String?
+  scope          String   @default("PRIVATE") @db.VarChar(255)
+  userId         String? @db.VarChar(64)
   boundDomains   Json?
   enabled        Boolean  @default(true)
-  createdByUserId String?
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   deletedAt      DateTime?
@@ -795,44 +796,44 @@ model BrowserScriptTemplate {
 }
 
 model BrowserScriptRunLog {
-  id          String   @id @default(cuid())
-  scriptId    String
-  workspaceId String
-  status      String   @default("RUNNING") // RUNNING | SUCCESS | FAILED | BLOCKED
-  log         String?
+  id          String   @id @default(cuid()) @db.VarChar(64)
+  scriptId    String @db.VarChar(64)
+  workspaceId String @db.VarChar(64)
+  status      String   @default("RUNNING") @db.VarChar(255) // RUNNING | SUCCESS | FAILED | BLOCKED
+  log         String? @db.Text
   startedAt   DateTime @default(now())
   finishedAt  DateTime?
 }
 
 model BrowserModifyRule {
-  id             String   @id @default(cuid())
-  name           String
-  type           String // REQ_HEADER | RESP_HEADER | REDIRECT
-  matchPattern   String
-  headerKey      String?
-  headerValue    String?
-  redirectUrl    String?
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  name           String @db.VarChar(255)
+  type           String @db.VarChar(255) // REQ_HEADER | RESP_HEADER | REDIRECT
+  matchPattern   String @db.Text
+  headerKey      String? @db.VarChar(400)
+  headerValue    String? @db.Text
+  redirectUrl    String? @db.VarChar(700)
   enabled        Boolean  @default(true)
-  templateBinding String?
-  createdByUserId String?
+  templateBinding String? @db.Text
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime @default(now())
   deletedAt      DateTime?
 }
 
 model DomainRule {
-  id             String   @id @default(cuid())
-  pattern        String
-  type           String   @default("BLACK") // BLACK | WHITE
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  pattern        String @db.Text
+  type           String   @default("BLACK") @db.VarChar(255) // BLACK | WHITE
   enabled        Boolean  @default(true)
-  note           String?
+  note           String? @db.Text
   // —— 作用域（四层定向：全局 1=用户组 2=用户 3=单沙箱）：策略下发中心按目标批量落规则 ——
-  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER | SANDBOX
-  groupId        String?  // scopeType=GROUP 时生效
-  userId         String?  // scopeType=USER 时生效
-  workspaceId    String?  // scopeType=SANDBOX 时生效（单沙箱定向限制）
-  deploymentId   String?  // 来源策略下发批次（回滚时整批清理）
+  scopeType      String   @default("GLOBAL") @db.VarChar(255) // GLOBAL | GROUP | USER | SANDBOX
+  groupId        String? @db.VarChar(64) // scopeType=GROUP 时生效
+  userId         String? @db.VarChar(64) // scopeType=USER 时生效
+  workspaceId    String? @db.VarChar(64) // scopeType=SANDBOX 时生效（单沙箱定向限制）
+  deploymentId   String? @db.VarChar(64) // 来源策略下发批次（回滚时整批清理）
   priority       Int      @default(0) // 数字越大越先应用
-  createdByUserId String?
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime @default(now())
 
   @@index([scopeType, groupId])
@@ -842,23 +843,23 @@ model DomainRule {
 }
 
 model UaRecord {
-  id        String   @id @default(cuid())
-  ua        String
-  label     String?
-  category  String   @default("DESKTOP") // DESKTOP | MOBILE
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  ua        String @db.Text
+  label     String? @db.VarChar(255)
+  category  String   @default("DESKTOP") @db.VarChar(255) // DESKTOP | MOBILE
   enabled   Boolean  @default(true)
   usageCount Int     @default(0)
   createdAt DateTime @default(now())
 }
 
 model WorkspaceShare {
-  id             String    @id @default(cuid())
-  workspaceId    String
-  targetUserId   String
-  permission     String    @default("VIEW") // VIEW | OPERATE
+  id             String    @id @default(cuid()) @db.VarChar(64)
+  workspaceId    String @db.VarChar(64)
+  targetUserId   String @db.VarChar(64)
+  permission     String    @default("VIEW") @db.VarChar(255) // VIEW | OPERATE
   expireAt       DateTime?
   revokedAt      DateTime?
-  createdByUserId String?
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime  @default(now())
 
   @@unique([workspaceId, targetUserId])
@@ -868,20 +869,20 @@ model WorkspaceShare {
 // 已登录用户访问 /workspaces/shared?token=xxx → 校验通过后自动绑定为目标共享（WorkspaceShare），
 // 之后与普通共享完全一致（VNC 观看/操作、HAR 下载等按 permission 生效）
 model WorkspaceShareLink {
-  id             String    @id @default(cuid())
-  workspaceId    String
-  token          String    @unique // 32 字节随机 hex（不可猜测）
-  permission     String    @default("VIEW") // VIEW | OPERATE
+  id             String    @id @default(cuid()) @db.VarChar(64)
+  workspaceId    String @db.VarChar(64)
+  token          String    @unique @db.VarChar(255) // 32 字节随机 hex（不可猜测）
+  permission     String    @default("VIEW") @db.VarChar(255) // VIEW | OPERATE
   expireAt       DateTime? // null=永久有效
   revokedAt      DateTime? // 撤销后立即失效
   maxUses        Int       @default(0) // 最大使用次数（0=不限；每次访问绑定记 1 次）
   useCount       Int       @default(0)
   lastUsedAt     DateTime?
-  note           String?   // 备注说明（分享给谁/什么用途）
-  createdByUserId String?
+  note           String? @db.Text // 备注说明（分享给谁/什么用途）
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime  @default(now())
   // r37：访客访问（免登录）+ 密码保护 + 允许/禁止名单（完整权限管理）
-  passwordHash   String?   // argon2/bcrypt 哈希（null=无密码；访客与兑换均需校验）
+  passwordHash   String? @db.VarChar(255) // argon2/bcrypt 哈希（null=无密码；访客与兑换均需校验）
   guestAllowed   Boolean   @default(false) // 允许访客（未登录）访问：VNC 只读观看或可操作
   guestCdp       Boolean   @default(false) // 访客可用 CDP（要求 permission=OPERATE；读写级）
   allowUserIds   Json?     // 允许兑换的用户 id 白名单（null/[] = 不限）
@@ -890,7 +891,7 @@ model WorkspaceShareLink {
   denyGroupIds   Json?     // 禁止兑换的用户组黑名单（deny 优先）
   guestUseCount  Int       @default(0) // 访客访问次数（独立统计）
   lastGuestAt    DateTime? // 最近访客访问时间
-  lastGuestIp    String?   // 最近访客来源 IP（安全审计）
+  lastGuestIp    String? @db.Text // 最近访客来源 IP（安全审计）
 
   @@index([workspaceId])
 }
@@ -901,22 +902,22 @@ model WorkspaceShareLink {
 // 管理员可强制吊销/轮换（用户/用户组/沙箱级 + 批量）；网关经主应用内部 API
 // 实时校验（吊销/过期/次数即时生效）。
 model CdpEndpointToken {
-  id             String    @id @default(cuid())
-  tid            String    @unique // 48 位随机 hex（公网地址组成部分，不可猜测）
-  workspaceId    String
-  userId         String?   // 归属用户（工作区所有者）
-  label          String?   // 标签（如「自动化接入」）
-  note           String?   // 备注
+  id             String    @id @default(cuid()) @db.VarChar(64)
+  tid            String    @unique @db.VarChar(64) // 48 位随机 hex（公网地址组成部分，不可猜测）
+  workspaceId    String @db.VarChar(64)
+  userId         String? @db.VarChar(64) // 归属用户（工作区所有者）
+  label          String? @db.VarChar(255) // 标签（如「自动化接入」）
+  note           String? @db.Text // 备注
   expireAt       DateTime? // null=永久有效
   maxUses        Int       @default(0) // 0=不限次数；每次建连 +1
   useCount       Int       @default(0)
   lastUsedAt     DateTime?
-  lastUsedIp     String?
+  lastUsedIp     String? @db.Text
   revokedAt      DateTime? // 吊销（轮换时旧票据置此标记）
-  revokeReason   String?
-  rotatedFromId  String?   // 轮换来源（新票据指向旧票据，血缘可追溯）
-  createdVia     String    @default("USER") // USER | ADMIN（管理员强制创建）
-  createdByUserId String?
+  revokeReason   String? @db.Text
+  rotatedFromId  String? @db.VarChar(64) // 轮换来源（新票据指向旧票据，血缘可追溯）
+  createdVia     String    @default("USER") @db.VarChar(255) // USER | ADMIN（管理员强制创建）
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime  @default(now())
 
   @@index([workspaceId])
@@ -925,18 +926,18 @@ model CdpEndpointToken {
 }
 
 model BrowserNode {
-  id            String   @id @default(cuid())
-  name          String
-  baseUrl       String
+  id            String   @id @default(cuid()) @db.VarChar(64)
+  name          String @db.VarChar(255)
+  baseUrl       String @db.VarChar(700)
   // r32：公网展示地址（外部工具/跨域接入展示用；空 = 连接信息回退 ENV 推导）
-  publicUrl     String?
+  publicUrl     String? @db.VarChar(700)
   // r33：公网 CDP 接入地址（每浏览器节点独立填写，如 wss://cdp.example.com 或 host:port；
   // 空时工作区 CDP 面板回退 PUBLIC_BASE_URL 推导。拨号仍走 baseUrl，此字段仅对外展示）
-  publicCdpUrl  String?
+  publicCdpUrl  String? @db.VarChar(700)
   labels        Json?
   weight        Int      @default(1)
-  status        String   @default("ONLINE") // ONLINE | OFFLINE | ISOLATED | GRAY_TEST
-  grayGroup     String   @default("PROD") // PROD | TEST
+  status        String   @default("ONLINE") @db.VarChar(255) // ONLINE | OFFLINE | ISOLATED | GRAY_TEST
+  grayGroup     String   @default("PROD") @db.VarChar(255) // PROD | TEST
   activeSessions Int     @default(0)
   loadScore     Float    @default(0)
   probeFailCount Int     @default(0)
@@ -949,24 +950,24 @@ model BrowserNode {
 }
 
 model ProxyNode {
-  id               String   @id @default(cuid())
-  name             String
-  type             String   @default("external") // internal_singbox | external
-  protocol         String   @default("socks5") // socks5 | http
-  host             String?
+  id               String   @id @default(cuid()) @db.VarChar(64)
+  name             String @db.VarChar(255)
+  type             String   @default("external") @db.VarChar(255) // internal_singbox | external
+  protocol         String   @default("socks5") @db.VarChar(255) // socks5 | http
+  host             String? @db.Text
   port             Int?
-  username         String?
-  password         String? // 加密存储
-  status           String   @default("UNKNOWN") // HEALTHY | DEGRADED | FAILED | DISABLED
+  username         String? @db.VarChar(255)
+  password         String? @db.Text // 加密存储
+  status           String   @default("UNKNOWN") @db.VarChar(255) // HEALTHY | DEGRADED | FAILED | DISABLED
   latencyMs        Float    @default(0)
   labels           Json?
   weight           Int      @default(1)
-  singboxInstanceId String?
+  singboxInstanceId String? @db.VarChar(64)
   maxSessions      Int      @default(0) // 0=不限
   currentSessions  Int      @default(0)
   healthFailCount  Int      @default(0)
-  scheduleStrategy String   @default("LEAST_LOAD") // WEIGHT | ROUND_ROBIN | LEAST_LOAD | AFFINITY
-  createdByUserId  String?
+  scheduleStrategy String   @default("LEAST_LOAD") @db.VarChar(255) // WEIGHT | ROUND_ROBIN | LEAST_LOAD | AFFINITY
+  createdByUserId  String? @db.VarChar(64)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   deletedAt        DateTime?
@@ -976,24 +977,24 @@ model ProxyNode {
 }
 
 model ProxyUsage {
-  id           String   @id @default(cuid())
-  workspaceId  String?
-  proxyNodeId  String
-  userId       String?
-  groupId      String?
+  id           String   @id @default(cuid()) @db.VarChar(64)
+  workspaceId  String? @db.VarChar(64)
+  proxyNodeId  String @db.VarChar(64)
+  userId       String? @db.VarChar(64)
+  groupId      String? @db.VarChar(64)
   bytesUp      Float    @default(0) // 精度 0.001 MB
   bytesDown    Float    @default(0)
   recordedAt   DateTime @default(now())
-  sessionDate  String   @default("")
+  sessionDate  String   @default("") @db.VarChar(255)
 
   @@index([proxyNodeId, sessionDate])
   @@index([userId, sessionDate])
 }
 
 model HostNode {
-  id            String   @id @default(cuid())
-  name          String
-  dockerApiUrl  String
+  id            String   @id @default(cuid()) @db.VarChar(64)
+  name          String @db.VarChar(255)
+  dockerApiUrl  String @db.VarChar(700)
   labels        Json?
   cpuCores      Float    @default(0)
   memTotalMb    Float    @default(0)
@@ -1003,8 +1004,8 @@ model HostNode {
   diskTotalMb   Float    @default(0) // r34：磁盘总容量（Docker data-root 文件系统；用户诉求：宿主机磁盘显示总容量）
   reservedCpu   Float    @default(0) // 资源预留
   reservedMemMb Float    @default(0)
-  grayGroup     String   @default("PROD")
-  status        String   @default("ONLINE")
+  grayGroup     String   @default("PROD") @db.VarChar(255)
+  status        String   @default("ONLINE") @db.VarChar(255)
   probeFailCount Int     @default(0)
   enabled       Boolean  @default(true)
   createdAt     DateTime @default(now())
@@ -1015,29 +1016,29 @@ model HostNode {
 }
 
 model SingboxInstance {
-  id              String   @id @default(cuid())
-  name            String
-  remark          String?
+  id              String   @id @default(cuid()) @db.VarChar(64)
+  name            String @db.VarChar(255)
+  remark          String? @db.Text
   tags            Json?
   cpuLimit        Float    @default(1) // 0.001 精度
   memLimitMb      Float    @default(512)
   maxSessions     Int      @default(0)
   currentSessions Int      @default(0)
-  hostNodeId      String?
-  containerId     String?
-  status          String   @default("CREATING") // CREATING | RUNNING | STOPPED | ERROR | RELOADING | DELETED
-  socksAddr       String? // 内网socks地址 host:port
-  configJson      String? // 当前配置快照
+  hostNodeId      String? @db.VarChar(64)
+  containerId     String? @db.VarChar(64)
+  status          String   @default("CREATING") @db.VarChar(255) // CREATING | RUNNING | STOPPED | ERROR | RELOADING | DELETED
+  socksAddr       String? @db.VarChar(700) // 内网socks地址 host:port
+  configJson      String? @db.MediumText // 当前配置快照
   configVersion   Int      @default(0)
   autoRestart     Boolean  @default(true)
-  lastError       String?
+  lastError       String? @db.Text
   trafficLimitMb  Float    @default(0) // 0=不限
   bytesUpMb       Float    @default(0)
   bytesDownMb     Float    @default(0)
   peakTrafficMb   Float    @default(0)
-  overLimitAction String   @default("ALERT") // ALERT | THROTTLE | BLOCK_NEW
-  ownerUserId     String?
-  createdByUserId String?
+  overLimitAction String   @default("ALERT") @db.VarChar(255) // ALERT | THROTTLE | BLOCK_NEW
+  ownerUserId     String? @db.VarChar(64)
+  createdByUserId String? @db.VarChar(64)
   expireAt        DateTime?
   lifecycleRules  Json?
   createdAt       DateTime @default(now())
@@ -1049,19 +1050,19 @@ model SingboxInstance {
 }
 
 model SingboxConfigVersion {
-  id             String   @id @default(cuid())
-  instanceId     String
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  instanceId     String @db.VarChar(64)
   version        Int
-  configJson     String
-  operatorUserId String?
+  configJson     String @db.MediumText
+  operatorUserId String? @db.VarChar(64)
   createdAt      DateTime @default(now())
 
   @@index([instanceId, version])
 }
 
 model SingboxStats {
-  id         String   @id @default(cuid())
-  instanceId String
+  id         String   @id @default(cuid()) @db.VarChar(64)
+  instanceId String @db.VarChar(64)
   cpuPct     Float    @default(0)
   memMb      Float    @default(0)
   bytesUpMb  Float    @default(0)
@@ -1072,10 +1073,10 @@ model SingboxStats {
 }
 
 model HarRecord {
-  id          String   @id @default(cuid())
-  workspaceId String
-  userId      String?
-  harJson     String?
+  id          String   @id @default(cuid()) @db.VarChar(64)
+  workspaceId String @db.VarChar(64)
+  userId      String? @db.VarChar(64)
+  harJson     String? @db.MediumText
   sizeBytes   Int      @default(0)
   deletedAt   DateTime?
   createdAt   DateTime @default(now())
@@ -1084,9 +1085,9 @@ model HarRecord {
 }
 
 model CdpRecording {
-  id          String   @id @default(cuid())
-  workspaceId String
-  fileMetaId  String?
+  id          String   @id @default(cuid()) @db.VarChar(64)
+  workspaceId String @db.VarChar(64)
+  fileMetaId  String? @db.VarChar(64)
   eventCount  Int      @default(0)
   durationMs  Int      @default(0)
   deletedAt   DateTime?
@@ -1100,22 +1101,22 @@ model CdpRecording {
 // ============================================================
 
 model McpTask {
-  id             String   @id @default(cuid())
-  taskUuid       String   @unique @default(cuid())
-  name           String
-  code           String // 操作编码
-  priority       String   @default("MEDIUM") // HIGH | MEDIUM | LOW
-  status         String   @default("PENDING") // PENDING | RUNNING | PAUSED | SUCCESS | FAILED | PARTIAL | ROLLED_BACK | CANCELLED
-  paramsJson     String?
-  resultJson     String?
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  taskUuid       String   @unique @default(cuid()) @db.VarChar(64)
+  name           String @db.VarChar(255)
+  code           String @db.Text // 操作编码
+  priority       String   @default("MEDIUM") @db.VarChar(255) // HIGH | MEDIUM | LOW
+  status         String   @default("PENDING") @db.VarChar(255) // PENDING | RUNNING | PAUSED | SUCCESS | FAILED | PARTIAL | ROLLED_BACK | CANCELLED
+  paramsJson     String? @db.MediumText
+  resultJson     String? @db.MediumText
   progress       Int      @default(0)
   totalItems     Int      @default(0)
   successItems   Int      @default(0)
   failedItems    Int      @default(0)
-  failReasonsJson String?
-  userId         String?
-  createdByUserId String?
-  apiTokenId     String?
+  failReasonsJson String? @db.MediumText
+  userId         String? @db.VarChar(64)
+  createdByUserId String? @db.VarChar(64)
+  apiTokenId     String? @db.VarChar(64)
   startedAt      DateTime?
   finishedAt     DateTime?
   createdAt      DateTime @default(now())
@@ -1126,14 +1127,14 @@ model McpTask {
 }
 
 model McpTaskItem {
-  id             String   @id @default(cuid())
-  taskId         String
-  targetType     String
-  targetId       String
-  status         String   @default("PENDING")
-  error          String?
-  beforeSnapshot String?
-  afterSnapshot  String?
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  taskId         String @db.VarChar(64)
+  targetType     String @db.Text
+  targetId       String @db.VarChar(64)
+  status         String   @default("PENDING") @db.VarChar(255)
+  error          String? @db.Text
+  beforeSnapshot String? @db.Text
+  afterSnapshot  String? @db.Text
   createdAt      DateTime @default(now())
   finishedAt     DateTime?
 
@@ -1149,19 +1150,19 @@ model McpTaskItem {
 // ============================================================
 
 model BrowseHistoryEntry {
-  id            String    @id @default(cuid())
-  workspaceId   String
-  workspaceUuid String?   // 冗余 uuid（沙箱克隆/重建后仍可溯源）
-  userId        String?
-  url           String
-  title         String?
-  domain        String?
-  category      String?   // r37：数据自动分类（SEARCH/SOCIAL/VIDEO/SHOPPING/NEWS/BANKING/GOV/EMAIL/CLOUD/DEV/AI/EDU/GAME/OTHER）
-  sensitivity   String?   // r37：敏感级别（NORMAL/SENSITIVE/HIGH）—— 银行/政府/邮箱等明文数据识别
+  id            String    @id @default(cuid()) @db.VarChar(64)
+  workspaceId   String @db.VarChar(64)
+  workspaceUuid String? @db.VarChar(64) // 冗余 uuid（沙箱克隆/重建后仍可溯源）
+  userId        String? @db.VarChar(64)
+  url           String @db.VarChar(700)
+  title         String? @db.VarChar(255)
+  domain        String? @db.VarChar(500)
+  category      String? @db.VarChar(255) // r37：数据自动分类（SEARCH/SOCIAL/VIDEO/SHOPPING/NEWS/BANKING/GOV/EMAIL/CLOUD/DEV/AI/EDU/GAME/OTHER）
+  sensitivity   String? @db.VarChar(500) // r37：敏感级别（NORMAL/SENSITIVE/HIGH）—— 银行/政府/邮箱等明文数据识别
   visitAt       DateTime  @default(now())
   dwellMs       Int       @default(0) // 停留时长（同 URL 连续访问合并累计）
   incognitoHint Boolean   @default(false)
-  source        String    @default("CDP_POLL") // CDP_POLL | MANUAL
+  source        String    @default("CDP_POLL") @db.VarChar(255) // CDP_POLL | MANUAL
   deletedAt     DateTime? // 用户本地删除标记（审计另有归档）
   createdAt     DateTime  @default(now())
 
@@ -1174,16 +1175,16 @@ model BrowseHistoryEntry {
 }
 
 model BookmarkEntry {
-  id            String    @id @default(cuid())
-  workspaceId   String
-  workspaceUuid String?
-  userId        String?
-  guid          String?   // Chromium 书签 GUID
-  url           String
-  title         String?
-  folder        String?   // 所在文件夹路径（如 书签栏/工作）
-  category      String?   // r37：数据自动分类（同 BrowseHistoryEntry）
-  sensitivity   String?   // r37：敏感级别（同 BrowseHistoryEntry）
+  id            String    @id @default(cuid()) @db.VarChar(64)
+  workspaceId   String @db.VarChar(64)
+  workspaceUuid String? @db.VarChar(64)
+  userId        String? @db.VarChar(64)
+  guid          String? @db.VarChar(64) // Chromium 书签 GUID
+  url           String @db.VarChar(700)
+  title         String? @db.VarChar(255)
+  folder        String? @db.Text // 所在文件夹路径（如 书签栏/工作）
+  category      String? @db.VarChar(255) // r37：数据自动分类（同 BrowseHistoryEntry）
+  sensitivity   String? @db.Text // r37：敏感级别（同 BrowseHistoryEntry）
   position      Int       @default(0)
   dateAdded     DateTime?
   removedAt     DateTime? // 用户删除时标记（upsert 对账）
@@ -1198,16 +1199,16 @@ model BookmarkEntry {
 }
 
 model RecycleBin {
-  id                String    @id @default(cuid())
-  resourceType      String
-  resourceId        String
-  resourceName      String?
-  ownerUserId       String?
-  createdByUserId   String?
-  deletedByUserId   String?
-  deletedByType     String    @default("USER") // USER | ADMIN | SYSTEM
-  reason            String?
-  originalSnapshot  String // 完整原始记录快照，恢复用
+  id                String    @id @default(cuid()) @db.VarChar(64)
+  resourceType      String @db.VarChar(300)
+  resourceId        String @db.VarChar(64)
+  resourceName      String? @db.VarChar(255)
+  ownerUserId       String? @db.VarChar(64)
+  createdByUserId   String? @db.VarChar(64)
+  deletedByUserId   String? @db.VarChar(64)
+  deletedByType     String    @default("USER") @db.VarChar(255) // USER | ADMIN | SYSTEM
+  reason            String? @db.Text
+  originalSnapshot  String @db.Text // 完整原始记录快照，恢复用
   locked            Boolean   @default(false) // 锁定保护
   overrideMinutes   Int?      // r28：管理员单条覆盖保留期（分钟；null=策略链解析值）
   recoverDeadline   DateTime? // 恢复时效限制
@@ -1225,15 +1226,15 @@ model RecycleBin {
 // ============================================================
 
 model FileShareLink {
-  id             String    @id @default(cuid())
-  token          String    @unique
-  domain         String    @default("STORAGE") // ROOT_FS | STORAGE
-  filePath       String    // 域内相对路径
-  fileName       String
+  id             String    @id @default(cuid()) @db.VarChar(64)
+  token          String    @unique @db.VarChar(255)
+  domain         String    @default("STORAGE") @db.VarChar(255) // ROOT_FS | STORAGE
+  filePath       String @db.Text // 域内相对路径
+  fileName       String @db.Text
   sizeBytes      Int       @default(0)
   isDir          Boolean   @default(false) // r31：文件夹分享（预览页目录浏览/zip 打包）
-  ownerUserId    String
-  accessMode     String    @default("LOGIN") // PUBLIC(免登录) | LOGIN(需登录) | USERS(指定用户/组)
+  ownerUserId    String @db.VarChar(64)
+  accessMode     String    @default("LOGIN") @db.VarChar(255) // PUBLIC(免登录) | LOGIN(需登录) | USERS(指定用户/组)
   allowedUsers   Json?     // { userIds: [], groupIds: [] } 名单（USERS 模式）
   expiresAt      DateTime? // null = 永久有效
   maxViews       Int?      // null = 不限查看次数
@@ -1241,7 +1242,7 @@ model FileShareLink {
   downloadKBps   Int?      // null = 继承用户/全局限速
   viewCount      Int       @default(0)
   downloadCount  Int       @default(0)
-  note           String?
+  note           String? @db.Text
   revokedAt      DateTime?
   lastAccessAt   DateTime?
   createdAt      DateTime  @default(now())
@@ -1258,14 +1259,14 @@ model FileShareLink {
 // ============================================================
 
 model WorkNode {
-  id               String    @id @default(cuid())
-  nodeUuid         String    @unique // WORKER_NODE_UUID
-  name             String
-  region           String    @default("default") // 归属区域（调度锁定用）
-  note             String?
-  apiKeyHash       String    // WORKER_API_KEY SHA-256（明文永不回显）
+  id               String    @id @default(cuid()) @db.VarChar(64)
+  nodeUuid         String    @unique @db.VarChar(64) // WORKER_NODE_UUID
+  name             String @db.VarChar(255)
+  region           String    @default("default") @db.VarChar(255) // 归属区域（调度锁定用）
+  note             String? @db.Text
+  apiKeyHash       String @db.VarChar(255) // WORKER_API_KEY SHA-256（明文永不回显）
   enabled          Boolean   @default(true)
-  status           String    @default("PENDING") // PENDING(已注册未接入) | ONLINE | OFFLINE | EVICTED
+  status           String    @default("PENDING") @db.VarChar(255) // PENDING(已注册未接入) | ONLINE | OFFLINE | EVICTED
   // 心跳上报（最近一次快照）
   cpuUsage         Float?
   memUsage         Float?
@@ -1275,8 +1276,8 @@ model WorkNode {
   sandboxRunning   Int       @default(0)
   netInKbps        Float?
   netOutKbps       Float?
-  version          String?
-  hostname         String?
+  version          String? @db.VarChar(255)
+  hostname         String? @db.Text
   lastHeartbeatAt  DateTime?
   // 调度容量
   maxSandboxes     Int       @default(20)
@@ -1286,8 +1287,8 @@ model WorkNode {
   memThresholdPct  Int?
   diskThresholdPct Int?
   evictedAt        DateTime?
-  evictReason      String?
-  createdByUserId  String?
+  evictReason      String? @db.Text
+  createdByUserId  String? @db.VarChar(64)
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -1297,19 +1298,19 @@ model WorkNode {
 }
 
 model RiskListRule {
-  id             String   @id @default(cuid())
-  type           String // IP_BLACK | IP_WHITE | UA_BLACK | DEVICE_BLACK
-  value          String
-  note           String?
-  mode           String   @default("PERMANENT") // TEMP | PERMANENT
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  type           String @db.VarChar(255) // IP_BLACK | IP_WHITE | UA_BLACK | DEVICE_BLACK
+  value          String @db.VarChar(300)
+  note           String? @db.Text
+  mode           String   @default("PERMANENT") @db.VarChar(255) // TEMP | PERMANENT
   expiresAt      DateTime?
   // —— 作用域：登录/入口级风控仍取 GLOBAL；用户/组/单沙箱级 IP 黑白名单供策略下发中心批量落规则 ——
-  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER | SANDBOX
-  groupId        String?
-  userId         String?
-  workspaceId    String? // scopeType=SANDBOX 时生效（单沙箱定向 IP 限制）
-  deploymentId   String?  // 来源策略下发批次（回滚时整批清理）
-  createdByUserId String?
+  scopeType      String   @default("GLOBAL") @db.VarChar(255) // GLOBAL | GROUP | USER | SANDBOX
+  groupId        String? @db.VarChar(64)
+  userId         String? @db.VarChar(64)
+  workspaceId    String? @db.VarChar(64) // scopeType=SANDBOX 时生效（单沙箱定向 IP 限制）
+  deploymentId   String? @db.VarChar(64) // 来源策略下发批次（回滚时整批清理）
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime @default(now())
 
   @@index([type, value])
@@ -1324,30 +1325,30 @@ model RiskListRule {
 // 每次下发全量快照前置状态，支持一键回滚；逐目标结果落库可审计
 // ============================================================
 model PolicyDeployment {
-  id              String   @id @default(cuid())
-  name            String // 下发批次名称
-  bundleJson      String   // 下发的策略包内容（规范化后）
+  id              String   @id @default(cuid()) @db.VarChar(64)
+  name            String @db.VarChar(255) // 下发批次名称
+  bundleJson      String @db.MediumText // 下发的策略包内容（规范化后）
   targetUsers     Json? // 目标用户ID列表
   targetGroups    Json? // 目标用户组ID列表
   targetWorkspaces Json? // 目标沙箱ID列表（单沙箱定向限制下发）
-  status          String   @default("PENDING") // PENDING(定时待生效) | RUNNING | SUCCESS | PARTIAL | FAILED | ROLLED_BACK | CANCELLED
+  status          String   @default("PENDING") @db.VarChar(255) // PENDING(定时待生效) | RUNNING | SUCCESS | PARTIAL | FAILED | ROLLED_BACK | CANCELLED
   // —— 定时生效：IMMEDIATE 立即执行；SCHEDULED 到 effectiveAt 由定时任务自动激活 ——
-  effectiveMode   String   @default("IMMEDIATE") // IMMEDIATE | SCHEDULED
+  effectiveMode   String   @default("IMMEDIATE") @db.VarChar(255) // IMMEDIATE | SCHEDULED
   effectiveAt     DateTime? // 定时生效时刻（仅 SCHEDULED）
   activatedAt     DateTime? // 实际激活执行时刻
   cancelledAt     DateTime? // 定时批次被取消时刻
-  cancelledByUserId String?
+  cancelledByUserId String? @db.VarChar(64)
   totalTargets    Int      @default(0)
   successTargets  Int      @default(0)
   failedTargets   Int      @default(0)
-  resultsJson     String? // 逐目标执行结果 [{targetId,targetType,targetName,ok,reason}]
-  snapshotJson    String? // 下发前全量状态快照（回滚依据）
-  note            String?
-  createdByUserId String?
+  resultsJson     String? @db.MediumText // 逐目标执行结果 [{targetId,targetType,targetName,ok,reason}]
+  snapshotJson    String? @db.MediumText // 下发前全量状态快照（回滚依据）
+  note            String? @db.Text
+  createdByUserId String? @db.VarChar(64)
   deployedAt      DateTime?
   finishedAt      DateTime?
   rolledBackAt    DateTime?
-  rolledBackByUserId String?
+  rolledBackByUserId String? @db.VarChar(64)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -1366,14 +1367,14 @@ model PolicyDeployment {
 // 解析：SANDBOX > USER > GROUP（沿继承链）> GLOBAL > 系统默认（下载/上传允许、file:// 禁止）
 // ============================================================
 model FilePolicyConfig {
-  id              String   @id @default(cuid())
-  scopeType       String // GLOBAL | GROUP | USER | SANDBOX
-  scopeId         String // 对应 groupId/userId/workspaceId（GLOBAL 层恒为空串）
+  id              String   @id @default(cuid()) @db.VarChar(64)
+  scopeType       String @db.VarChar(300) // GLOBAL | GROUP | USER | SANDBOX
+  scopeId         String @db.VarChar(64) // 对应 groupId/userId/workspaceId（GLOBAL 层恒为空串）
   allowDownload   Boolean  @default(true)
   allowUpload     Boolean  @default(true)
   allowFileScheme Boolean  @default(false)
-  note            String?
-  createdByUserId String?
+  note            String? @db.Text
+  createdByUserId String? @db.VarChar(64)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -1385,18 +1386,18 @@ model FilePolicyConfig {
 // 端点级精确限制规则（host:port / host:* / CIDR:port / 方案级）
 // 与域名规则同一作用域模型（GLOBAL/GROUP/USER/SANDBOX 四层合并），供策略下发中心批量落规则
 model NetworkEndpointRule {
-  id             String   @id @default(cuid())
-  pattern        String // 形如 10.0.0.5:8080 / 192.168.1.*:443 / *.corp.com:22 / 127.0.0.1:* / [::1]:9222
-  type           String   @default("BLACK") // BLACK | WHITE（WHITE=显式放行例外）
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  pattern        String @db.Text // 形如 10.0.0.5:8080 / 192.168.1.*:443 / *.corp.com:22 / 127.0.0.1:* / [::1]:9222
+  type           String   @default("BLACK") @db.VarChar(255) // BLACK | WHITE（WHITE=显式放行例外）
   enabled        Boolean  @default(true)
-  note           String?
-  scopeType      String   @default("GLOBAL") // GLOBAL | GROUP | USER | SANDBOX
-  groupId        String? // scopeType=GROUP 时生效
-  userId         String? // scopeType=USER 时生效
-  workspaceId    String? // scopeType=SANDBOX 时生效（单沙箱定向限制）
-  deploymentId   String?  // 来源策略下发批次（回滚时整批清理）
+  note           String? @db.Text
+  scopeType      String   @default("GLOBAL") @db.VarChar(255) // GLOBAL | GROUP | USER | SANDBOX
+  groupId        String? @db.VarChar(64) // scopeType=GROUP 时生效
+  userId         String? @db.VarChar(64) // scopeType=USER 时生效
+  workspaceId    String? @db.VarChar(64) // scopeType=SANDBOX 时生效（单沙箱定向限制）
+  deploymentId   String? @db.VarChar(64) // 来源策略下发批次（回滚时整批清理）
   priority       Int      @default(0)
-  createdByUserId String?
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime @default(now())
 
   @@index([scopeType, groupId])
@@ -1406,13 +1407,13 @@ model NetworkEndpointRule {
 }
 
 model PolicyTemplate {
-  id              String   @id @default(cuid())
-  name            String   @unique
-  description     String?
-  bundleJson      String   // 模板策略包（同 PolicyDeployment.bundleJson 结构）
+  id              String   @id @default(cuid()) @db.VarChar(64)
+  name            String   @unique @db.VarChar(255)
+  description     String? @db.Text
+  bundleJson      String @db.MediumText // 模板策略包（同 PolicyDeployment.bundleJson 结构）
   builtin         Boolean  @default(false) // 内置模板不可删除
   usageCount      Int      @default(0)
-  createdByUserId String?
+  createdByUserId String? @db.VarChar(64)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   deletedAt       DateTime?
@@ -1422,8 +1423,8 @@ model PolicyTemplate {
 }
 
 model UserBehaviorProfile {
-  id               String   @id @default(cuid())
-  userId           String   @unique
+  id               String   @id @default(cuid()) @db.VarChar(64)
+  userId           String   @unique @db.VarChar(64)
   resourcesCreated Int      @default(0)
   resourcesDeleted Int      @default(0)
   resourcesRestored Int     @default(0)
@@ -1436,16 +1437,16 @@ model UserBehaviorProfile {
 }
 
 model Announcement {
-  id             String   @id @default(cuid())
-  title          String
-  content        String
-  type           String   @default("GLOBAL") // GLOBAL | GROUP | USER（范围多选时的主类型：仅组=GROUP / 含用户=USER / 空=GLOBAL）
-  groupId        String?  // 兼容字段：主组（= groupIds 首项；旧单选数据即此字段）
-  userId         String?  // 兼容字段：主用户（= userIds 首项；旧单选数据即此字段）
-  groupIdsJson   String?  // r30 范围多选：目标用户组 JSON 数组（如 ["gid1","gid2"]；空=未选组）
-  userIdsJson    String?  // r30 范围多选：目标用户 JSON 数组（可与 groupIdsJson 组合=组+用户混合范围）
-  displayType    String   @default("POPUP") // POPUP | MARQUEE | FORCE_VIEW（主展示方式 = displayTypes 首项，兼容旧数据）
-  displayTypes   String?  // 多选展示方式（JSON 数组，如 ["POPUP","MARQUEE"]；空数组=仅站内信）
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  title          String @db.VarChar(255)
+  content        String @db.MediumText
+  type           String   @default("GLOBAL") @db.VarChar(255) // GLOBAL | GROUP | USER（范围多选时的主类型：仅组=GROUP / 含用户=USER / 空=GLOBAL）
+  groupId        String? @db.VarChar(64) // 兼容字段：主组（= groupIds 首项；旧单选数据即此字段）
+  userId         String? @db.VarChar(64) // 兼容字段：主用户（= userIds 首项；旧单选数据即此字段）
+  groupIdsJson   String? @db.MediumText // r30 范围多选：目标用户组 JSON 数组（如 ["gid1","gid2"]；空=未选组）
+  userIdsJson    String? @db.MediumText // r30 范围多选：目标用户 JSON 数组（可与 groupIdsJson 组合=组+用户混合范围）
+  displayType    String   @default("POPUP") @db.VarChar(255) // POPUP | MARQUEE | FORCE_VIEW（主展示方式 = displayTypes 首项，兼容旧数据）
+  displayTypes   String? @db.Text // 多选展示方式（JSON 数组，如 ["POPUP","MARQUEE"]；空数组=仅站内信）
   notifyInbox    Boolean  @default(false) // 站内信通道（发送到用户通知铃/站内信）
   notifiedAt     DateTime? // 站内信已投递时间（幂等防重发：投递一次后永不重发）
   startAt        DateTime? // 显示开始时间（null=立即显示；未到开始时间不展示）
@@ -1453,7 +1454,7 @@ model Announcement {
   persistAfterRead Boolean @default(false) // 已读后持续显示（弹窗每次刷新仍弹出，除非勾选今日不再提醒）
   allowDismiss   Boolean  @default(true) // 允许用户勾选「今日不再提醒」（管理员可控；跑马灯的今日不显示同样受控）
   enabled        Boolean  @default(true)
-  createdByUserId String?
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -1462,10 +1463,10 @@ model Announcement {
 }
 
 model AnnouncementDismiss {
-  id             String   @id @default(cuid())
-  announcementId String
-  userId         String
-  dismissDate    String   // 今日不再提醒：yyyy-MM-DD（本地时区日）
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  announcementId String @db.VarChar(64)
+  userId         String @db.VarChar(64)
+  dismissDate    String @db.VarChar(300) // 今日不再提醒：yyyy-MM-DD（本地时区日）
   dismissedAt    DateTime @default(now())
 
   @@unique([announcementId, userId, dismissDate])
@@ -1473,32 +1474,32 @@ model AnnouncementDismiss {
 }
 
 model AnnouncementRead {
-  id             String   @id @default(cuid())
-  announcementId String
-  userId         String
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  announcementId String @db.VarChar(64)
+  userId         String @db.VarChar(64)
   readAt         DateTime @default(now())
 
   @@unique([announcementId, userId])
 }
 
 model ResourceLifecycleRule {
-  id             String   @id @default(cuid())
-  resourceType   String
-  resourceId     String?
-  scopeType      String   @default("RESOURCE") // RESOURCE | GROUP | GLOBAL
-  scopeId        String?
-  rulesJson      String // { autoPauseAt, autoFreezeAt, autoExpireAt, autoRecycleAt, autoDeleteAt }
+  id             String   @id @default(cuid()) @db.VarChar(64)
+  resourceType   String @db.Text
+  resourceId     String? @db.VarChar(64)
+  scopeType      String   @default("RESOURCE") @db.VarChar(255) // RESOURCE | GROUP | GLOBAL
+  scopeId        String? @db.VarChar(64)
+  rulesJson      String @db.MediumText // { autoPauseAt, autoFreezeAt, autoExpireAt, autoRecycleAt, autoDeleteAt }
   enabled        Boolean  @default(true)
-  createdByUserId String?
+  createdByUserId String? @db.VarChar(64)
   createdAt      DateTime @default(now())
 }
 
 model SystemSelfCheck {
-  id          String   @id @default(cuid())
-  checkCode   String
-  status      String   @default("PASS") // PASS | WARN | FAIL | FIXED
-  detail      String?
-  fixedAction String?
+  id          String   @id @default(cuid()) @db.VarChar(64)
+  checkCode   String @db.VarChar(300)
+  status      String   @default("PASS") @db.VarChar(255) // PASS | WARN | FAIL | FIXED
+  detail      String? @db.Text
+  fixedAction String? @db.Text
   createdAt   DateTime @default(now())
 
   @@index([checkCode, createdAt])
@@ -1512,31 +1513,31 @@ model SystemSelfCheck {
 
 // CRX 插件资源库（元数据库；所有下发沙箱的插件必须先录入）
 model CrxPlugin {
-  id                 String    @id @default(cuid())
-  crxId              String    @unique // Chrome/Edge 商店真实 32 位扩展 ID
-  name               String
-  description        String?
-  zhNote             String? // 中文备注
+  id                 String    @id @default(cuid()) @db.VarChar(64)
+  crxId              String    @unique @db.VarChar(64) // Chrome/Edge 商店真实 32 位扩展 ID
+  name               String @db.VarChar(255)
+  description        String? @db.Text
+  zhNote             String? @db.Text // 中文备注
   tags               Json? // 业务标签 ["office","dev","ops","highrisk"]
   permissions        Json? // manifest 权限清单（自动导入 / 手动录入）
-  updateUrl          String // 主安装源 update_url
-  backupUpdateUrl    String? // 备用安装源（降级）
-  lockedVersion      String? // 强制锁定版本（禁止自动升级）
+  updateUrl          String @db.VarChar(700) // 主安装源 update_url
+  backupUpdateUrl    String? @db.VarChar(700) // 备用安装源（降级）
+  lockedVersion      String? @db.Text // 强制锁定版本（禁止自动升级）
   allowIncognito     Boolean   @default(false) // 允许无痕运行（全局默认，下发可覆盖）
   allowUserDisable   Boolean   @default(true) // false=用户沙箱内不能禁用（force_installed）
   highRisk           Boolean   @default(false) // 高危标记（按 manifest 权限自动判定）
   highRiskReason     Json? // ["all_urls","clipboardRead",...]
   enabled            Boolean   @default(true) // 库内禁用：禁用后所有继承沙箱不再安装
-  docUrl             String? // 内部文档链接
-  createdByUserId    String?
-  createdByName      String?
-  updatedByUserId    String?
-  updatedByName      String?
+  docUrl             String? @db.VarChar(700) // 内部文档链接
+  createdByUserId    String? @db.VarChar(64)
+  createdByName      String? @db.Text
+  updatedByUserId    String? @db.VarChar(64)
+  updatedByName      String? @db.Text
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
   deletedAt          DateTime? // 软删（插件库回收站）
-  deletedByUserId    String?
-  deletedByName      String?
+  deletedByUserId    String? @db.VarChar(64)
+  deletedByName      String? @db.Text
 
   @@index([deletedAt])
   @@index([enabled])
@@ -1546,18 +1547,18 @@ model CrxPlugin {
 
 // 五级 CRX 策略条目（强制安装列表项：GLOBAL / GROUP / USER / SANDBOX 层）
 model CrxPolicyEntry {
-  id               String    @id @default(cuid())
-  scopeType        String // GLOBAL | GROUP | USER | SANDBOX
-  scopeId          String? // 对应 groupId/userId/workspaceId（GLOBAL 为空）
-  crxId            String
-  updateUrl        String? // 覆盖主源
-  backupUpdateUrl  String? // 覆盖备用源
-  lockedVersion    String? // 覆盖锁定版本
+  id               String    @id @default(cuid()) @db.VarChar(64)
+  scopeType        String @db.VarChar(300) // GLOBAL | GROUP | USER | SANDBOX
+  scopeId          String? @db.VarChar(64) // 对应 groupId/userId/workspaceId（GLOBAL 为空）
+  crxId            String @db.VarChar(64)
+  updateUrl        String? @db.VarChar(700) // 覆盖主源
+  backupUpdateUrl  String? @db.VarChar(700) // 覆盖备用源
+  lockedVersion    String? @db.Text // 覆盖锁定版本
   allowIncognito   Boolean? // 覆盖无痕运行
   allowUserDisable Boolean? // 覆盖可禁用
-  note             String?
-  createdByUserId  String?
-  createdByName    String?
+  note             String? @db.Text
+  createdByUserId  String? @db.VarChar(64)
+  createdByName    String? @db.Text
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
   deletedAt        DateTime?
@@ -1569,13 +1570,13 @@ model CrxPolicyEntry {
 
 // CRX 黑名单（强制禁止安装；GLOBAL 层为主，黑名单不随继承开关失效）
 model CrxBlocklistEntry {
-  id              String   @id @default(cuid())
-  scopeType       String // GLOBAL | GROUP | USER | SANDBOX
-  scopeId         String?
-  crxId           String
-  note            String?
-  createdByUserId String?
-  createdByName   String?
+  id              String   @id @default(cuid()) @db.VarChar(64)
+  scopeType       String @db.VarChar(300) // GLOBAL | GROUP | USER | SANDBOX
+  scopeId         String? @db.VarChar(64)
+  crxId           String @db.VarChar(64)
+  note            String? @db.Text
+  createdByUserId String? @db.VarChar(64)
+  createdByName   String? @db.Text
   createdAt       DateTime @default(now())
 
   @@unique([scopeType, scopeId, crxId])
@@ -1584,17 +1585,17 @@ model CrxBlocklistEntry {
 
 // 沙箱逐插件安装状态（安装调度状态机）
 model CrxInstallStatus {
-  id              String    @id @default(cuid())
-  workspaceId     String
-  crxId           String
-  state           String    @default("PENDING") // PENDING | POLICY_APPLIED | INSTALLED | PRIMARY_FAILED | BACKUP_RETRY | ALL_FAILED | VERSION_MISMATCH
-  sourceUsed      String? // 当前使用的源（主/备）
-  currentVersion  String? // 实际安装版本（CDP 检测）
+  id              String    @id @default(cuid()) @db.VarChar(64)
+  workspaceId     String @db.VarChar(64)
+  crxId           String @db.VarChar(64)
+  state           String    @default("PENDING") @db.VarChar(255) // PENDING | POLICY_APPLIED | INSTALLED | PRIMARY_FAILED | BACKUP_RETRY | ALL_FAILED | VERSION_MISMATCH
+  sourceUsed      String? @db.Text // 当前使用的源（主/备）
+  currentVersion  String? @db.Text // 实际安装版本（CDP 检测）
   attempts        Int       @default(0)
-  lastErrorCode   String?
+  lastErrorCode   String? @db.Text
   lastErrorAt     DateTime?
   lastCheckedAt   DateTime?
-  resolvedBy      String? // SANDBOX | USER | GROUP | GLOBAL | LIBRARY
+  resolvedBy      String? @db.Text // SANDBOX | USER | GROUP | GLOBAL | LIBRARY
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
@@ -1615,25 +1616,25 @@ model CrxInstallStatus {
 // = 一组录像会话，组内按 segmentIndex 分段，浏览器进程自愈重启不中断）。
 // ============================================================
 model VncRecording {
-  id             String    @id @default(cuid())
-  workspaceId    String
-  workspaceUuid  String?   // 冗余（工作区删除后仍可溯源）
-  workspaceName  String    // 冗余同上（列表可读）
-  userId         String    // 归属用户（录像文件存其用户空间）
-  username       String?   // 冗余（用户删除后可读）
-  sessionId      String    // 录像会话组（= 沙箱进程树 id emb-*/dy-browser-*）
+  id             String    @id @default(cuid()) @db.VarChar(64)
+  workspaceId    String @db.VarChar(64)
+  workspaceUuid  String? @db.VarChar(64) // 冗余（工作区删除后仍可溯源）
+  workspaceName  String @db.Text // 冗余同上（列表可读）
+  userId         String @db.VarChar(64) // 归属用户（录像文件存其用户空间）
+  username       String? @db.VarChar(255) // 冗余（用户删除后可读）
+  sessionId      String @db.VarChar(64) // 录像会话组（= 沙箱进程树 id emb-*/dy-browser-*）
   segmentIndex   Int       @default(0) // 组内分段序号（0 起）
-  status         String    @default("RECORDING") // RECORDING | COMPLETED | FAILED
-  trigger        String    @default("AUTO") // AUTO（策略自动开录）| MANUAL（管理员手动取证）
+  status         String    @default("RECORDING") @db.VarChar(255) // RECORDING | COMPLETED | FAILED
+  trigger        String    @default("AUTO") @db.VarChar(255) // AUTO（策略自动开录）| MANUAL（管理员手动取证）
   startedAt      DateTime  @default(now()) // 本段开始
   endedAt        DateTime? // 本段结束（扫描/终结时回填）
   durationSec    Int       @default(0)
   sizeBytes      Int       @default(0)
-  storageKey     String?   // 相对 storage 根路径（recordings/<userId>/<sessionId>/seg-NNN.mp4）
-  resolution     String?
+  storageKey     String? @db.VarChar(400) // 相对 storage 根路径（recordings/<userId>/<sessionId>/seg-NNN.mp4）
+  resolution     String? @db.Text
   fps            Int       @default(12)
-  policySource   String?   // 录像策略命中层（SANDBOX|USER|GROUP|GLOBAL_DEFAULT）
-  note           String?
+  policySource   String? @db.Text // 录像策略命中层（SANDBOX|USER|GROUP|GLOBAL_DEFAULT）
+  note           String? @db.Text
   viewCount      Int       @default(0)
   lastViewedAt   DateTime?
   downloadCount  Int       @default(0)
@@ -1654,19 +1655,19 @@ model VncRecording {
 }
 
 model CrxGrayTask {
-  id              String    @id @default(cuid())
-  name            String
-  entriesJson     String // [{ crxId, updateUrl?, lockedVersion?, allowIncognito?, allowUserDisable? }]
+  id              String    @id @default(cuid()) @db.VarChar(64)
+  name            String @db.VarChar(255)
+  entriesJson     String @db.MediumText // [{ crxId, updateUrl?, lockedVersion?, allowIncognito?, allowUserDisable? }]
   targetIds       Json // [workspaceId,...] 灰度目标沙箱
-  status          String    @default("PENDING") // PENDING | ROLLING | SUCCESS | PARTIAL | ROLLED_BACK | CANCELLED
+  status          String    @default("PENDING") @db.VarChar(255) // PENDING | ROLLING | SUCCESS | PARTIAL | ROLLED_BACK | CANCELLED
   batchSize       Int       @default(3)
   total           Int       @default(0)
   progressed      Int       @default(0)
   successCount    Int       @default(0)
   failCount       Int       @default(0)
-  rollbackReason  String?
-  createdByUserId String?
-  createdByName   String?
+  rollbackReason  String? @db.Text
+  createdByUserId String? @db.VarChar(64)
+  createdByName   String? @db.Text
   createdAt       DateTime  @default(now())
   activatedAt     DateTime?
   finishedAt      DateTime?
@@ -1682,16 +1683,16 @@ model CrxGrayTask {
 // ============================================================
 
 model MonitorGrant {
-  id              String    @id @default(cuid())
-  workspaceId     String
-  userId          String? // 被监控用户（冗余，展示与筛选）
-  channel         String // camera | microphone | screenShare
-  mode            String // CONSENT | SILENT
-  reason          String? // 授权理由（SILENT 必填）
-  grantedByUserId String
-  grantedByName   String
+  id              String    @id @default(cuid()) @db.VarChar(64)
+  workspaceId     String @db.VarChar(64)
+  userId          String? @db.VarChar(64) // 被监控用户（冗余，展示与筛选）
+  channel         String @db.VarChar(255) // camera | microphone | screenShare
+  mode            String @db.VarChar(255) // CONSENT | SILENT
+  reason          String? @db.Text // 授权理由（SILENT 必填）
+  grantedByUserId String @db.VarChar(64)
+  grantedByName   String @db.Text
   active          Boolean   @default(true)
-  cutOffBy        String? // USER_CUTOFF | ADMIN_REVOKE | SESSION_END
+  cutOffBy        String? @db.Text // USER_CUTOFF | ADMIN_REVOKE | SESSION_END
   startedAt       DateTime  @default(now())
   endedAt         DateTime?
   createdAt       DateTime  @default(now())
@@ -1707,18 +1708,18 @@ model MonitorGrant {
 // ============================================================
 
 model MediaCast {
-  id                 String    @id @default(cuid())
-  workspaceId        String
-  userId             String?
-  fileName           String
-  mediaKind          String // video | audio
+  id                 String    @id @default(cuid()) @db.VarChar(64)
+  workspaceId        String @db.VarChar(64)
+  userId             String? @db.VarChar(64)
+  fileName           String @db.Text
+  mediaKind          String @db.Text // video | audio
   seekSec            Int       @default(0) // 定点秒
-  storagePath        String? // 沙箱内投递文件路径（重置即清理）
+  storagePath        String? @db.Text // 沙箱内投递文件路径（重置即清理）
   castPid            Int? // ffplay 进程（存活巡检自动收口）
-  status             String    @default("PLAYING") // PLAYING | STOPPED
-  stopReason         String? // RESET | REPLACE | EXITED
-  deliveredByUserId  String?
-  deliveredByName    String?
+  status             String    @default("PLAYING") @db.VarChar(255) // PLAYING | STOPPED
+  stopReason         String? @db.Text // RESET | REPLACE | EXITED
+  deliveredByUserId  String? @db.VarChar(64)
+  deliveredByName    String? @db.Text
   startedAt          DateTime  @default(now())
   stoppedAt          DateTime?
 
@@ -1740,26 +1741,26 @@ model MediaCast {
 // ============================================================
 
 model FileObject {
-  id            String    @id @default(cuid())
-  fileKey       String    @unique // <sha256前16>-<安全化文件名>
-  name          String
+  id            String    @id @default(cuid()) @db.VarChar(64)
+  fileKey       String    @unique @db.VarChar(400) // <sha256前16>-<安全化文件名>
+  name          String @db.VarChar(255)
   sizeBytes     Int       @default(0)
-  mimeType      String?
-  sha256        String?
+  mimeType      String? @db.Text
+  sha256        String? @db.Text
   // 归属语义（路由键）
-  bindType      String    @default("GENERAL") // SANDBOX | USER | SHARE | GENERAL
-  bindId        String?
+  bindType      String    @default("GENERAL") @db.VarChar(255) // SANDBOX | USER | SHARE | GENERAL
+  bindId        String? @db.VarChar(64)
   // 分层与副本
-  tier          String    @default("HOT") // HOT | COLD
+  tier          String    @default("HOT") @db.VarChar(255) // HOT | COLD
   replicas      Int       @default(1)
   // 上传通道与中转
-  uploadChannel String    @default("MASTER_RELAY") // MASTER_RELAY | DIRECT_WORKER
+  uploadChannel String    @default("MASTER_RELAY") @db.VarChar(255) // MASTER_RELAY | DIRECT_WORKER
   relayExpiresAt DateTime? // 中转 TTL（24h；到期强制下沉）
   relayed       Boolean   @default(false)
   lastAccessAt  DateTime  @default(now())
-  accessNode    String? // 最近访问节点（共享下沉判定）
-  createdById   String?
-  createdByName String?
+  accessNode    String? @db.Text // 最近访问节点（共享下沉判定）
+  createdById   String? @db.VarChar(64)
+  createdByName String? @db.Text
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -1771,14 +1772,14 @@ model FileObject {
 }
 
 model FilePlacement {
-  id        String   @id @default(cuid())
-  fileId    String
+  id        String   @id @default(cuid()) @db.VarChar(64)
+  fileId    String @db.VarChar(64)
   file      FileObject @relation(fields: [fileId], references: [id], onDelete: Cascade)
-  nodeUuid  String // 落地节点（MASTER=主控；wn-xxx=Worker）
-  role      String   @default("PRIMARY") // PRIMARY | REPLICA
-  status    String   @default("ACTIVE") // ACTIVE | SYNCING | LOST | MIGRATING
+  nodeUuid  String @db.VarChar(64) // 落地节点（MASTER=主控；wn-xxx=Worker）
+  role      String   @default("PRIMARY") @db.VarChar(255) // PRIMARY | REPLICA
+  status    String   @default("ACTIVE") @db.VarChar(255) // ACTIVE | SYNCING | LOST | MIGRATING
   sizeBytes Int      @default(0)
-  syncJobId String? // 下沉/同步任务（中转 24h / 副本修复）
+  syncJobId String? @db.VarChar(64) // 下沉/同步任务（中转 24h / 副本修复）
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
 
@@ -1794,16 +1795,16 @@ model FilePlacement {
 //   · 静默模式（无提示监控）由既有 silent 开关承担；本表只管「申请→批准」链
 // ============================================================
 model HardwareAccessRequest {
-  id           String    @id @default(cuid())
-  userId       String
-  workspaceId  String? // 空=账号级申请（对该用户全部沙箱生效）
-  permId       String // HARDWARE_PERMS 目录项：camera/microphone/usb/...
-  mode         String    @default("PENDING") // PENDING | GRANTED | DENIED | EXPIRED | REVOKED
-  reason       String? // 申请理由
-  scope        String    @default("self") // self=本人 | admin-silent=管理员静默授予
-  decidedBy    String? // 审批管理员 userId
-  decidedByName String?
-  decisionNote String? // 审批备注
+  id           String    @id @default(cuid()) @db.VarChar(64)
+  userId       String @db.VarChar(64)
+  workspaceId  String? @db.VarChar(64) // 空=账号级申请（对该用户全部沙箱生效）
+  permId       String @db.VarChar(64) // HARDWARE_PERMS 目录项：camera/microphone/usb/...
+  mode         String    @default("PENDING") @db.VarChar(255) // PENDING | GRANTED | DENIED | EXPIRED | REVOKED
+  reason       String? @db.Text // 申请理由
+  scope        String    @default("self") @db.VarChar(255) // self=本人 | admin-silent=管理员静默授予
+  decidedBy    String? @db.Text // 审批管理员 userId
+  decidedByName String? @db.Text
+  decisionNote String? @db.Text // 审批备注
   expiresAt    DateTime? // 授权有效期（空=永久直至撤销）
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt

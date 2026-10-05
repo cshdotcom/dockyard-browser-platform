@@ -16,7 +16,13 @@
     "db:push:postgres": "prisma db push --schema prisma/schema.postgres.prisma --accept-data-loss",
     "db:seed:postgres": "bun prisma/seed-postgres.ts",
     "db:triggers:postgres": "bun db/postgres/apply-triggers.ts",
-    "db:init:postgres": "bun run db:push:postgres && bun run db:triggers:postgres && bun run db:seed:postgres"
+    "db:init:postgres": "bun run db:push:postgres && bun run db:triggers:postgres && bun run db:seed:postgres",
+    "db:sync-mysql-schema": "bun scripts/db/sync-mysql-schema.ts",
+    "db:generate:mysql": "prisma generate --schema prisma/schema.mysql.prisma",
+    "db:push:mysql": "prisma db push --schema prisma/schema.mysql.prisma --accept-data-loss",
+    "db:seed:mysql": "bun prisma/seed-mysql.ts",
+    "db:init:mysql": "bun run db:push:mysql && bun run db:seed:mysql",
+    "db:migrate-provider": "bun scripts/db/migrate-provider.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

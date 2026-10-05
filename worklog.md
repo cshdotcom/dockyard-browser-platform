@@ -1297,3 +1297,51 @@ Stage Summary:
 - r36 交付：CDP 链路三重根因修复（docker cdpUrl 缺失/网关 http 票据拒绝/早期消息丢失）+ --no-sandbox 警告条根因三层修复 + 公网网关五重加固 + CDP/Worker 地址后台可配置 + 声音链路镜像级补全 + 用户级隔离与硬件总控 + 备份容灾三件套（多节点/txt 清单/零落盘在线打包）
 - 交付物：download/qa-r36/ 10 张截图；测试脚本 scripts/qa-r36.ts（67 断言）；deploy/seccomp/（Chromium 原生沙箱启用路径）
 - 架构新增：WorkNodeCommand 通用指令队列通道（备份推送为首个消费者，后续调度指令可复用）
+
+---
+Task ID: r37
+Agent: main
+Task: r37 大批次 —— 用户点名：CDP 公网连接地址全生命周期（重建/有效期/管理员强制/批量）+ 访客访问系统（VNC/CDP 读写+密码+分享管控）+ 数据分类（历史书签明文自动识别）+ 远程打印 + Playground + 组筛选 + 升降级数据保留开关 + DB 灾难抢修
+
+Work Log:
+- 【P0 DB 灾难抢修】环境恢复删除 WAL 文件 → 主库 "disk image is malformed"（新进程全拒,旧 dev 进程凭已删 fd 照常工作,极具迷惑性）。/proc/1204/fd 救援 4MB WAL → 逐表 salvage（83 表,DDL+数据,1 表页损坏丢弃）→ prisma db push 恢复全部 184 索引（salvage 漏索引导致 upsert "ON CONFLICT does not match" 二次故障一并修复）→ seed 重播种 180 配置项。db/recovery/ 留档+gitignore
+- 【CDP 持久连接地址】CdpEndpointToken 模型（tid 48hex/expireAt null=永久/maxUses/useCount/rotatedFromId 血缘/lastUsedIp）；网关新 /p/<tid> 路径 → 主应用 POST /api/cdp/resolve（X-Internal-Token 共享密钥）实时校验吊销/过期/次数（fail-closed）+ 计数；沙箱重启 tgt 自动跟随（不存在陈旧地址）；actions 六件套（list/create/update/revoke/rotate/adminBatch scope×op 矩阵）；CdpPanel 管理卡（创建弹窗永久/自定义+轮换确认+修改+吊销+复制）；用户表/组树/工作区表三处行菜单批量强制；cdp.allowPersistentTokens/persistentTokenMaxPerWorkspace 配置；QA 实证 ECHO 回显+吊销即时拒连+409 端点不可用语义
+- 【访客访问】WorkspaceShareLink 8 新字段（passwordHash/guestAllowed/guestCdp/黑白名单×4/计数审计）；/view/<token> 公共页（复用 HelmPortViewer+fetchTicket 票据注入）；三个公共 API（vnc-ticket 只读服务端强制/cdp-ticket 仅 OPERATE+guestCdp/verify 独立密码门）；四级管控（沙箱>用户三态>组>全局默认关）全 UI 接入；兑换链密码+黑白名单（deny 优先）；QA+浏览器双实证（密码错误 401/正确进入/VNC 观看器渲染+120min 倒计时/全局关立即拒）
+- 【数据分类】data-classification.ts 纯函数（域名精确>后缀>关键词,16 类×三级敏感）；采集钩子+回填 action（分批）；BookmarkEntry/BrowseHistoryEntry +category/sensitivity+索引；用户侧 chips 筛选+徽章（实测银行金融筛选只剩工行）；管理端总览（分布+高敏 Top10+回填按钮）
+- 【远程打印】print_pdf 动作（真 printToPDF+模拟内置 PDF）+/api/vnc-proxy/print（开关+权限锁+限流+审计）+客户端 iframe print；VNC/CDP/Playground 三入口；QA %PDF magic + 浏览器 iframe 预览实证
+- 【Playground】/playground 新页（连接测试拨测/状态/调试/目标/截图预览/打印/JS 4 模板/导航）；playgroundRunAction 白名单+权限锁+开关+限流；菜单入口；executeBrowserAction +allowNovnc+OPERATE 共享放行+via INTERNAL
+- 【升降级保留开关】preserveData 参数+modeSwitchPreserveData/modeSwitchForceFresh 配置链（管理员强制丢弃最高优）
+- 【组筛选】admin workspaces GroupFilterPopover+服务端过滤；admin users GroupUserFilter+组员交集；QA URL 参数命中实证+浏览器徽章实证
+- 【VNC 快照可见性】快照页/弹窗双模式文案（原来写死"运行中的 cdp_light"误导）+工作区详情一键创建快照按钮（r35 后端早已支持 VNC,用户看不到入口）
+- 【顺手根因修复】分享 freshLink「仅此一次展示」从未显示（onCreated 置值即被 onOpenChange(false) 清空）；访客密码门复用 vnc-ticket（CDP 模式恒 403）→独立 verify；resolve 密钥回退链与网关不一致预堵；配置缓存 30s TTL（多实例传播）；分类规则 gov.cn 误入 BANKING+pan.baidu 被 baidu 抢匹配修复；dev OOM（3GB 被 4GB 容器杀）→NODE_OPTIONS 1536MB 重启
+- 【质量门】tsc 23=基线零新增；eslint 0/0；build 82 路由 48s 全绿；QA 61/61；浏览器 E2E 24 截图（Playground 探测+PDF 预览/持久地址创建+轮换+公网地址渲染/访客密码门全链路+VNC 观看器/组筛选/分类筛选/菜单 CDP+访客入口/快照双模式/配置分类卡 7+51 项/移动端 375×2 无溢出）；QA 数据全清（工作区 0）
+
+Stage Summary:
+- r37 交付：CDP 票据地址管理（重建/永久/自定义/管理员强制批量/网关实时校验）+ 访客系统（密码/四级管控/黑白名单/VNC 只读写/CDP 访客票据）+ 数据分类引擎（16 类×三级敏感+回填+统计）+ 远程打印 + Playground + 组筛选 + 升降级保留开关 + 6 项顺手根因修复
+- 灾难恢复：DB WAL 救援+salvage+索引重建（数据 0 丢失,配置 180 项）
+- 发布：commit 67fd3e9 → push main → tag v1.13.0；截图存档 download/qa-r37/（24 张）；测试脚本 scripts/qa-r37.ts（61 断言）
+
+---
+Task ID: r38
+Agent: main
+Task: r38 大批次 —— MySQL 第三数据库引擎（100% 兼容 + 自动初始化）+ 数据库 GUI 双通道（安装向导绑定/env 自动/二次初始化迁移/回滚）+ PG 完整性修复 + 硬件透传静默/申请双模式 + 管理员监控 + 打印内网穿透实证 + 企业策略补强 + 3 小时 QA
+
+Work Log:
+- 【MySQL 全支持】schema.mysql.prisma 派生脚本（scripts/db/sync-mysql-schema.ts：617 String 字段逐个注入 @db.VarChar/Text/MediumText —— Prisma MySQL 默认 VARCHAR(191) 截断长内容的根本兼容问题；索引参与字段自动降级 VarChar；复合索引 3072 字节预算校验）+ @prisma/client-mysql 独立生成（与 sqlite/postgres 客户端并存）+ seed-mysql.ts（SEED_SKIP_ADMIN 门）+ db.ts mysql 分支 + start.sh mysql 自动初始化段（与 PG 同级自愈重试）+ Dockerfile/next.config 三客户端打包
+- 【MySQL CRUD 实测】MariaDB 11.8.6（/home/z/db-test 便携部署：apt download + dpkg -x 无 root 方案）+ PostgreSQL 17.11 双真实实例；14/14 冒烟（Json 嵌套往返/100KB MediumText 无损/唯一约束/事务/中文/upsert 幂等）
+- 【db.ts 架构重写】三 Provider 统一工厂 createClientFor（env 协议防污染策略：仅协议不匹配才改写）+ Proxy 转发热切换（export db = Proxy → 活跃客户端；rebuildDbClient() 重建即时全站生效）+ db-active.json 运行时配置链（GUI > env > 默认）+ provider 钉住（pin）机制（env 后改类型 → 运行库锚定有数据的库绝不切空库，后台横幅引导二次初始化）+ probeDatabase 三库探测（env 保存恢复防自引用污染）+ 迁移维护模式写拦截（$extensions 拦截层 2s TTL）
+- 【createRequire 突破】Turbopack dev 对动态 require 报 "expression is too dynamic"（r32 拼接方案失效）→ nodeCreateRequire(项目根 package.json) 真实 Node 文件系统解析，dev/prod 双态可靠；serverExternalPackages + outputFileTracingIncludes 补 @prisma/client-mysql
+- 【CONFIG_DEFAULTS 抽层】src/lib/config-defaults.ts 零依赖模块（seed→config→db import 链会在 import 期改写 env 污染 seed 目标库指向 —— 根因修复；seed 三件改引 config-defaults）
+- 【迁移引擎 scripts/db/migrate-provider.ts】子进程形态（内存/崩溃隔离）：NDJSON 全量备份（81 文件）→ prisma db push 目标结构 → 拓扑序清空+复制（DMMF Kahn 排序 + FK 禁用兜底 MySQL SET FOREIGN_KEY_CHECKS=0 / PG DISABLE TRIGGER）→ 逐表计数校验（不匹配即 error，源库零损失）→ db-active.json 原子落盘（prevProvider/rollbackUntil 血缘）→ PG 审计触发器自动补齐；实测 sqlite→mysql 81 表 797 行 2 秒 / mysql→pg 81 表 232 行 2 秒
+- 【GUI 双通道】/api/setup/database（向导状态+绑定初始化：env 预填+SEED_SKIP_ADMIN 防默认密码+灾难恢复 setupToken 门）+ /api/admin/database（状态总览/mismatch 检测/test 探测/migrate 启动/adopt 采纳/rollback 回滚 —— 全部管理员登录态）+ 完成对账热切换（GET 幂等 + 原子态写）+ /setup 两步向导 UI（DatabaseBindingStep 条件展开）+ /admin/database 管理页（状态卡/迁移进度条/回滚卡/三引擎说明）+ 导航入口
+- 【PG 完整性修复】schema.postgres.prisma 过期根因（r36 的 publicUrl 等未同步）→ 重跑 sync-postgres + 三客户端再生成；PG 迁移链路全验证（含审计触发器自动应用）
+- 【硬件透传静默/申请双模式】HardwareAccessRequest 模型（PENDING/GRANTED/DENIED/REVOKED/EXPIRED + expiresAt 有效期 + workspaceId 沙箱级/账号级作用域）+ resolveHardwarePolicy 授权感知（GRANTED 未过期 → enabled；过期/撤销自动回落）+ 五个 action（用户提交/我的申请/审批队列/批准拒绝撤销/监控总览）+ /admin/hardware 监控页（待审批队列+有效期输入+活跃授权+撤销+17 项分布+HARDWARE_* 审计流）+ 工作区详情「硬件申请」tab（用户侧提交+生效授权显示）；浏览器 UI 全闭环实证（提交→批准 2h→生效显示→撤销）
+- 【企业策略补强】8 项高价值策略：VideoCaptureAllowed/AudioCaptureAllowed/ScreenCaptureAllowed/VideoCaptureAllowedUrls/AudioCaptureAllowedUrls（媒体捕获企业总闸 —— 与硬件 17 项双闸联动）+ SSLVersionMin（TLS 地板防降级）+ AutoSelectCertificateForUrls + FileSystemWriteBlockedForUrls
+- 【打印机内网穿透实证】内网地址（http://21.0.20.158:3000 非公网）全链：登录→打印 API→%PDF- 魔数→application/pdf→EOF 结构完整 8/8；HTTP 同源链路不依赖公网 IP
+- 【QA 3 小时+】qa-r38-full.ts 编排：A 核心套件（db-proxy 16/mysql-crud 14/hardware 12/migrate-e2e 10/api-e2e 16/print 8）+ B 三库矩阵 13 + C soak 170 分钟持续负载（登录/会话/三库探测轮询 + 401 快速自愈 + dev 守护自动重启）；run1 真实韧性事件存档（跨库会话失效→10min 刷新自愈 370 行日志）
+- 【质量门】tsc src 23=基线零新增；eslint 0/0；next build 48s 全绿 standalone（86+ 页）
+
+Stage Summary:
+- r38 交付：MySQL 第三引擎（类型映射根治 + 自动初始化 + 真实实例 14/14）+ 数据库 GUI 双通道全生命周期（向导绑定/env 自动/二次初始化迁移 2 秒 81 表/一键回滚源库零损）+ PG schema 过期修复 + 硬件申请审批流（UI 闭环实证）+ 打印内网穿透 8/8 + 企业策略 8 项 + QA 3h+ 编排
+- 关键架构：Proxy 热切换（全站零重启切库）/ db-active.json 配置链 / pin 锚定防空库切换 / createRequire 绕过打包器 / CONFIG_DEFAULTs 零依赖抽层
+- 测试证据：A 1-6 全绿（16+14+12+10+16+8）+ B 13/13 + soak 170min + 浏览器 8 截图（download/qa-r38/）

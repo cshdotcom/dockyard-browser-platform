@@ -5,7 +5,7 @@
 //   未提供环境变量且库中无任何管理员 → 登录页引导跳转 /setup 首启注册页
 import { PrismaClient } from "@prisma/client"
 import bcrypt from "bcryptjs"
-import { CONFIG_DEFAULTS } from "../src/lib/config"
+import { CONFIG_DEFAULTS } from "../src/lib/config-defaults"
 
 const db = new PrismaClient()
 
@@ -27,6 +27,10 @@ async function main() {
   console.log(`[seed] 系统配置 ${Object.keys(CONFIG_DEFAULTS).length} 项已就绪`)
 
   // ---- 超管账号（配置文件/环境变量引导；幂等，后期可经账号安全页修改）----
+  // [r38] SEED_SKIP_ADMIN=1：GUI 安装向导形态 —— 不播种超管/演示账号（杜绝默认密码入库）；
+  //       向导第二步（/setup 表单，setup token 门）创建首个管理员。admin 依赖段全部可空安全。
+  const skipAdmin = process.env.SEED_SKIP_ADMIN === "1"
+  if (skipAdmin) console.log(`[seed] SEED_SKIP_ADMIN=1 —— 跳过账号播种（GUI 向导将创建首个管理员）`)
   const adminUsername = process.env.ADMIN_USERNAME || "admin"
   const adminEmail = process.env.ADMIN_EMAIL || "admin@dockyard.local"
   const adminPassword = process.env.ADMIN_PASSWORD || "Admin@2026"
@@ -34,7 +38,7 @@ async function main() {
   const existingAdmin = await db.user.findFirst({
     where: { OR: [{ username: adminUsername }, { email: adminEmail }], role: { in: ["SUPER_ADMIN", "ADMIN"] } },
   })
-  const admin = existingAdmin
+  const admin = skipAdmin ? null : existingAdmin
     ? forceSync && process.env.ADMIN_PASSWORD
       ? await db.user.update({
           where: { id: existingAdmin.id },
@@ -56,11 +60,11 @@ async function main() {
         },
       })
   console.log(
-    `[seed] 超管账号 ${admin.username} 就绪${existingAdmin ? (forceSync ? "（密码已按 ADMIN_PASSWORD 同步）" : "（已存在，未覆盖）") : `（密码：${process.env.ADMIN_PASSWORD ? "来自 ADMIN_PASSWORD 环境变量" : "Admin@2026 默认值，请尽快修改"}）`}`,
+    `[seed] 超管账号 ${admin ? admin.username : '（跳过）'} 就绪${existingAdmin ? (forceSync ? "（密码已按 ADMIN_PASSWORD 同步）" : "（已存在，未覆盖）") : `（密码：${process.env.ADMIN_PASSWORD ? "来自 ADMIN_PASSWORD 环境变量" : "Admin@2026 默认值，请尽快修改"}）`}`,
   )
 
   // ---- 默认演示用户（SEED_DEMO=0 可跳过，生产环境建议关闭）----
-  if (process.env.SEED_DEMO !== "0") {
+  if (process.env.SEED_DEMO !== "0" && !skipAdmin) {
     const demoPassword = "Demo@2026"
     await db.user.upsert({
       where: { username: "demo" },
@@ -79,6 +83,7 @@ async function main() {
     console.log(`[seed] 演示用户 demo 就绪（密码：${demoPassword}）`)
   }
 
+
   // ---- 默认用户组 ----
   const defaultGroup = await db.group.upsert({
     where: { name: "默认用户组" },
@@ -87,14 +92,16 @@ async function main() {
       name: "默认用户组",
       description: "系统默认用户组",
       quota: { sessions: 20, novncSessions: 8, diskMb: 4096 },
-      createdByUserId: admin.id,
+      createdByUserId: admin?.id ?? null,
     },
   })
-  await db.groupUser.upsert({
-    where: { groupId_userId: { groupId: defaultGroup.id, userId: admin.id } },
-    update: {},
-    create: { groupId: defaultGroup.id, userId: admin.id },
-  })
+  if (admin) {
+    await db.groupUser.upsert({
+      where: { groupId_userId: { groupId: defaultGroup.id, userId: admin.id } },
+      update: {},
+      create: { groupId: defaultGroup.id, userId: admin.id },
+    })
+  }
   const demoUser = await db.user.findUnique({ where: { username: "demo" } })
   if (demoUser) {
     await db.groupUser.upsert({
@@ -204,7 +211,7 @@ async function main() {
           locale: "zh-CN",
           variables: {},
         }),
-        createdByUserId: admin.id,
+        createdByUserId: admin?.id ?? null,
       },
     })
     await db.browserTemplate.create({
@@ -218,7 +225,7 @@ async function main() {
           locale: "zh-CN",
           variables: {},
         }),
-        createdByUserId: admin.id,
+        createdByUserId: admin?.id ?? null,
       },
     })
   }
@@ -238,7 +245,7 @@ async function main() {
             domainRules: { mode: "BLACKLIST", patterns: [] },
             ipRules: { mode: "BLACKLIST", values: [] },
           }),
-          createdByUserId: admin.id,
+          createdByUserId: admin?.id ?? null,
         },
         {
           name: "内网调研通道",
@@ -250,7 +257,7 @@ async function main() {
             domainRules: { mode: "BLACKLIST", patterns: ["*.gambling.example", "malware.test"] },
             ipRules: { mode: "BLACKLIST", values: [] },
           }),
-          createdByUserId: admin.id,
+          createdByUserId: admin?.id ?? null,
         },
         {
           name: "白名单严格模式",
@@ -262,7 +269,7 @@ async function main() {
             domainRules: { mode: "WHITELIST", patterns: ["*.company.example", "docs.company.example"] },
             ipRules: { mode: "WHITELIST", values: [] },
           }),
-          createdByUserId: admin.id,
+          createdByUserId: admin?.id ?? null,
         },
       ],
     })
@@ -274,8 +281,8 @@ async function main() {
   if (drCount === 0) {
     await db.domainRule.createMany({
       data: [
-        { pattern: "*.ads.example", type: "BLACK", note: "全局广告域名拦截", scopeType: "GLOBAL", createdByUserId: admin.id },
-        { pattern: "tracker.example", type: "BLACK", note: "全局追踪器拦截", scopeType: "GLOBAL", createdByUserId: admin.id },
+        { pattern: "*.ads.example", type: "BLACK", note: "全局广告域名拦截", scopeType: "GLOBAL", createdByUserId: admin?.id ?? null },
+        { pattern: "tracker.example", type: "BLACK", note: "全局追踪器拦截", scopeType: "GLOBAL", createdByUserId: admin?.id ?? null },
       ],
     })
     console.log("[seed] 全局域名规则 2 条就绪")
@@ -286,9 +293,9 @@ async function main() {
   if (eprCount === 0) {
     await db.networkEndpointRule.createMany({
       data: [
-        { pattern: "127.0.0.1:9222", type: "BLACK", note: "环回 CDP 端口精确封禁（任意进程）", scopeType: "GLOBAL", priority: 100, createdByUserId: admin.id },
-        { pattern: "10.0.0.5:8080", type: "BLACK", note: "内网指定端点封禁示例（内网放行时仍拦截）", scopeType: "GLOBAL", createdByUserId: admin.id },
-        { pattern: "*.corp.example:22", type: "BLACK", note: "内网域 SSH 端口封禁", scopeType: "GLOBAL", createdByUserId: admin.id },
+        { pattern: "127.0.0.1:9222", type: "BLACK", note: "环回 CDP 端口精确封禁（任意进程）", scopeType: "GLOBAL", priority: 100, createdByUserId: admin?.id ?? null },
+        { pattern: "10.0.0.5:8080", type: "BLACK", note: "内网指定端点封禁示例（内网放行时仍拦截）", scopeType: "GLOBAL", createdByUserId: admin?.id ?? null },
+        { pattern: "*.corp.example:22", type: "BLACK", note: "内网域 SSH 端口封禁", scopeType: "GLOBAL", createdByUserId: admin?.id ?? null },
       ],
     })
     console.log("[seed] 全局端点规则 3 条就绪")

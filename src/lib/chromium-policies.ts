@@ -53,6 +53,12 @@ export const CHROMIUM_POLICY_CATALOG: ChromiumPolicyItem[] = [
   { key: "DefaultSearchProviderEnabled", name: "默认搜索引擎开关", category: "浏览体验", description: "false=禁用搜索框直接搜索（需显式访问站点）", valueType: "boolean" },
   { key: "DefaultSearchProviderName", name: "默认搜索引擎名称", category: "浏览体验", description: "自定义搜索引擎显示名", valueType: "string", example: "Bing" },
   { key: "DefaultSearchProviderSearchURL", name: "默认搜索 URL", category: "浏览体验", description: "搜索模板 URL（{searchTerms} 占位）", valueType: "string", example: "https://www.bing.com/search?q={searchTerms}" },
+  // —— r38：媒体捕获企业控制（与硬件透传 17 项联动：企业策略层硬门禁） ——
+  { key: "VideoCaptureAllowed", name: "视频捕获（摄像头）总闸", category: "媒体捕获与安全", description: "false=企业层全面禁止摄像头（与硬件策略 camera 联动双闸）", valueType: "boolean", securityNote: true },
+  { key: "AudioCaptureAllowed", name: "音频捕获（麦克风）总闸", category: "媒体捕获与安全", description: "false=企业层全面禁止麦克风（与硬件策略 microphone 联动双闸）", valueType: "boolean", securityNote: true },
+  { key: "ScreenCaptureAllowed", name: "屏幕捕获总闸", category: "媒体捕获与安全", description: "false=禁止 getDisplayMedia 屏幕捕获（桌面信息防泄漏）", valueType: "boolean", securityNote: true },
+  { key: "VideoCaptureAllowedUrls", name: "摄像头免询问站点", category: "媒体捕获与安全", description: "无需提示即可使用摄像头的站点列表（谨慎授予）", valueType: "list", example: "[\"https://meet.example.com\"]" },
+  { key: "AudioCaptureAllowedUrls", name: "麦克风免询问站点", category: "媒体捕获与安全", description: "无需提示即可使用麦克风的站点列表（谨慎授予）", valueType: "list", example: "[\"https://meet.example.com\"]" },
   // —— r35：搜索引擎完整套件 + DNS 企业控制 ——
   { key: "DefaultSearchProviderKeyword", name: "搜索引擎快捷关键字", category: "浏览体验", description: "地址栏快捷搜索关键字（如 bg）", valueType: "string", example: "bg" },
   { key: "DefaultSearchProviderSuggestURL", name: "搜索建议 URL", category: "浏览体验", description: "搜索建议模板 URL（{searchTerms} 占位）", valueType: "string", example: "https://www.bing.com/osjson.aspx?query={searchTerms}" },
@@ -78,6 +84,10 @@ export const CHROMIUM_POLICY_CATALOG: ChromiumPolicyItem[] = [
   // —— 扩展防护 ——
   { key: "ExtensionAllowedTypes", name: "允许的扩展类型", category: "扩展防护", description: "限定可安装扩展类型白名单（配合 CRX 管控）", valueType: "list", example: "[\"extension\",\"theme\"]" },
   { key: "ManagedBookmarks", name: "托管书签", category: "扩展防护", description: "企业统一推送的只读书签（用户不可删除）", valueType: "list", example: "[{\"name\":\"内部门户\",\"url\":\"https://intra.example.com\"}]" },
+  // —— r38：企业安全硬策略（TLS 下限 / 证书自动选择 / 文件系统访问） ——
+  { key: "SSLVersionMin", name: "TLS 最低版本", category: "媒体捕获与安全", description: "tls1=1.0（不推荐）/ tls1.1 / tls1.2 —— 企业 TLS 地板（防降级攻击）", valueType: "string", example: "tls1.2", securityNote: true },
+  { key: "AutoSelectCertificateForUrls", name: "自动选择客户端证书站点", category: "媒体捕获与安全", description: "匹配的站点免弹窗自动选择客户端证书（列表项须为 URL 模式）", valueType: "list", example: "[\"https://cert.example.com/*\"]", securityNote: true },
+  { key: "FileSystemWriteBlockedForUrls", name: "文件系统写入封禁站点", category: "媒体捕获与安全", description: "封禁 File System Access API 写入的站点（数据落地面收敛）", valueType: "list", example: "[\"https://untrusted.example.com\"]", securityNote: true },
 ]
 
 export const CHROMIUM_POLICY_CATEGORIES = [...new Set(CHROMIUM_POLICY_CATALOG.map((p) => p.category))]

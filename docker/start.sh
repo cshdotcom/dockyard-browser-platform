@@ -192,11 +192,66 @@ if [ -z "${CRON_SECRET:-}" ]; then
   export CRON_SECRET
 fi
 
-# ---- 2. 数据库结构初始化（幂等；22-d：sqlite 默认 / postgres 全自动初始化）----
+# ---- 2. 数据库结构初始化（幂等；22-d sqlite / r38 mysql / 22-d postgres 三形态）----
 log "初始化数据库结构..."
 cd "$APP_DIR"
 DB_MODE="${DATABASE_PROVIDER:-${DB_PROVIDER:-sqlite}}"
-if [ "$DB_MODE" = "postgres" ]; then
+
+# [r38] db-active.json 感知：GUI 绑定/迁移后的运行库优先（storage 卷持久）。
+# 语义：db-active.json 存在且合法 → 结构推送目标跟随它（而非 env）—— env 后续
+# 改类型时主应用仍锚定有数据的库运行，start.sh 同步把结构演进推到正确的库上。
+DB_ACTIVE_FILE="/app/storage/db-active.json"
+if [ -f "$DB_ACTIVE_FILE" ]; then
+  DB_ACTIVE_PROVIDER=$(sed -n 's/.*"provider"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' "$DB_ACTIVE_FILE" | head -1)
+  case "$DB_ACTIVE_PROVIDER" in
+    sqlite|postgres|mysql)
+      if [ "$DB_ACTIVE_PROVIDER" != "$DB_MODE" ]; then
+        log "检测到 db-active.json（GUI 配置库=${DB_ACTIVE_PROVIDER}）与 env（${DB_MODE}）不一致 → 结构推送跟随 GUI 配置库"
+        DB_MODE="$DB_ACTIVE_PROVIDER"
+      fi
+      ;;
+    esac
+fi
+
+if [ "$DB_MODE" = "mysql" ]; then
+  # ---- MySQL / MariaDB 形态（r38：与 PG 同级全自动初始化）----
+  case "${DATABASE_URL:-}" in
+    mysql://*) ;;
+    *)
+      log "严重错误：DATABASE_PROVIDER=mysql 但 DATABASE_URL 不是 mysql:// 连接串（当前：${DATABASE_URL:-未设置}）"
+      exit 1
+      ;;
+  esac
+  log "数据库形态：MySQL/MariaDB → 启动自动初始化（结构推送 → 种子，全部幂等）"
+  # 与 PG 相同的自愈语义：不可达不 exit（防 guard 疯狂自旋），轮内无限重试 + 退避
+  MY_PUSH_OK=0
+  MY_ATTEMPT=0
+  MY_BACKOFF=5
+  until [ "$MY_PUSH_OK" = "1" ]; do
+    MY_ATTEMPT=$((MY_ATTEMPT + 1))
+    if [ $((MY_ATTEMPT % 10)) = "1" ]; then
+      log "MySQL 结构推送（第 ${MY_ATTEMPT} 次）：prisma db push --schema prisma/schema.mysql.prisma"
+    fi
+    if bunx prisma db push --schema prisma/schema.mysql.prisma --skip-generate --accept-data-loss >/tmp/my-push.log 2>&1; then
+      MY_PUSH_OK=1
+      tail -3 /tmp/my-push.log
+      log "MySQL 结构推送成功（第 ${MY_ATTEMPT} 次尝试）"
+      break
+    fi
+    if [ $((MY_ATTEMPT % 10)) = "1" ] || [ "$MY_ATTEMPT" = "3" ]; then
+      tail -5 /tmp/my-push.log
+      log "等待 MySQL 就绪：第 ${MY_ATTEMPT} 次失败（数据库暂不可达或账号权限不足？${MY_BACKOFF}s 后重试，无限等待直至恢复）"
+    fi
+    sleep "$MY_BACKOFF"
+    MY_BACKOFF=$((MY_BACKOFF * 2))
+    if [ "$MY_BACKOFF" -gt 60 ]; then MY_BACKOFF=60; fi
+  done
+  log "播种初始数据（幂等，mysql）..."
+  ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin@2026}" bun prisma/seed-mysql.ts >/tmp/my-seed.log 2>&1 \
+    && tail -3 /tmp/my-seed.log \
+    || { tail -3 /tmp/my-seed.log; log "警告：mysql 种子执行失败（可能已初始化过或账号只读）"; }
+  log "数据库已自动初始化（mysql）"
+elif [ "$DB_MODE" = "postgres" ]; then
   # ---- PostgreSQL 形态：启动即自动建表 + 审计触发器 + 种子（无需人工导入 SQL）----
   case "${DATABASE_URL:-}" in
     postgresql://*|postgres://*) ;;
@@ -284,8 +339,8 @@ fi
 #   · ADMIN_USERNAME / ADMIN_EMAIL / ADMIN_PASSWORD 环境变量 → 首启自动创建超管
 #   · ADMIN_PASSWORD_FORCE=1 → 启动时用环境变量密码覆盖已有管理员密码
 #   · 未配置且库中无管理员 → 登录页引导跳转 /setup 首启注册页
-if [ "$DB_MODE" != "postgres" ]; then
-  log "播种初始数据（幂等）..."
+if [ "$DB_MODE" = "sqlite" ]; then
+  log "播种初始数据（幂等，sqlite）..."
   ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin@2026}" bun prisma/seed.ts 2>&1 | tail -3 || log "警告：种子执行失败（可能已初始化过）"
 fi
 
@@ -380,7 +435,7 @@ if [ "$APP_OK" = "1" ]; then
   echo "  DOCKYARD 启动成功（全部服务就绪）"
   echo "  ----------------------------------------------------------"
   echo "  网页端      : http://<主机IP>:${GATEWAY_PORT}"
-  echo "  数据库形态  : ${DB_MODE}$(if [ "$DB_MODE" != "postgres" ]; then echo "（$DB_PATH）"; fi)"
+  echo "  数据库形态  : ${DB_MODE}$(if [ "$DB_MODE" = "sqlite" ]; then echo "（$DB_PATH）"; fi)"
   echo "  主服务      : 回环 127.0.0.1:${APP_INTERNAL_PORT}（经统一网关对外）"
   echo "  VNC 桥      : 回环 ${VNC_BRIDGE_PORT}（gateway 模式，网页端嵌入）"
   echo "  初始账号    : admin / \${ADMIN_PASSWORD:-Admin@2026}（首启播种，后台可改）"

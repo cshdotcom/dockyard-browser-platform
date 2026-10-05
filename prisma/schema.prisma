@@ -1781,3 +1781,30 @@ model FilePlacement {
   @@index([nodeUuid, status])
   @@unique([fileId, nodeUuid])
 }
+
+// ============================================================
+// r38：硬件透传访问申请（静默/申请双模式的申请侧）
+//   · 用户申请某硬件权限（沙箱级或账号级）→ 管理员审批（GRANTED/DENIED）
+//   · GRANTED + expiresAt 未过期 → resolveHardwarePolicy 视该权限为 enabled
+//   · 静默模式（无提示监控）由既有 silent 开关承担；本表只管「申请→批准」链
+// ============================================================
+model HardwareAccessRequest {
+  id           String    @id @default(cuid())
+  userId       String
+  workspaceId  String? // 空=账号级申请（对该用户全部沙箱生效）
+  permId       String // HARDWARE_PERMS 目录项：camera/microphone/usb/...
+  mode         String    @default("PENDING") // PENDING | GRANTED | DENIED | EXPIRED | REVOKED
+  reason       String? // 申请理由
+  scope        String    @default("self") // self=本人 | admin-silent=管理员静默授予
+  decidedBy    String? // 审批管理员 userId
+  decidedByName String?
+  decisionNote String? // 审批备注
+  expiresAt    DateTime? // 授权有效期（空=永久直至撤销）
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([workspaceId])
+  @@index([mode, expiresAt])
+  @@index([permId, mode])
+}

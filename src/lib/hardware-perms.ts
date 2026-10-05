@@ -103,6 +103,8 @@ export interface ResolvedHardware {
   source: "SANDBOX" | "USER" | "GROUP" | "GLOBAL"
   /** 任一层级显式设置过的权限项（平台通道回退判定用：未显式 → 沿用旧版全局开关语义） */
   explicit: Record<string, boolean>
+  /** r38：申请授权生效表（permId → { expiresAt, requestId }）—— 管理员批准的临时放行 */
+  granted?: Record<string, { expiresAt: Date | null; requestId: string }>
 }
 
 /** 稀疏显式标记合并（层级链上出现过即置位） */
@@ -158,7 +160,36 @@ export async function resolveHardwarePolicy(userId: string, workspaceId?: string
     }
   }
 
-  return { policy, source, explicit }
+  // r38：硬件访问申请授权（GRANTED 且未过期 → 该权限视为 enabled）
+  //   · 账号级申请（workspaceId=null）对该用户全部沙箱生效
+  //   · 沙箱级申请仅该沙箱生效
+  //   · 来源标记 "REQUEST"（source 不变 —— 显示层用 grants 字段区分）
+  let granted: Record<string, { expiresAt: Date | null; requestId: string }> = {}
+  try {
+    const now = new Date()
+    const reqs = await db.hardwareAccessRequest.findMany({
+      where: {
+        userId,
+        mode: "GRANTED",
+        OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+        ...(workspaceId ? { OR: [{ workspaceId: null }, { workspaceId }] } : {}),
+      },
+      select: { id: true, permId: true, workspaceId: true, expiresAt: true },
+      take: 100,
+    })
+    for (const r of reqs) {
+      // 沙箱级授权只在匹配沙箱生效（账号级对所有解析生效）
+      if (r.workspaceId && workspaceId && r.workspaceId !== workspaceId) continue
+      if (!HARDWARE_PERM_IDS.includes(r.permId)) continue
+      granted[r.permId] = { expiresAt: r.expiresAt, requestId: r.id }
+      const cur = policy[r.permId] || FULL_DEFAULT
+      policy[r.permId] = { ...cur, enabled: true }
+    }
+  } catch {
+    granted = {} // 表缺失等场景 —— 降级为无申请授权（不阻断主链）
+  }
+
+  return { policy, source, explicit, granted }
 }
 
 /**

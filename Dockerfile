@@ -25,6 +25,8 @@ COPY . .
 #   node_modules/@prisma/client-postgres —— prisma/schema.postgres.prisma 由主 schema 派生）
 RUN bunx prisma generate
 RUN bunx prisma generate --schema prisma/schema.postgres.prisma
+# [r38] MySQL/MariaDB 第三引擎客户端（schema.mysql.prisma 由 scripts/db/sync-mysql-schema.ts 派生）
+RUN bunx prisma generate --schema prisma/schema.mysql.prisma
 # Next.js standalone 构建（产物自带 server.js + 精简 node_modules）
 ENV DATABASE_URL="file:/app/db/build-placeholder.db"
 RUN bunx next build
@@ -197,6 +199,8 @@ COPY --from=builder /app/src/lib/config.ts ./src/lib/config.ts
 #     （不放在 /app/db —— 该路径是数据卷挂载点，旧卷挂载会遮蔽镜像内文件）
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma/client-postgres ./node_modules/@prisma/client-postgres
+# [r38] MySQL 客户端（与 sqlite/postgres 并存，运行时按 DATABASE_PROVIDER/db-active.json 选择）
+COPY --from=builder /app/node_modules/@prisma/client-mysql ./node_modules/@prisma/client-mysql
 COPY --from=builder /app/db/postgres ./prisma/postgres
 
 # 启动/停止/守护/自检 + 嵌入式沙箱监督脚本

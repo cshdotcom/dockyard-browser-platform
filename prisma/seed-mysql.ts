@@ -1,14 +1,14 @@
-// PostgreSQL 种子数据（22-d）—— 与 prisma/seed.ts 逻辑保持一致
+// MySQL 种子数据（r38）—— 与 prisma/seed.ts 逻辑保持一致
 //
 // 为什么是独立文件而不是复用 seed.ts：seed.ts 顶层即实例化 SQLite PrismaClient
 // 并执行播种（import 即运行），无法参数化注入客户端；故此处为 PG 形态副本。
 // 【维护约定】任何种子逻辑变更请同步修改 prisma/seed.ts 与本文件（两份职责相同）。
 //
 // 执行（幂等，可重复）：
-//   DATABASE_PROVIDER=postgres DATABASE_URL=postgresql://user:pass@host:5432/dockyard \
-//     bun prisma/seed-postgres.ts
-// 容器内由 docker/start.sh 在 postgres 自动初始化流程中调用。
-import { PrismaClient } from "@prisma/client-postgres"
+//   DATABASE_PROVIDER=mysql DATABASE_URL=mysql://user:pass@host:3306/dockyard \
+//     bun prisma/seed-mysql.ts
+// 容器内由 docker/start.sh 在 mysql 自动初始化流程中调用。
+import { PrismaClient } from "@prisma/client-mysql"
 import bcrypt from "bcryptjs"
 import { CONFIG_DEFAULTS } from "../src/lib/config-defaults"
 
@@ -29,13 +29,13 @@ async function main() {
       },
     })
   }
-  console.log(`[seed-pg] 系统配置 ${Object.keys(CONFIG_DEFAULTS).length} 项已就绪`)
+  console.log(`[seed-my] 系统配置 ${Object.keys(CONFIG_DEFAULTS).length} 项已就绪`)
 
   // ---- 超管账号（配置文件/环境变量引导；幂等，后期可经账号安全页修改）----
   // [r38] SEED_SKIP_ADMIN=1：GUI 安装向导形态 —— 不播种超管/演示账号（杜绝默认密码入库）；
   //       向导第二步（/setup 表单，setup token 门）创建首个管理员。admin 依赖段全部可空安全。
   const skipAdmin = process.env.SEED_SKIP_ADMIN === "1"
-  if (skipAdmin) console.log(`[seed] SEED_SKIP_ADMIN=1 —— 跳过账号播种（GUI 向导将创建首个管理员）`)
+  if (skipAdmin) console.log(`[seed-my] SEED_SKIP_ADMIN=1 —— 跳过账号播种（GUI 向导将创建首个管理员）`)
   const adminUsername = process.env.ADMIN_USERNAME || "admin"
   const adminEmail = process.env.ADMIN_EMAIL || "admin@dockyard.local"
   const adminPassword = process.env.ADMIN_PASSWORD || "Admin@2026"
@@ -65,7 +65,7 @@ async function main() {
         },
       })
   console.log(
-    `[seed-pg] 超管账号 ${admin.username} 就绪${existingAdmin ? (forceSync ? "（密码已按 ADMIN_PASSWORD 同步）" : "（已存在，未覆盖）") : `（密码：${process.env.ADMIN_PASSWORD ? "来自 ADMIN_PASSWORD 环境变量" : "Admin@2026 默认值，请尽快修改"}）`}`,
+    `[seed-my] 超管账号 ${admin ? admin.username : '（跳过）'} 就绪${existingAdmin ? (forceSync ? "（密码已按 ADMIN_PASSWORD 同步）" : "（已存在，未覆盖）") : `（密码：${process.env.ADMIN_PASSWORD ? "来自 ADMIN_PASSWORD 环境变量" : "Admin@2026 默认值，请尽快修改"}）`}`,
   )
 
   // ---- 默认演示用户（SEED_DEMO=0 可跳过，生产环境建议关闭）----
@@ -85,7 +85,7 @@ async function main() {
         quota: { sessions: 5, novncSessions: 2, diskMb: 512 },
       },
     })
-    console.log(`[seed-pg] 演示用户 demo 就绪（密码：${demoPassword}）`)
+    console.log(`[seed-my] 演示用户 demo 就绪（密码：${demoPassword}）`)
   }
 
 
@@ -156,7 +156,7 @@ async function main() {
       create: { code: t.code, name: t.name, cronExpr: t.cron, enabled: true, timeoutSec: t.timeout },
     })
   }
-  console.log(`[seed-pg] 定时任务 ${tasks.length} 项已注册`)
+  console.log(`[seed-my] 定时任务 ${tasks.length} 项已注册`)
 
   // ---- 默认 浏览器节点 + 宿主机 ----
   const browserNodeCount = await db.browserNode.count()
@@ -278,7 +278,7 @@ async function main() {
         },
       ],
     })
-    console.log("[seed-pg] 内置策略模板 3 项就绪")
+    console.log("[seed-my] 内置策略模板 3 项就绪")
   }
 
   // ---- 全局域名黑名单演示规则（作用域示例）----
@@ -290,7 +290,7 @@ async function main() {
         { pattern: "tracker.example", type: "BLACK", note: "全局追踪器拦截", scopeType: "GLOBAL", createdByUserId: admin?.id ?? null },
       ],
     })
-    console.log("[seed-pg] 全局域名规则 2 条就绪")
+    console.log("[seed-my] 全局域名规则 2 条就绪")
   }
 
   // ---- 全局端点级精确限制演示规则（host:port 精确到端口示例）----
@@ -303,10 +303,10 @@ async function main() {
         { pattern: "*.corp.example:22", type: "BLACK", note: "内网域 SSH 端口封禁", scopeType: "GLOBAL", priority: 100, createdByUserId: admin?.id ?? null },
       ],
     })
-    console.log("[seed-pg] 全局端点规则 3 条就绪")
+    console.log("[seed-my] 全局端点规则 3 条就绪")
   }
 
-  console.log("[seed-pg] 完成 ✓（postgres）")
+  console.log("[seed-my] 完成 ✓（mysql）")
 }
 
 main()

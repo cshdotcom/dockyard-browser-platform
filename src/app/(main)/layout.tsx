@@ -10,8 +10,7 @@ import {
   Users, FolderTree, ScrollText, Settings2, Timer, FolderOpen, DatabaseBackup, Database,
   Server, Network, Recycle, ShieldAlert, MessageSquareCode, SlidersHorizontal, Puzzle, ShieldBan,
   Video, ToggleLeft, History ,
-  Monitor,
-} from "lucide-react"
+  Monitor, Cpu } from "lucide-react"
 
 // 主应用布局（RSC）：深度会话校验 + 强制2FA策略拦截 + 权限菜单过滤
 export default async function MainLayout({ children }: { children: React.ReactNode }) {
@@ -85,6 +84,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         { key: "a-monitor", label: "实时监控中心", href: "/admin/monitor", icon: <Monitor className="h-4 w-4" /> },
         { key: "a-feature-flags", label: "功能开关", href: "/admin/feature-flags", icon: <ToggleLeft className="h-4 w-4" /> },
         { key: "a-permissions", label: "权限中心", href: "/admin/permissions", icon: <ShieldCheck className="h-4 w-4" /> },
+        { key: "a-hardware", label: "硬件透传监控", href: "/admin/hardware", icon: <Cpu className="h-4 w-4" /> },
       ],
     },
     {
@@ -99,6 +99,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         { key: "a-files", label: "文件存储", href: "/admin/files", icon: <FolderOpen className="h-4 w-4" /> },
         { key: "a-dfs", label: "分布式存储", href: "/admin/dfs", icon: <Database className="h-4 w-4" /> },
         { key: "a-backups", label: "备份恢复", href: "/admin/backups", icon: <DatabaseBackup className="h-4 w-4" /> },
+        { key: "a-database", label: "数据库管理", href: "/admin/database", icon: <Database className="h-4 w-4" /> },
       ],
     },
     {

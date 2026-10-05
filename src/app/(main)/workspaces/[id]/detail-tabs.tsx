@@ -8,8 +8,7 @@ import {
   Activity,
   ArrowLeft, Globe, MonitorPlay, Share2, FileJson, Terminal, Clipboard, MousePointer2, Hand,
   RefreshCw, ShieldCheck, Wifi, Loader2, Trash2, Lock, Play, StopCircle, Copy, Anchor, Ticket,
-  RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon, Network, FileLock2, Link2, Plus, Cable, Users, Camera,
-} from "lucide-react"
+  RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon, Network, FileLock2, Link2, Plus, Cable, Users, Camera, Cpu } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -18,6 +17,7 @@ import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { TimelinePanel } from "./timeline-panel"
+import { UserHardwareRequests } from "./user-hardware-requests"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
@@ -265,6 +265,7 @@ export function WorkspaceDetail({
           <TabsTrigger value="har"><FileJson className="h-3.5 w-3.5 mr-1" />HAR / 录播</TabsTrigger>
           <TabsTrigger value="timeline"><Activity className="h-3.5 w-3.5 mr-1" />时间轴</TabsTrigger>
           <TabsTrigger value="shares"><Share2 className="h-3.5 w-3.5 mr-1" />共享授权</TabsTrigger>
+          <TabsTrigger value="hardware"><Cpu className="h-3.5 w-3.5 mr-1" />硬件申请</TabsTrigger>
         </TabsList>
 
         {isVnc && (
@@ -289,6 +290,9 @@ export function WorkspaceDetail({
         </TabsContent>
         <TabsContent value="timeline" className="mt-4">
           <TimelinePanel workspaceId={workspace.id} workspaceName={workspace.name} isAdmin={workspace.isAdmin} />
+        </TabsContent>
+        <TabsContent value="hardware" className="mt-4">
+          <UserHardwareRequests workspaceId={workspace.id} />
         </TabsContent>
         <TabsContent value="shares" className="mt-4">
           <SharesPanel workspace={workspace} shares={shares} shareLinks={shareLinks} />
