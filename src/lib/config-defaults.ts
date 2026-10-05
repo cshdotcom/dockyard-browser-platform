@@ -229,4 +229,11 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
 
   // —— r36：备份多节点推送（跨 Worker 副本容灾）——
   "backup.pushNodes": { value: "", category: "BACKUP", type: "string", description: "备份副本推送的 Worker 节点（逗号分隔 nodeUuid，如 wn-xxx,wn-yyy；备份完成后异步推送到这些节点的分布式存储目录；空=不推送。节点需已注册且在线）" },
+
+  // —— r40：远程打印机池（虚拟打印机 —— 沙箱页面 → 远程客户端物理打印机）——
+  "printing.poolEnabled": { value: true, category: "PRINTING", type: "boolean", description: "远程打印机池全局开关（用户在会话面板选择远程客户端的物理打印机打印；权限锁 blockRemotePrintPool 可按用户/组禁用；PrintingEnabled 企业策略可按人/组/模板禁打印）" },
+  "print.dispatchTimeoutSec": { value: 180, category: "PRINTING", type: "number", description: "打印任务派发超时（秒；PENDING 状态超过该时长客户端未领取 → 自动 TIMED_OUT 收口）" },
+  "print.deliverTimeoutSec": { value: 600, category: "PRINTING", type: "number", description: "打印任务交付超时（秒；SENT/DELIVERED/PRINTING 超过该时长无进展 → 自动 TIMED_OUT；含下载/打印阶段）" },
+  "print.fileTtlHours": { value: 24, category: "PRINTING", type: "number", description: "打印文件保留时长（小时；终态任务超期自动清理磁盘 PDF，任务记录保留）" },
+  "print.jobMaxBytes": { value: 52428800, category: "PRINTING", type: "number", description: "单次打印文件大小上限（字节，默认 50MB；超出拒绝创建）" },
 }

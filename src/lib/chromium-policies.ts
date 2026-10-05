@@ -70,8 +70,6 @@ export const CHROMIUM_POLICY_CATALOG: ChromiumPolicyItem[] = [
   { key: "DefaultSearchProviderAlternateURLs", name: "搜索备用 URL", category: "浏览体验", description: "备用搜索模板列表", valueType: "list" },
   { key: "DefaultSearchProviderSearchURLPostParams", name: "搜索 POST 参数", category: "浏览体验", description: "POST 形式搜索参数模板", valueType: "string" },
   { key: "SearchEnginesLockDownEnabled", name: "锁定搜索引擎配置", category: "浏览体验", description: "true=用户不可增删改搜索引擎（企业强制）", valueType: "boolean", example: "true" },
-  { key: "DnsOverHttpsMode", name: "DNS over HTTPS 模式", category: "浏览体验", description: "off=禁用 / automatic=失败回退 / secure=强制 DoH（安全位置未授予时勿开 secure）", valueType: "enum", options: [{ value: "off", label: "禁用 DoH" }, { value: "automatic", label: "自动（失败回退）" }, { value: "secure", label: "强制 DoH" }] },
-  { key: "DnsOverHttpsTemplates", name: "DoH 模板列表", category: "浏览体验", description: "指定 DoH 服务器模板 URL 列表", valueType: "list", example: "[\"https://dns.example/dns-query\"]" },
   { key: "EditBookmarksEnabled", name: "书签编辑", category: "浏览体验", description: "false=禁止增删改书签", valueType: "boolean" },
   { key: "DefaultBrowserSettingEnabled", name: "默认浏览器检查", category: "浏览体验", description: "false=不提示设为默认浏览器", valueType: "boolean" },
   { key: "PromptForDownloadLocation", name: "下载前询问位置", category: "浏览体验", description: "true=每次下载询问保存位置", valueType: "boolean" },
@@ -126,6 +124,38 @@ export const CHROMIUM_POLICY_CATALOG: ChromiumPolicyItem[] = [
   { key: "ClipboardAllowedForUrls", name: "剪贴板读取白名单", category: "内容颗粒度（剪贴板与混合内容）", description: "允许通过剪贴板 API 读取的站点模式（默认全拒 —— 密码/内容防读出）", valueType: "list", example: "[\"https://paste.example.com/*\"]", securityNote: true },
   { key: "DefaultInsecureContentSetting", name: "混合内容默认策略", category: "内容颗粒度（剪贴板与混合内容）", description: "2=阻止 / 3=允许（HTTPS 页内加载 HTTP 资源 —— 建议阻止防中间人注入）", valueType: "enum", options: [{ value: 2, label: "阻止" }, { value: 3, label: "允许" }] },
   { key: "InsecureContentAllowedForUrls", name: "混合内容白名单站点", category: "内容颗粒度（剪贴板与混合内容）", description: "允许加载混合内容的站点模式（遗留内网系统兼容）", valueType: "list", example: "[\"https://legacy.example.com/*\"]" },
+
+  // —— 【r40：DNS 与域名解析控制】——
+  { key: "BuiltInDnsClientEnabled", name: "内置 DNS 客户端", category: "DNS 与域名解析控制", description: "true=Chromium 内置异步 DNS 解析（与 DnsOverHttps 联动全托管） / false=回退系统 getaddrinfo（沙箱 hosts 生效）。DNS 行为企业统一管控", valueType: "boolean", example: "true", securityNote: true },
+  { key: "DnsOverHttpsMode", name: "DNS over HTTPS 模式", category: "DNS 与域名解析控制", description: "off=禁用 / automatic=失败回退 / secure=强制 DoH（安全位置未授予时勿开 secure）", valueType: "enum", options: [{ value: "off", label: "禁用 DoH" }, { value: "automatic", label: "自动（失败回退）" }, { value: "secure", label: "强制 DoH" }] },
+  { key: "DnsOverHttpsTemplates", name: "DoH 模板列表", category: "DNS 与域名解析控制", description: "指定 DoH 服务器模板 URL 列表（企业自建 DoH 指向内部解析器，配合域名黑白名单）", valueType: "list", example: "[\"https://dns.example/dns-query\"]" },
+  { key: "SSLErrorOverrideAllowed", name: "SSL 错误继续访问", category: "DNS 与域名解析控制", description: "false=SSL 证书错误页禁用「忽略并继续」按钮（中间人攻击防线；配合 TLS 地板策略）", valueType: "boolean", example: "false", securityNote: true },
+  { key: "ForceEphemeralProfiles", name: "临时配置文件", category: "DNS 与域名解析控制", description: "true=会话级临时 Profile（关闭即焚 —— Cookie/缓存/存储零残留；书签/历史不持久化，审计留存平台侧录像）", valueType: "boolean" },
+
+  // —— 【r40：扩展安装与来源强制管控】——
+  { key: "ExtensionInstallSources", name: "扩展安装源白名单", category: "扩展防护", description: "允许安装扩展的来源 URL 模式（默认仅 CWS；配合 CRX 强装/黑名单形成三层管控）", valueType: "list", example: "[\"https://clients2.google.com/service/update2/crx*\"]", securityNote: true },
+  { key: "ExtensionInstallAllowlist", name: "扩展安装豁免白名单", category: "扩展防护", description: "豁免全局扩展黑名单（ExtensionInstallBlocklist 为 * 时仍可安装的扩展 ID 列表；最小权限放行）", valueType: "list", example: "[\"abcdefghijklmnopqrstuvwxyzabcdefgh\"]", securityNote: true },
+  { key: "BlockExternalExtensions", name: "禁外部扩展注入", category: "扩展防护", description: "true=禁止网页/外部程序触发「添加扩展」流程（第三方注入防线 —— 只留企业 CRX 强装通道）", valueType: "boolean", example: "true", securityNote: true },
+  { key: "ExtensionInstallBlocklist", name: "扩展安装黑名单", category: "扩展防护", description: "被禁止安装的扩展 ID 列表（[\"*\"]=全禁安装，仅白名单豁免；平台 CRX 管控页持有安全层注入）", valueType: "list", example: "[\"*\"]", securityNote: true },
+  { key: "ExtensionInstallForcelist", name: "扩展强制安装", category: "扩展防护", description: "强制安装的扩展列表（[\"<crxId>;<update_url>\"] —— 企业统一推送；平台 CRX 管控页持有安全层注入）", valueType: "list", example: "[\"abcdefghij...;https://update.example/crx\"]", securityNote: true },
+  { key: "ExtensionSettings", name: "扩展细粒度设置", category: "扩展防护", description: "每扩展 installation_mode/权限黑名单 JSON（blocked_permissions/host 许可；平台 CRX 管控页持有安全层注入）", valueType: "string", example: "{\"abc\":{\"installation_mode\":\"force_installed\"}}", securityNote: true },
+
+  // —— 【r40：打印企业模板管控 —— 与远程打印机池联动】——
+  { key: "PrintHeaderTemplate", name: "打印页眉模板", category: "内容颗粒度（打印）", description: "统一页眉模板（占位符：\$TITLE \$URL \$DATE \$TIME —— 企业水印防伪溯源）", valueType: "string", example: "\$TITLE - 内部资料" },
+  { key: "PrintFooterTemplate", name: "打印页脚模板", category: "内容颗粒度（打印）", description: "统一页脚模板（占位符：\$TITLE \$URL \$DATE \$TIME \$PAGE_NUMBER \$TOTAL_PAGES —— 页码水印）", valueType: "string", example: "\$USERNAME · \$DATE · \$PAGE_NUMBER/\$TOTAL_PAGES" },
+  { key: "SystemPrintDialogEnabled", name: "系统打印对话框", category: "内容颗粒度（打印）", description: "true=打印预览界面提供「使用系统对话框」入口（false=仅 Chromium 预览管控路径，打印审计更完整）", valueType: "boolean" },
+  { key: "PrintPreviewStickySettings", name: "打印设置粘性记忆", category: "内容颗粒度（打印）", description: "true=记住用户上次打印设置（纸张/双面；false=每次回到企业默认）", valueType: "boolean" },
+
+  // —— 【r40：进程与逃逸收口】——
+  { key: "TaskManagerEndProcessEnabled", name: "任务管理器结束进程", category: "开发者与调试", description: "false=禁用 Shift+Esc 任务管理器的「结束进程」（防用户杀渲染进程绕过会话审计）", valueType: "boolean", example: "false", securityNote: true },
+  { key: "BackgroundModeEnabled", name: "后台运行模式", category: "开发者与调试", description: "false=关闭所有窗口后浏览器不驻留后台（会话生命周期与沙箱回收对齐）", valueType: "boolean" },
+  { key: "RestrictSigninToPattern", name: "登录账号限制", category: "账户与同步", description: "限制可登录账号的邮箱模式（*=@corp.example.com —— 账号体系企业收口）", valueType: "string", example: "*@corp.example.com", securityNote: true },
+
+  // —— 【r40：媒体体验与家长控制补全】——
+  { key: "DefaultImagesSetting", name: "图像默认策略", category: "内容颗粒度（媒体体验）", description: "1=允许 / 2=阻止（再以 URL 封禁细化 —— 带宽收敛默认策略）", valueType: "enum", options: [{ value: 1, label: "允许" }, { value: 2, label: "阻止" }] },
+  { key: "ForceYouTubeRestrict", name: "YouTube 严格限制", category: "内容颗粒度（媒体体验）", description: "0=关 / 1=适度 / 2=最严格（家长控制与内容分级收口）", valueType: "enum", options: [{ value: 0, label: "关闭" }, { value: 1, label: "适度" }, { value: 2, label: "最严格" }] },
+  { key: "RegisterProtocolHandlersEnabled", name: "注册协议处理器", category: "内容颗粒度（媒体体验）", description: "false=网页不可注册 mailto/tel/自定义协议处理器（防协议滥用与本地程序拉起）", valueType: "boolean" },
+  { key: "EditFavoritesEnabled", name: "收藏编辑", category: "浏览体验", description: "false=禁止增删改收藏（新键名 —— 与 EditBookmarksEnabled 同义，兼容 Chromium 新版）", valueType: "boolean" },
 ]
 
 export const CHROMIUM_POLICY_CATEGORIES = [...new Set(CHROMIUM_POLICY_CATALOG.map((p) => p.category))]
@@ -158,12 +188,18 @@ export function validateExtraPolicies(json: Record<string, unknown>): { ok: bool
     if (item.valueType === "number" && (item.options?.length ? t !== "number" : t !== "number")) errors.push(`${key} 需要 number 值`)
     if (item.valueType === "string" && t !== "string") errors.push(`${key} 需要 string 值`)
     if (item.valueType === "list" && !Array.isArray(value)) errors.push(`${key} 需要 array 值`)
-    // r39：enum 严格数字类型（此前 string 值如 "2" 落空未拒 → 注入后策略静默失效）
+    // r39：enum 严格类型（string 落空未拒 → 静默失效修复）
+    // r40：enum 值类型跟随选项声明（number 枚举须 number；string 枚举如 DnsOverHttpsMode 须 string）
     if (item.valueType === "enum") {
-      if (t !== "number" && item.options) {
-        errors.push(`${key} 需要 number 值（枚举）`)
-      } else if (item.options && t === "number" && !item.options.some((o) => o.value === value)) {
-        errors.push(`${key} 的值 ${value} 不在允许选项内（${item.options.map((o) => o.value).join("/")}）`)
+      if (item.options && item.options.length > 0) {
+        const wantNumber = typeof item.options[0].value === "number"
+        if (wantNumber && t !== "number") {
+          errors.push(`${key} 需要 number 值（枚举）`)
+        } else if (!wantNumber && t !== "string") {
+          errors.push(`${key} 需要 string 值（字符串枚举，如 ${JSON.stringify(item.options[0].value)}）`)
+        } else if (!item.options.some((o) => o.value === value)) {
+          errors.push(`${key} 的值 ${JSON.stringify(value)} 不在允许选项内（${item.options.map((o) => o.value).join("/")}）`)
+        }
       }
     }
   }
@@ -181,5 +217,6 @@ export function exitGuardManagedPolicy(guard?: string): Record<string, unknown> 
     BrowserGuestModeEnabled: false, // 禁访客
     BrowserAddProfileEnabled: false, // 禁加配置文件
     IncognitoModeAvailability: 1, // 禁无痕（全部行为留痕，配合录像审计）
+    TaskManagerEndProcessEnabled: false, // r40：禁任务管理器结束进程（防杀渲染进程绕过审计/管控）
   }
 }

@@ -1814,3 +1814,62 @@ model HardwareAccessRequest {
   @@index([mode, expiresAt])
   @@index([permId, mode])
 }
+
+// ============================================================
+// r40：远程打印机池（虚拟打印机 —— 沙箱页面 → 远程客户端物理打印机）
+// 客户端（Worker/打印代理）上报本机打印机 → 用户会话内选择 → PDF 经
+// 指令队列派发到目标客户端 → dialog（打印界面）/silent（lp 直打）双交付
+// ============================================================
+
+model RemotePrinter {
+  id               String   @id @default(cuid()) @db.VarChar(64)
+  nodeUuid         String @db.VarChar(64) // 所属客户端节点（WorkNode nodeUuid）
+  printerKey       String @db.VarChar(400) // 客户端本地打印机标识（CUPS 队列名 / Win 打印机名）
+  name             String @db.VarChar(255) // 展示名（型号 / 描述）
+  description      String   @default("") @db.VarChar(255)
+  status           String   @default("ONLINE") @db.VarChar(255) // ONLINE | OFFLINE | DISABLED
+  capabilitiesJson String   @default("{}") @db.VarChar(255) // 纸张/双面/彩色能力（客户端 CUPS 探测）
+  clientName       String   @default("") @db.VarChar(255) // 上报机器 hostname
+  location         String   @default("") @db.VarChar(255) // 管理员标注位置（如 3F 打印区）
+  lastSeenAt       DateTime @default(now())
+  createdAt        DateTime @default(now())
+
+  @@unique([nodeUuid, printerKey])
+  @@index([status])
+  @@index([nodeUuid])
+}
+
+model PrintJob {
+  id              String    @id @default(cuid()) @db.VarChar(64)
+  jobNo           String    @unique @db.VarChar(500) // 展示号 PJ-<base36 时间戳>
+  workspaceId     String? @db.VarChar(64)
+  workspaceName   String    @default("") @db.VarChar(255)
+  userId          String @db.VarChar(64)
+  username        String @db.VarChar(255)
+  printerId       String? @db.VarChar(64)
+  nodeUuid        String @db.VarChar(64) // 目标客户端节点
+  printerKey      String @db.VarChar(400) // 目标本地打印机（冗余存储 —— 打印机被删后任务仍可追溯）
+  printerName     String    @default("") @db.VarChar(255)
+  sourceUrl       String    @default("") @db.VarChar(700) // 打印源页面 URL（URL 级打印策略审计依据）
+  fileName        String @db.Text
+  fileBytes       Int       @default(0)
+  fileSha256      String    @default("") @db.VarChar(255)
+  fileKey         String    @default("") @db.VarChar(400) // storage/print-jobs/<id>.pdf
+  status          String    @default("PENDING") @db.VarChar(255) // PENDING | SENT | DELIVERED | PRINTING | PRINTED | FAILED | CANCELED | TIMED_OUT
+  deliverMode     String    @default("dialog") @db.VarChar(255) // dialog=客户端打印界面 | silent=直打不出框
+  copies          Int       @default(1)
+  duplex          String    @default("default") @db.VarChar(255) // default | simplex | duplex
+  landscape       Boolean   @default(false)
+  printParamsJson String    @default("{}") @db.VarChar(255)
+  error           String? @db.Text
+  attempts        Int       @default(0)
+  createdByIp     String    @default("") @db.VarChar(255)
+  createdAt       DateTime  @default(now())
+  sentAt          DateTime?
+  deliveredAt     DateTime?
+  finishedAt      DateTime?
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@index([nodeUuid, createdAt])
+}

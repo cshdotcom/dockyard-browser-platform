@@ -10,7 +10,7 @@ import {
   Users, FolderTree, ScrollText, Settings2, Timer, FolderOpen, DatabaseBackup, Database,
   Server, Network, Recycle, ShieldAlert, MessageSquareCode, SlidersHorizontal, Puzzle, ShieldBan,
   Video, ToggleLeft, History ,
-  Monitor, Cpu } from "lucide-react"
+  Monitor, Cpu, Printer } from "lucide-react"
 
 // 主应用布局（RSC）：深度会话校验 + 强制2FA策略拦截 + 权限菜单过滤
 export default async function MainLayout({ children }: { children: React.ReactNode }) {
@@ -85,6 +85,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         { key: "a-feature-flags", label: "功能开关", href: "/admin/feature-flags", icon: <ToggleLeft className="h-4 w-4" /> },
         { key: "a-permissions", label: "权限中心", href: "/admin/permissions", icon: <ShieldCheck className="h-4 w-4" /> },
         { key: "a-hardware", label: "硬件透传监控", href: "/admin/hardware", icon: <Cpu className="h-4 w-4" /> },
+        { key: "a-printing", label: "打印机池监控", href: "/admin/printing", icon: <Printer className="h-4 w-4" /> },
       ],
     },
     {

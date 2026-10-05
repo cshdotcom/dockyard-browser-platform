@@ -1375,3 +1375,43 @@ Stage Summary:
 - 测试证据：3 小时全功能 QA 13/13 套件（A85+B132+C13+D18+F71 ≈ 319 断言 + 175min soak）+ 4 张浏览器截图
 - 已确认完整：MySQL 三库引擎/start.sh 三形态对称（env 预置管理员 ADMIN_USERNAME/PASSWORD 链路 + SEED_SKIP_ADMIN 向导门 + 二次初始化安全门）/远程硬件静默申请双模式+管理员监控/打印内网穿透
 - 发布：tag v1.14.0
+
+---
+Task ID: r40
+Agent: main
+Task: r40 大批次 —— 用户点名：远程打印机池（虚拟打印机 —— 浏览器点击打印 → 选择远程客户端物理打印机 → 自动送达打印）+ 企业策略大扩充（DNS 控制/插件扩展强制/打印管控/自补 20 键）+ 外部公网域名体检确保全部配置
+
+Work Log:
+- 【远程打印机池（核心新功能）】
+  · 数据层：RemotePrinter（nodeUuid+printerKey 唯一/OFFLINE 检测/位置标注）+ PrintJob（8 态状态机 PENDING→SENT→DELIVERED→PRINTING→PRINTED/FAILED/CANCELED/TIMED_OUT + sha256/HMAC 双校验）2 新模型 → sqlite db push + mysql/pg schema 同步（656 VarChar 重标 + 复合索引预算 ✓）+ 三客户端再生成
+  · 客户端通道 3 API（worknode-auth.ts 共享凭证模块抽取自 heartbeat —— timingSafeEqual 防时序侧信道）：POST /api/master/print/printers（60s 全量同步，未上报自动 OFFLINE=拔线检测，DISABLED 管理员禁用不被上报覆盖）+ POST /api/master/print/report（阶段状态即时回报，状态机单向前进防乱序/重放，跨节点回报 403）+ GET /api/master/print/file/[jobId]（HMAC-SHA256 一次性下载令牌 10min + 节点凭证双因子 + sha256 响应头对账 + 终态拒下载防迟到领取）
+  · 用户侧 API：GET /api/print/printers（在线池列表+节点过滤+能力徽章）+ POST /api/print/jobs（渲染 printToPDF → URL 级打印策略服务端强制 → 50MB 上限 → 落盘 storage/print-jobs → 入库 → WorkNodeCommand print.dispatch 指令携令牌派发）+ GET /api/print/jobs（列表+超时收口顺带触发）+ cancel（PENDING/SENT 可取消+队列指令联动收口+文件清理）
+  · URL 级打印策略（服务端强制双防线）：matchUrlPatterns（Chromium URLFilter 语义子集：[*.]host/纯 host/scheme://host[:port]/path*/纯 path）+ resolvePrintPolicyForUser（用户>组>模板合并链）+ checkPrintAllowed（PrintingEnabled 总闸 + 黑名单优先 + 白名单模式 + deny-wins）——与 Chromium 注入策略同语义，浏览器侧拦打印框、服务侧拦渲染出纸
+  · Worker 客户端：print-commands.ts（lpstat CUPS 发现+lpoptions 能力探测/WORKER_FAKE_PRINTERS 测试模式/print.dispatch 执行：下载→sha256 校验→dialog[打印界面+引导页+无图形环境自动降级 lp]或 silent[lp -n 份数 -o sides 双面]双交付→阶段回报）+ index.ts 接线（60s 同步循环+health 端点 printOnly/lastPrinterSync+WORKER_PRINT_ONLY 纯打印代理模式）+ worker 版本 1.3.0-r40
+  · 用户 UI：RemotePrintButton 升级双 Tab 打印对话框（远程打印机池：打印机下拉+客户端徽章+交付方式+份数+双面+纸张方向+我的任务实时列表[8s 轮询+取消按钮] / 本地打印：r37 原链路保留）
+  · 管理监控：/admin/printing（6 统计卡+打印机池[禁用/启用/删除/位置标注]+任务队列[状态筛选+重派+强制取消+清文件]+PRINT_POOL 审计流[全阶段事件] 15s 自动刷新）+ print-admin.ts actions（monitor/printerOp/jobOp：重派校验节点在线+文件在库+新令牌重新入队+attempts 计数）+ /api/admin/print HTTP 管理通道（GET 监控 + POST 7 op；QA/程序化运维用）
+  · 导航注册「打印机池监控」+ 配置 5 键（printing.poolEnabled/print.dispatchTimeoutSec 180s/deliverTimeoutSec 600s/fileTtlHours 24h/jobMaxBytes 50MB）+ 权限锁 blockRemotePrintPool（PERMISSION_LOCK_KEYS 34→35，组/用户级 UI 自动遍历渲染）
+  · 根因修复 2 项：sweepPrintJobs 超时收口错误删文件（重派依赖文件在库 → 改为保留，TTL 归 sweepPrintJobFiles 按保留期管理）；E2 黑名单测试的模拟会话跨进程不可见问题（simStates 进程内存 Map → QA 改库级断言 + HTTP 端由 PrintingEnabled 路径实证）
+- 【企业策略大扩充 78→98 键（+20）】
+  · 新分类「DNS 与域名解析控制」：BuiltInDnsClientEnabled（内置 DNS 客户端开关——与 DoH 联动全托管）/DnsOverHttpsMode+Templates（自浏览体验迁入新分类）/SSLErrorOverrideAllowed（SSL 错误页继续访问防线）/ForceEphemeralProfiles（临时 Profile 关闭即焚零残留）
+  · 扩展强制管控：ExtensionInstallSources（安装源白名单）/ExtensionInstallAllowlist（豁免黑名单）/BlockExternalExtensions（禁外部注入）/ExtensionInstallBlocklist/Forcelist/Settings（安全层持有目录化——CRX 管控页注入，模板拒绝覆盖）
+  · 打印模板管控（与打印机池联动）：PrintHeaderTemplate/PrintFooterTemplate（$TITLE/$URL/$DATE/$PAGE_NUMBER 企业水印防伪）/SystemPrintDialogEnabled/PrintPreviewStickySettings
+  · 逃逸收口：TaskManagerEndProcessEnabled（禁杀渲染进程绕审计——exitGuard kiosk/fullscreen 档自动注入）/BackgroundModeEnabled/RestrictSigninToPattern（企业账号收口）
+  · 家长控制补全：DefaultImagesSetting/ForceYouTubeRestrict/RegisterProtocolHandlersEnabled/EditFavoritesEnabled
+  · 根因修复：r39 enum 严格校验 bug（string 枚举 DnsOverHttpsMode 一律被拒"需要 number" → 修复为类型跟随选项声明：number 枚举须 number、string 枚举须 string）+ 目录 DnsOverHttpsMode/Templates 重复键去重（浏览体验→DNS 分类唯一化）
+- 【外部公网域名体检（用户点名"确保都配置在"）】
+  · external-domains.ts collectExternalDomainStatus：7 项体检（平台公网基地址/节点公网地址/CDP 公网网关含 TLS+票据窗口/Worker 主控地址推导链/VNC 桥三模式/CORS 白名单/备份推送节点在线核对）→ ok/warn(私网)/missing(含推导链建议文案)
+  · /admin/network 顶部体检卡（RSC 零 JS 渲染：状态灯+当前值+来源链+建议+三色计数徽章）
+  · 本环境实际配置：.env PUBLIC_BASE_URL=NODE_PUBLIC_URL=http://21.0.20.158:3000 + SystemConfig cdp.publicGatewayHost=21.0.20.158 → 体检就绪（平台/节点/CDP 网关全 ok）
+- 【QA 证据】
+  · qa-r40.ts 57/57（A 注册链 6[无凭证 400/坏凭证 404/全量同步 2 台/OFFLINE 拔线检测/ONLINE 保持] + B 主链路 17[池列表/未登录 401/创建/落盘 %PDF-/心跳携指令/HMAC 令牌/下载双因子/sha256 一致/SENT 状态/篡改令牌 403/DELIVERED→PRINTING→PRINTED/终态幂等/用户列表/跨节点 403] + C 管理页+审计 2 + E 权限策略 9[demo 权限锁 403×2/URL 匹配 6 case/黑名单白名单 deny-wins/PrintingEnabled 403/DISABLED 打印机 403] + F 超时取消 10[TIMED_OUT 自动收口/文件保留供重派/重派 attempts+1/用户取消+队列收口/终态 409/管理员强制取消/监控 GET/普通用户 403] + G 策略 8[98 键无重复/string 枚举修复 3 断言/17 新键过校验/安全键拒绝/exitGuard 新键] + H 域名体检 4）
+  · qa-r40-worker-live.ts 8/8（真实 Worker 进程端到端：自动上报打印机/health 端点/创建任务→领取→下载校验→自动打印 PRINTED/日志实证/指令回执 doneAt 闭环/dialog+silent 双模式）
+  · 浏览器 E2E 9 截图（download/qa-r40/）：登录/管理页完整渲染/打印对话框（打印机下拉+客户端徽章+能力徽章+交付方式+份数+双面+纸张方向）/填表提交/任务状态实时"已完成"（UI 创建→worker 打印→8s 轮询闭环）/本地打印 tab/域名体检卡（配置前后对比）/管理页 375 移动端
+  · 质量门：tsc src 23=基线零新增（dev server 内存挤压曾致 tsc 崩溃假 0 —— 停服后复测确认）；eslint 0 error 0 warning；next build 50s 87 静态页全绿（新路由 /admin/printing + /api/print/* + /api/admin/print 在列）
+  · 环境韧性：QA 期间 dev OOM 1 次（r39 已知 4GB 容器限制）→ guard 自动重启 + .next 清理恢复；QA 数据全清（打印任务 0/打印机 0/E2E 工作区 0/Worker 节点 0，审计保留）
+  · 部署文档：deploy/README.md 4.2 节「远程打印机池代理」（场景/环境变量表/链路/管控全说明）
+
+Stage Summary:
+- r40 交付：远程打印机池全链（虚拟打印机：客户端上报→用户选择→指令派发→HMAC 令牌下载→dialog/silent 双交付→状态回报→管理员监控/重派/强制取消）+ URL 级打印策略服务端强制（与 Chromium 注入双防线）+ 企业策略 98 键（DNS 控制 5/扩展强制 6/打印模板 4/逃逸收口 3/家长控制 4 + enum 校验 bug 修复）+ 外部公网域名体检卡（7 项含推导链建议 + 本环境 3 项全配置就绪）+ WORKER_PRINT_ONLY 纯打印代理部署形态
+- 测试证据：qa-r40 57/57 + worker-live 8/8（真实进程端到端）+ 浏览器 E2E 9 截图（含 UI 创建任务→worker 打印→状态实时刷新完整闭环）+ tsc 基线零新增 + lint 0/0 + build 87 页全绿
+- 发布：tag v1.15.0

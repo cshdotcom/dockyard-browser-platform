@@ -9,6 +9,7 @@ import { createServer } from "http"
 import { execFile } from "child_process"
 import { readFileSync } from "fs"
 import { handleFileCommand } from "./file-commands"
+import { handlePrintCommand, syncPrinters } from "./print-commands"
 
 const MASTER_API_URL = process.env.MASTER_API_URL || ""
 const WORKER_NODE_UUID = process.env.WORKER_NODE_UUID || ""
@@ -31,7 +32,10 @@ if (!/^wn-[a-f0-9]{16}$/.test(WORKER_NODE_UUID)) {
 }
 
 const HEARTBEAT_SEC = Number(process.env.WORKER_HEARTBEAT_SEC || 10)
-const VERSION = "worker-1.2.0-r36"
+const VERSION = "worker-1.3.0-r40"
+// r40：打印机池代理开关（办公机部署：只提供打印机，不跑沙箱）
+const PRINT_ONLY = process.env.WORKER_PRINT_ONLY === "1"
+const PRINTER_SYNC_SEC = Number(process.env.WORKER_PRINTER_SYNC_SEC || 60)
 
 async function collectMetrics(): Promise<Record<string, number | string>> {
   const os = await import("os")
@@ -121,6 +125,12 @@ async function executeCommand(cmd: string, payload: unknown): Promise<{ ok: bool
     console.log(`[worker] 文件指令结果：${cmd} → ${r.ok ? "OK" : `FAIL ${r.error}`}`)
     return r
   }
+  // r40：打印指令（打印机池派发；返回 null = 非打印指令继续主路由）
+  const pr = await handlePrintCommand(cmd, payload)
+  if (pr) {
+    console.log(`[worker] 打印指令结果：${cmd} → ${pr.ok ? "OK" : `FAIL ${pr.error}`}`)
+    return pr
+  }
   switch (cmd) {
     case "ping":
       console.log("[worker] pong")
@@ -139,6 +149,7 @@ const httpServer = createServer((req, res) => {
     res.end(JSON.stringify({
       ok: true, service: "dockyard-worker", nodeUuid: WORKER_NODE_UUID, version: VERSION,
       master: MASTER_API_URL, evicted, uptimeSec: Math.floor((Date.now() - started) / 1000),
+      printOnly: PRINT_ONLY, lastPrinterSync,
     }))
     return
   }
@@ -147,12 +158,33 @@ const httpServer = createServer((req, res) => {
 httpServer.listen(HEALTH_PORT, () => {
   console.log(`[worker] Dockyard Worker 启动（node=${WORKER_NODE_UUID} master=${MASTER_API_URL} health=:${HEALTH_PORT}）`)
   console.log(`[worker] 心跳周期 ${HEARTBEAT_SEC}s；纯执行节点：无数据库、无管理端、无自主决策`)
+  if (PRINT_ONLY) console.log(`[worker] 打印机池纯代理模式（WORKER_PRINT_ONLY=1：本机只提供打印机派发，不跑沙箱）`)
 })
+
+// ---- r40：打印机池上报循环（启动即报 + 周期同步；全量语义，主控侧 OFFLINE 检测）----
+let lastPrinterSync = ""
+async function printerSyncLoop(hostname: string): Promise<void> {
+  const r = await syncPrinters(hostname)
+  if (r.ok) {
+    lastPrinterSync = new Date().toISOString()
+  } else {
+    console.warn(`[worker] 打印机上报失败：${r.error}`)
+  }
+}
 
 void heartbeat()
 setInterval(() => {
   if (!evicted) void heartbeat()
 }, HEARTBEAT_SEC * 1000)
+
+// 打印机同步（启动延迟 3s 错峰；周期 PRINTER_SYNC_SEC）
+setTimeout(() => {
+  void (async () => {
+    const os = await import("os")
+    await printerSyncLoop(os.hostname())
+    setInterval(() => { if (!evicted) void printerSyncLoop(os.hostname()) }, PRINTER_SYNC_SEC * 1000)
+  })()
+}, 3000)
 
 process.on("SIGTERM", () => { httpServer.close(() => process.exit(0)); setTimeout(() => process.exit(0), 1500) })
 process.on("SIGINT", () => { httpServer.close(() => process.exit(0)); setTimeout(() => process.exit(0), 1500) })

@@ -6,9 +6,10 @@ import { StatCard } from "@/components/shared/confirm"
 import { ProxyNodesTable, type ProxyNodeRow } from "./proxy-nodes-table"
 import { BrowserNodesTable, type BrowserNodeRow } from "./browser-nodes-table"
 import { HostNodesTable, type HostNodeRow } from "./host-nodes-table"
-import { Network, Globe2, ShieldCheck, Server, MonitorCog, TriangleAlert, Boxes, Info } from "lucide-react"
+import { Network, Globe2, ShieldCheck, Server, MonitorCog, TriangleAlert, Boxes, Info, Globe } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
+import { collectExternalDomainStatus } from "@/lib/external-domains"
 
 // 网络与节点（管理员）：代理节点 / 浏览器节点 / 宿主机 三页签
 export const metadata = { title: "网络与节点" }
@@ -41,6 +42,8 @@ export default async function AdminNetworkPage({
         </p>
       </div>
 
+      <ExternalDomainsAuditCard />
+
       <div className="flex items-center gap-1 border-b">
         {TABS.map((t) => (
           <Link
@@ -61,6 +64,45 @@ export default async function AdminNetworkPage({
       {tab === "proxy" && <ProxyTab q={q} f={f} />}
       {tab === "browser" && <BrowserTab q={q} f={f} />}
       {tab === "host" && <HostTab q={q} f={f} />}
+    </div>
+  )
+}
+
+// ============================================================
+// r40：外部访问地址体检卡（部署验收 —— 确保该配置的外部公网域名都已配置）
+// ============================================================
+async function ExternalDomainsAuditCard() {
+  const items = await collectExternalDomainStatus().catch(() => [])
+  if (items.length === 0) return null
+  const okCount = items.filter((i) => i.status === "ok").length
+  const warnCount = items.filter((i) => i.status === "warn").length
+  const missCount = items.filter((i) => i.status === "missing").length
+  return (
+    <div className="rounded-lg border bg-card">
+      <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
+        <Globe className="h-4 w-4 text-teal-600" />
+        <span className="text-sm font-semibold">外部访问地址体检</span>
+        <span className="text-xs text-muted-foreground">部署验收：公网域名/内网穿透地址配置完整性与可达形态</span>
+        <span className="ml-auto flex gap-1.5">
+          <Badge variant="secondary" className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">就绪 {okCount}</Badge>
+          {warnCount > 0 && <Badge variant="secondary" className="bg-amber-500/15 text-amber-600 dark:text-amber-400">私网形态 {warnCount}</Badge>}
+          {missCount > 0 && <Badge variant="secondary" className="bg-red-500/15 text-red-600 dark:text-red-400">未配置 {missCount}</Badge>}
+        </span>
+      </div>
+      <div className="divide-y text-sm">
+        {items.map((it) => (
+          <div key={it.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5">
+            <span className={cn("h-2 w-2 shrink-0 rounded-full", it.status === "ok" ? "bg-emerald-500" : it.status === "warn" ? "bg-amber-500" : "bg-red-500")} />
+            <span className="min-w-56 font-medium">{it.label}</span>
+            <code className="flex-1 min-w-40 break-all text-xs text-foreground">{it.value}</code>
+            <span className="text-[11px] text-muted-foreground">{it.source}</span>
+            <span className={cn(
+              "w-full text-xs",
+              it.status === "ok" ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400",
+            )}>{it.advice}</span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
