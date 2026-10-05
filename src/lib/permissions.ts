@@ -159,6 +159,7 @@ export const PERMISSION_LOCK_KEYS = [
   "blockRefreshVncKey", "blockExportLogs", "blockShareWorkspace", "blockCopyOthersTemplate",
   "blockViewPublicIp", "blockSwitchProxyNode", "blockViewContainerDetail", "blockRestartInstance",
   "blockCleanOwnRecycle", "blockWebKiosk", "blockVncAudio",
+  "blockPlayground", "blockRemotePrint", "blockCdpEndpointToken", "blockGuestShareLink",
 ] as const
 export type PermissionLockKey = (typeof PERMISSION_LOCK_KEYS)[number]
 

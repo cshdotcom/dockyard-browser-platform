@@ -78,6 +78,7 @@ export default async function AdminGroupsPage() {
     allowInternalNetwork: g.allowInternalNetwork,
     allowSecureLocationAccess: g.allowSecureLocationAccess,
     allowShare: g.allowShare !== false,
+    allowGuestShare: g.allowGuestShare !== false,
     vncSessionMaxMinutes: g.vncSessionMaxMinutes ?? null,
     policy: (g.policy as Record<string, unknown> | null) || null,
     // r33：组级存储配额 + 沙箱最大时长基线

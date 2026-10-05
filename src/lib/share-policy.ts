@@ -116,3 +116,74 @@ export async function assertShareAllowed(opts: ShareControlOpts & { role: string
   }
   return r
 }
+
+// ============================================================
+// r37：访客访问四级管控（免登录接入的独立管控链）
+// 解析优先级（deny 优先，越靠近资源越优先）：
+//   1. 沙箱级 shareDisabled（既有否决开关，访客同样生效）
+//   2. 用户级 guestShareAllowed（三态：null=继承组；false=强制禁止）
+//   3. 用户组级 allowGuestShare（任一归属组 false 即禁止）
+//   4. 全局 share.guestEnabled（SystemConfig，默认 false —— 显式开启才可用）
+// 管理端（SUPER_ADMIN/ADMIN）不受限。
+// 语义边界：访客管控约束的是「链接是否允许免登录接入」；链接创建本身仍走
+// resolveShareControl（共享管控）。即：允许共享 ≠ 允许访客。
+// ============================================================
+
+export interface GuestShareControlResult {
+  allowed: boolean
+  source: "sandbox" | "user" | "group" | "global" | "default" | "admin"
+  reason: string
+}
+
+export async function resolveGuestShareControl(opts: ShareControlOpts): Promise<GuestShareControlResult> {
+  const { userId, workspaceId } = opts
+  const role = opts.role
+
+  if (role === "SUPER_ADMIN" || role === "ADMIN") {
+    return { allowed: true, source: "admin", reason: "" }
+  }
+
+  // 1. 沙箱级否决
+  if (workspaceId) {
+    const ws = await db.browserWorkspace.findUnique({
+      where: { id: workspaceId },
+      select: { shareDisabled: true },
+    })
+    if (ws?.shareDisabled) {
+      return { allowed: false, source: "sandbox", reason: "该工作区已被管理员禁止共享（访客通道同步关闭）" }
+    }
+  }
+
+  // 2. 用户级三态 → 3. 组级开关
+  const user = await db.user.findUnique({ where: { id: userId }, select: { guestShareAllowed: true } })
+  if (user?.guestShareAllowed === false) {
+    return { allowed: false, source: "user", reason: "管理员已禁止你开放访客访问（用户级开关）" }
+  }
+  if (user?.guestShareAllowed !== true) {
+    const gids = await userGroupIds(userId)
+    if (gids.length) {
+      const groups = await db.group.findMany({ where: { id: { in: gids } }, select: { allowGuestShare: true, name: true } })
+      const denied = groups.find((g) => g.allowGuestShare === false)
+      if (denied) {
+        return { allowed: false, source: "group", reason: `所属用户组「${denied.name}」已禁止访客访问` }
+      }
+    }
+  }
+
+  // 4. 全局开关（默认关 —— 管理员显式开启）
+  const globalGuest = await getConfigBool("share.guestEnabled", false)
+  if (!globalGuest) {
+    return { allowed: false, source: "global", reason: "管理员未启用平台访客访问功能（默认关闭）" }
+  }
+
+  return { allowed: true, source: "default", reason: "" }
+}
+
+/** 访客链接的门禁（创建/开启访客时） */
+export async function assertGuestShareAllowed(opts: ShareControlOpts & { role: string }): Promise<GuestShareControlResult> {
+  const r = await resolveGuestShareControl(opts)
+  if (!r.allowed) {
+    throw bizError(ErrorCode.PERMISSION_LOCKED, r.reason || "访客访问已被管理员禁用")
+  }
+  return r
+}

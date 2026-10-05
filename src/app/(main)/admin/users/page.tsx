@@ -36,6 +36,14 @@ export default async function AdminUsersPage({
   // r33：多用户筛选（管理员界面勾选多个用户 → ids 过滤）
   const idsFilter = (f.ids || "").split(",").map((s) => s.trim()).filter(Boolean)
   if (idsFilter.length > 0) where.id = { in: idsFilter }
+  // r37：用户组筛选（多选组 → 组员 id 集；与多用户筛选取交集）
+  const groupsFilter = (f.groups || "").split(",").map((s) => s.trim()).filter(Boolean)
+  if (groupsFilter.length > 0) {
+    const members = await db.groupUser.findMany({ where: { groupId: { in: groupsFilter } }, select: { userId: true } })
+    const groupMemberIds = [...new Set(members.map((m) => m.userId))]
+    const combined = idsFilter.length > 0 ? groupMemberIds.filter((id) => idsFilter.includes(id)) : groupMemberIds
+    where.id = { in: combined.length ? combined : ["__none__"] } // 组无成员/交集为空 → 空结果
+  }
   if (f.createdFrom || f.createdTo) {
     where.createdAt = {
       ...(f.createdFrom ? { gte: new Date(f.createdFrom) } : {}),
@@ -71,6 +79,7 @@ export default async function AdminUsersPage({
         allowSecureLocationAccess: true,
         vncSessionMaxMinutes: true,
         shareAllowed: true,
+        guestShareAllowed: true,
         lockedUntil: true,
         failedLoginCount: true,
         quota: true,
@@ -151,6 +160,7 @@ export default async function AdminUsersPage({
     vncSessionMaxMinutes: u.vncSessionMaxMinutes ?? null,
     allowSecureLocationAccess: u.allowSecureLocationAccess,
     shareAllowed: u.shareAllowed ?? null,
+    guestShareAllowed: u.guestShareAllowed ?? null,
     netPolicy: netPolicies.get(u.id) || null,
     storageQuotaMb: u.storageQuotaMb ?? null,
     storagePolicy: (u.storagePolicy as AdminUserRow["storagePolicy"]) || null,

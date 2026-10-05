@@ -45,6 +45,7 @@ interface GroupFormDialogProps {
     allowInternalNetwork: boolean
     allowSecureLocationAccess: boolean
     allowShare: boolean
+    allowGuestShare: boolean
     vncSessionMaxMinutes: number | null
     tags: string[]
     // r33：组级存储配额 + 沙箱最大时长基线
@@ -108,6 +109,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
   const [force2fa, setForce2fa] = React.useState(false)
   const [allowInternalNetwork, setAllowInternalNetwork] = React.useState(false)
   const [allowShare, setAllowShare] = React.useState(true)
+  const [allowGuestShare, setAllowGuestShare] = React.useState(true)
   const [vncLimitEnabled, setVncLimitEnabled] = React.useState(false)
   const [vncLimitMinutes, setVncLimitMinutes] = React.useState(120)
   const [allowSecureLocationAccess, setAllowSecureLocationAccess] = React.useState(false)
@@ -153,6 +155,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       setPolicyOverrides(group.managedPolicyOverrides ? (() => { try { return JSON.stringify(JSON.parse(group.managedPolicyOverrides), null, 2) } catch { return group.managedPolicyOverrides } })() : "")
       setAllowInternalNetwork(group.allowInternalNetwork)
       setAllowShare(group.allowShare !== false)
+      setAllowGuestShare(group.allowGuestShare !== false)
       setVncLimitEnabled(group.vncSessionMaxMinutes != null && group.vncSessionMaxMinutes > 0)
       setVncLimitMinutes(group.vncSessionMaxMinutes && group.vncSessionMaxMinutes > 0 ? group.vncSessionMaxMinutes : 120)
       setAllowSecureLocationAccess(group.allowSecureLocationAccess)
@@ -263,6 +266,7 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
       allowInternalNetwork,
       allowSecureLocationAccess,
       allowShare,
+      allowGuestShare,
       vncSessionMaxMinutes: vncLimitEnabled ? vncLimitMinutes : 0,
       tags,
       quota: quotaEnabled ? { sessions: qSessions, novncSessions: qNovnc, diskMb: qDisk, proxyBandwidthMb: qBandwidth } : undefined,
@@ -410,6 +414,13 @@ export function GroupFormDialog({ open, onOpenChange, mode, group, defaultParent
                 <p className="text-[10px] text-muted-foreground">关闭后组内成员默认禁止共享工作区（用户级可覆盖；沙箱级否决优先级最高）</p>
               </div>
               <Switch checked={allowShare} onCheckedChange={setAllowShare} />
+            </div>
+            <div className="flex items-center justify-between rounded-md border px-3 py-2">
+              <div className="min-w-0 pr-2">
+                <span className="text-sm">允许访客访问（免登录接入）</span>
+                <p className="text-[10px] text-muted-foreground">r37：关闭后组内成员的分享链接不允许访客免登录接入（用户级 guestShareAllowed 可覆盖；全局开关仍需开启）</p>
+              </div>
+              <Switch checked={allowGuestShare} onCheckedChange={setAllowGuestShare} />
             </div>
             <div className="flex items-center justify-between rounded-md border px-3 py-2">
               <div className="min-w-0 pr-2">

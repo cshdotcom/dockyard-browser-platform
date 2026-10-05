@@ -13,7 +13,7 @@ import { toast } from "sonner"
 import {
   Loader2, MoreHorizontal, Square, RotateCw, Trash2, Flame, Unplug, Timer, UserRoundCog, Anchor,
   AlertTriangle, X, Columns3, ShieldCheck, ShieldX, Container, History, ArrowRightLeft, Share2,
-  UsersRound, Search, Snowflake, Sunrise, Video, FolderOpen, Undo2, Rocket,
+  UsersRound, Search, Snowflake, Sunrise, Video, FolderOpen, Undo2, Rocket, FolderTree, Ticket,
 } from "lucide-react"
 import { PlaybackPolicyDialog } from "@/components/recordings/playback-policy-dialog"
 import { HardwarePermsDialog } from "@/components/hardware/hardware-perms-dialog"
@@ -37,6 +37,7 @@ import {
   freezeWorkspaceAction, unfreezeWorkspaceAction, restoreReclaimedWorkspaceAction,
 } from "@/server/actions/admin-workspaces"
 import { adminForceUpdateWorkspaceTimersAction, updateWorkspaceAction } from "@/server/actions/workspaces"
+import { adminBatchCdpTokensAction } from "@/server/actions/cdp-gateway"
 
 export interface AdminWorkspaceRow {
   id: string
@@ -107,6 +108,7 @@ interface Props {
   view: "active" | "deleted"
   userOptions: UserOption[]
   proxyOptions: { id: string; name: string }[]
+  groupOptions?: { id: string; name: string }[] // r37：用户组筛选选项
   transferTargets: UserOption[]
   /** r14（22-c）：当前管理员（默认用户筛选=仅自己） */
   currentAdmin: { id: string; username: string }
@@ -144,7 +146,7 @@ function loadVisibleCols(view: "active" | "deleted"): Set<ColKey> {
 }
 
 export function WorkspacesTable(props: Props) {
-  const { rows, total, page, pageSize, keyword, sortField, sortOrder, filters, view, userOptions, proxyOptions, transferTargets, currentAdmin } = props
+  const { rows, total, page, pageSize, keyword, sortField, sortOrder, filters, view, userOptions, proxyOptions, groupOptions, transferTargets, currentAdmin } = props
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -652,6 +654,15 @@ export function WorkspacesTable(props: Props) {
           pushQuery={pushQuery}
         />
 
+        {/* r37：用户组筛选器（多选；叠加于用户筛选） */}
+        {groupOptions && groupOptions.length > 0 && (
+          <GroupFilterPopover
+            groupOptions={groupOptions}
+            filters={filters}
+            pushQuery={pushQuery}
+          />
+        )}
+
         <Select
           value={filters.proxy || undefined}
           onValueChange={(v) => pushQuery({ page: "1", proxy: v === "__all__" ? undefined : v })}
@@ -866,6 +877,16 @@ export function WorkspacesTable(props: Props) {
                       <Anchor className="h-4 w-4 mr-2" /> VNC 会话时长上限
                     </DropdownMenuItem>
                   )}
+                  {/* r37：沙箱级 CDP 持久连接地址强制管理（吊销/轮换/延长） */}
+                  <DropdownMenuItem onClick={() => callAction(`cdptok-revoke-${row.id}`, () => adminBatchCdpTokensAction({ scope: "workspace", ids: [row.id], op: "revoke", reason: "沙箱级强制吊销" }))}>
+                    <Ticket className="h-4 w-4 mr-2 text-sky-600" /> CDP 地址全部吊销
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => callAction(`cdptok-rotate-${row.id}`, () => adminBatchCdpTokensAction({ scope: "workspace", ids: [row.id], op: "rotate", reason: "沙箱级强制轮换" }))}>
+                    <Ticket className="h-4 w-4 mr-2 text-sky-600" /> CDP 地址全部轮换（换新）
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => callAction(`cdptok-extend-${row.id}`, () => adminBatchCdpTokensAction({ scope: "workspace", ids: [row.id], op: "extend", minutes: 1440 }))}>
+                    <Timer className="h-4 w-4 mr-2 text-emerald-600" /> CDP 地址延长 24 小时
+                  </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => setTransferTarget(row)}>
                     <UserRoundCog className="h-4 w-4 mr-2" /> 资源转移
                   </DropdownMenuItem>
@@ -1539,6 +1560,94 @@ function UserFilterPopover({
               应用筛选
             </Button>
           </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+// ---- r37：用户组筛选器（多选勾选 + 搜索 + 应用） ----
+function GroupFilterPopover({
+  groupOptions,
+  filters,
+  pushQuery,
+}: {
+  groupOptions: { id: string; name: string }[]
+  filters: Record<string, string>
+  pushQuery: (patch: Record<string, string | undefined>) => void
+}) {
+  const selectedIds = (filters.groups || "").split(",").map((s) => s.trim()).filter(Boolean)
+  const [search, setSearch] = React.useState("")
+  const [draft, setDraft] = React.useState<string[]>(selectedIds)
+  const [open, setOpen] = React.useState(false)
+
+  React.useEffect(() => {
+    if (open) {
+      setDraft((filters.groups || "").split(",").map((s) => s.trim()).filter(Boolean))
+      setSearch("")
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  const kw = search.trim().toLowerCase()
+  const filtered = kw ? groupOptions.filter((g) => g.name.toLowerCase().includes(kw)) : groupOptions
+
+  const toggleDraft = (id: string) =>
+    setDraft((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" className="h-8 gap-1.5">
+          <FolderTree className="h-3.5 w-3.5" />
+          用户组筛选：{selectedIds.length ? `已选 ${selectedIds.length} 个组` : "全部组"}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 p-3">
+        <div className="space-y-2">
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="搜索用户组名称…"
+            className="h-8 text-xs"
+          />
+          <div className="max-h-64 overflow-y-auto rounded-md border divide-y">
+            {filtered.length === 0 && (
+              <p className="p-3 text-xs text-muted-foreground text-center">未找到匹配的用户组</p>
+            )}
+            {filtered.map((g) => {
+              const checked = draft.includes(g.id)
+              return (
+                <label key={g.id} className="flex items-center gap-2 p-2 text-xs cursor-pointer hover:bg-muted/40">
+                  <input type="checkbox" checked={checked} onChange={() => toggleDraft(g.id)} className="h-3.5 w-3.5 accent-teal-600" />
+                  <span className="truncate">{g.name}</span>
+                  {selectedIds.includes(g.id) && !checked && <span className="text-[10px] text-muted-foreground">(当前筛选)</span>}
+                </label>
+              )
+            })}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button" size="sm" className="h-7 flex-1 text-xs bg-teal-600 hover:bg-teal-700"
+              onClick={() => {
+                pushQuery({ page: "1", groups: draft.length ? draft.join(",") : undefined })
+                setOpen(false)
+              }}
+            >
+              应用（{draft.length}）
+            </Button>
+            <Button
+              type="button" size="sm" variant="outline" className="h-7 text-xs"
+              onClick={() => {
+                setDraft([])
+                pushQuery({ page: "1", groups: undefined })
+                setOpen(false)
+              }}
+            >
+              清除
+            </Button>
+          </div>
+          <p className="text-[10px] text-muted-foreground">按工作区归属组筛选（与用户/代理/状态筛选叠加生效）</p>
         </div>
       </PopoverContent>
     </Popover>

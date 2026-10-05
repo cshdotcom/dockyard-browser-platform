@@ -42,6 +42,7 @@ model User {
   frozen              Boolean   @default(false) // 永久冻结
   permissionLocks     Json? // 用户级权限锁覆盖
   shareAllowed        Boolean? // r13c：用户级共享开关（null=继承用户组，true=强制允许，false=强制禁止）
+  guestShareAllowed   Boolean? // r37：用户级访客访问开关（null=继承用户组；false=强制禁止访客接入其分享链接）
   // —— 网络访问管控（管理员按用户覆盖；null=继承所属组，组缺失时用全局默认）——
   allowInternalNetwork      Boolean? // 允许浏览器会话访问内网（RFC1918/链路本地/云元数据）
   allowSecureLocationAccess Boolean? // 允许访问容器内安全位置（CDP/VNC本机端口、file://、平台内部端点）
@@ -212,6 +213,7 @@ model Group {
   force2fa         Boolean  @default(false) // 组级强制2FA
   managedPolicyOverrides String? // r35：组级 Chromium 企业策略覆盖（JSON 键值；合并链：沙箱>用户>用户组>模板）
   allowShare       Boolean  @default(true) // r13c：组级共享开关（false=组内成员默认禁止共享工作区；用户级可覆盖）
+  allowGuestShare  Boolean  @default(true) // r37：组级访客访问开关（false=组内成员创建的分享链接不允许访客接入；用户级可覆盖）
   allowInternalNetwork       Boolean  @default(false) // 组级：允许访问内网（成员默认继承）
   allowSecureLocationAccess  Boolean  @default(false) // 组级：允许访问容器内安全位置
   vncSessionMaxMinutes       Int? // 组级 VNC 会话时长上限（分钟，null=继承全局默认，0=不限）
@@ -873,8 +875,48 @@ model WorkspaceShareLink {
   note           String?   // 备注说明（分享给谁/什么用途）
   createdByUserId String?
   createdAt      DateTime  @default(now())
+  // r37：访客访问（免登录）+ 密码保护 + 允许/禁止名单（完整权限管理）
+  passwordHash   String?   // argon2/bcrypt 哈希（null=无密码；访客与兑换均需校验）
+  guestAllowed   Boolean   @default(false) // 允许访客（未登录）访问：VNC 只读观看或可操作
+  guestCdp       Boolean   @default(false) // 访客可用 CDP（要求 permission=OPERATE；读写级）
+  allowUserIds   Json?     // 允许兑换的用户 id 白名单（null/[] = 不限）
+  denyUserIds    Json?     // 禁止兑换的用户 id 黑名单（优先于白名单）
+  allowGroupIds  Json?     // 允许兑换的用户组白名单（null/[] = 不限）
+  denyGroupIds   Json?     // 禁止兑换的用户组黑名单（deny 优先）
+  guestUseCount  Int       @default(0) // 访客访问次数（独立统计）
+  lastGuestAt    DateTime? // 最近访客访问时间
+  lastGuestIp    String?   // 最近访客来源 IP（安全审计）
 
   @@index([workspaceId])
+}
+
+// r37：CDP 公网连接地址（持久票据）全生命周期管理
+// 场景：用户持有 ws://host:port/p/<tid> 形式的公网连接地址；地址泄露后可一键
+// 「重新创建」（轮换：旧地址立即失效 + 生成新地址）；有效期支持 永久/自定义；
+// 管理员可强制吊销/轮换（用户/用户组/沙箱级 + 批量）；网关经主应用内部 API
+// 实时校验（吊销/过期/次数即时生效）。
+model CdpEndpointToken {
+  id             String    @id @default(cuid())
+  tid            String    @unique // 48 位随机 hex（公网地址组成部分，不可猜测）
+  workspaceId    String
+  userId         String?   // 归属用户（工作区所有者）
+  label          String?   // 标签（如「自动化接入」）
+  note           String?   // 备注
+  expireAt       DateTime? // null=永久有效
+  maxUses        Int       @default(0) // 0=不限次数；每次建连 +1
+  useCount       Int       @default(0)
+  lastUsedAt     DateTime?
+  lastUsedIp     String?
+  revokedAt      DateTime? // 吊销（轮换时旧票据置此标记）
+  revokeReason   String?
+  rotatedFromId  String?   // 轮换来源（新票据指向旧票据，血缘可追溯）
+  createdVia     String    @default("USER") // USER | ADMIN（管理员强制创建）
+  createdByUserId String?
+  createdAt      DateTime  @default(now())
+
+  @@index([workspaceId])
+  @@index([userId])
+  @@index([revokedAt])
 }
 
 model BrowserNode {
@@ -1109,6 +1151,8 @@ model BrowseHistoryEntry {
   url           String
   title         String?
   domain        String?
+  category      String?   // r37：数据自动分类（SEARCH/SOCIAL/VIDEO/SHOPPING/NEWS/BANKING/GOV/EMAIL/CLOUD/DEV/AI/EDU/GAME/OTHER）
+  sensitivity   String?   // r37：敏感级别（NORMAL/SENSITIVE/HIGH）—— 银行/政府/邮箱等明文数据识别
   visitAt       DateTime  @default(now())
   dwellMs       Int       @default(0) // 停留时长（同 URL 连续访问合并累计）
   incognitoHint Boolean   @default(false)
@@ -1120,6 +1164,8 @@ model BrowseHistoryEntry {
   @@index([userId, visitAt])
   @@index([domain])
   @@index([url])
+  @@index([category])
+  @@index([sensitivity])
 }
 
 model BookmarkEntry {
@@ -1131,6 +1177,8 @@ model BookmarkEntry {
   url           String
   title         String?
   folder        String?   // 所在文件夹路径（如 书签栏/工作）
+  category      String?   // r37：数据自动分类（同 BrowseHistoryEntry）
+  sensitivity   String?   // r37：敏感级别（同 BrowseHistoryEntry）
   position      Int       @default(0)
   dateAdded     DateTime?
   removedAt     DateTime? // 用户删除时标记（upsert 对账）
@@ -1141,6 +1189,7 @@ model BookmarkEntry {
   @@index([userId])
   @@index([url])
   @@index([workspaceId, removedAt])
+  @@index([category])
 }
 
 model RecycleBin {

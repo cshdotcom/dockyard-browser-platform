@@ -5,7 +5,7 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { ChevronDown, ChevronRight, FileDown, FileUp, KeyRound, MoreHorizontal, Plus, Search, Trash2, X, Loader2, UserX , Video , Recycle } from "lucide-react"
+import { ChevronDown, ChevronRight, FileDown, FileUp, KeyRound, MoreHorizontal, Plus, Search, Trash2, X, Loader2, UserX , Video , Recycle, Users, Ticket, Ban } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -14,9 +14,10 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { ConfirmDialog } from "@/components/shared/confirm"
-import { deleteGroupAction } from "@/server/actions/groups"
+import { deleteGroupAction, setGroupAllowGuestShareAction } from "@/server/actions/groups"
 import { batchDeleteGroupsAction } from "@/server/actions/batch"
 import { adminEvictGroupSharesAction, adminShareEvictPreviewAction } from "@/server/actions/admin-share-evict"
+import { adminBatchCdpTokensAction } from "@/server/actions/cdp-gateway"
 import { BatchFailuresDialog } from "@/components/shared/batch-ui"
 import { GroupFormDialog } from "./group-form"
 import { GroupTokenPolicyDialog } from "../users/token-policy-dialog"
@@ -43,6 +44,7 @@ export interface AdminGroupNode {
   allowInternalNetwork: boolean
   allowSecureLocationAccess: boolean
   allowShare: boolean
+  allowGuestShare: boolean
   policy: Record<string, unknown> | null
   vncSessionMaxMinutes: number | null
   // r33：组级存储配额 + 沙箱最大时长基线
@@ -267,6 +269,7 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
               {node.force2fa && <Badge variant="destructive" className="text-[10px]">强制2FA</Badge>}
               {node.allowInternalNetwork && <Badge className="text-[10px] bg-amber-100 text-amber-800 hover:bg-amber-100">内网✓</Badge>}
               {node.allowShare === false && <Badge variant="destructive" className="text-[10px]">禁共享</Badge>}
+              {node.allowGuestShare === false && <Badge variant="outline" className="text-[10px] text-violet-600 border-violet-300">禁访客</Badge>}
               {node.allowSecureLocationAccess && <Badge className="text-[10px] bg-amber-100 text-amber-800 hover:bg-amber-100">安全位置✓</Badge>}
               {lockCount > 0 && <Badge variant="secondary" className="text-[10px]">权限锁×{lockCount}</Badge>}
               {node.tags.slice(0, 3).map((t) => (
@@ -336,6 +339,33 @@ export function GroupsTree({ roots, allNodes, lockKeys, userOptions, proxyOption
                 <DropdownMenuItem onClick={() => { setCopyGroup(node) }}>复制组</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => openEvictGroup(node)}>
                   <UserX className="mr-1.5 h-4 w-4 text-rose-600" /> 清退组内收到的共享
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => void (async () => {
+                  const res = await setGroupAllowGuestShareAction({ id: node.id, allowGuestShare: !node.allowGuestShare })
+                  if (res.code === 0) {
+                    toast.success(`${node.allowGuestShare ? "已禁止" : "已允许"}组内成员的访客访问（影响 ${res.data?.affectedMembers ?? 0} 名成员）`)
+                    router.refresh()
+                  } else toast.error(res.msg)
+                })()}>
+                  <Users className="mr-1.5 h-4 w-4 text-violet-600" /> {node.allowGuestShare ? "禁止访客访问" : "允许访客访问"}
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => void (async () => {
+                  const res = await adminBatchCdpTokensAction({ scope: "group", ids: [node.id], op: "rotate", reason: "组级批量轮换" })
+                  if (res.code === 0) {
+                    toast.success(`组级 CDP 地址批量轮换完成：${res.data?.rotated ?? 0} 个地址已换新（共 ${res.data?.affected ?? 0} 条）`)
+                    router.refresh()
+                  } else toast.error(res.msg)
+                })()}>
+                  <Ticket className="mr-1.5 h-4 w-4 text-sky-600" /> CDP 地址全部轮换
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => void (async () => {
+                  const res = await adminBatchCdpTokensAction({ scope: "group", ids: [node.id], op: "revoke", reason: "组级批量吊销" })
+                  if (res.code === 0) {
+                    toast.success(`组级 CDP 地址批量吊销完成：${res.data?.affected ?? 0} 条地址已失效`)
+                    router.refresh()
+                  } else toast.error(res.msg)
+                })()}>
+                  <Ban className="mr-1.5 h-4 w-4 text-rose-600" /> CDP 地址全部吊销
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem

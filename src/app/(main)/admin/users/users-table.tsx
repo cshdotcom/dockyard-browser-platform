@@ -12,7 +12,7 @@ import { RetentionPolicyDialog } from "@/components/recycle/retention-policy-dia
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
-import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2, Share2, Ban, Undo2, UserX , Video , Recycle , Gauge, Pencil, Database } from "lucide-react"
+import { Loader2, Copy, FileDown, FileUp, Plus, MoreHorizontal, ShieldAlert, ShieldBan, Users2, Timer, KeyRound, Trash2, Share2, Ban, Undo2, UserX , Video , Recycle , Gauge, Pencil, Database, Users, Ticket, FolderTree } from "lucide-react"
 import { DataTable, StatusBadge } from "@/components/shared/data-table"
 import { ConfirmDialog, PrecisionInput } from "@/components/shared/confirm"
 import { UserAvatar } from "@/components/shared/user-avatar"
@@ -36,11 +36,12 @@ import {
   importUsersCsvAction, batchSetUserStatusAction, batchMoveGroupAction, batchResetQuotaAction, batchAssignStorageQuotaAction,
   kickUserSessionsAction, deleteUserAction, unlockUserAction, adminResetPasswordAction,
   setForce2faAction, resetUserTotpAction, clearTrustedDevicesAction, resetBackupCodesAction,
-  setUserNetworkPolicyAction, setUserShareAllowedAction, impersonateLoginAction,
+  setUserNetworkPolicyAction, setUserShareAllowedAction, setUserGuestShareAllowedAction, impersonateLoginAction,
   type CsvImportReport,
 } from "@/server/actions/users"
 import { batchDeleteUsersAction } from "@/server/actions/batch"
 import { adminEvictUserSharesAction, adminShareEvictPreviewAction } from "@/server/actions/admin-share-evict"
+import { adminBatchCdpTokensAction } from "@/server/actions/cdp-gateway"
 import { BatchFailuresDialog } from "@/components/shared/batch-ui"
 import { UserFormDialog, type GroupOption } from "./user-form"
 import { UserApiTokensDialog } from "./user-api-tokens"
@@ -69,6 +70,7 @@ export interface AdminUserRow {
   allowInternalNetwork: boolean | null // 用户级覆盖（null=继承组）
   vncSessionMaxMinutes: number | null // 用户级 VNC 连接总时长上限（null=继承组，0=不限）
   shareAllowed: boolean | null // r13c：用户级共享开关（null=继承组，true=强制允许，false=强制禁止）
+  guestShareAllowed: boolean | null // r37：用户级访客访问开关（null=继承组；false=强制禁止访客接入其分享链接）
   allowSecureLocationAccess: boolean | null
   netPolicy: { allowInternalNetwork: boolean; allowSecureLocationAccess: boolean; source: string } | null // 生效快照
   // —— r33：存储配额 + 沙箱最大时长（用户级覆盖；null=继承组/全局）——
@@ -569,12 +571,49 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
               <Undo2 className="mr-1.5 h-3.5 w-3.5" /> 恢复继承所属组
             </DropdownMenuItem>
             <p className="px-2 py-1 text-[11px] text-muted-foreground">四级优先级：沙箱否决 {'>'} 用户 {'>'} 用户组 {'>'} 全局</p>
+            <DropdownMenuSeparator />
+            <p className="px-2 py-1 text-[11px] text-muted-foreground">
+              访客访问开关（当前：{row.guestShareAllowed === null ? "继承所属组" : row.guestShareAllowed ? "允许访客" : "禁止访客"}）
+            </p>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserGuestShareAllowedAction({ id: row.id, guestShareAllowed: false }))}>
+              <Ban className="mr-1.5 h-3.5 w-3.5 text-rose-600" /> 禁止访客接入（覆盖组设置）
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserGuestShareAllowedAction({ id: row.id, guestShareAllowed: true }))}>
+              <Users className="mr-1.5 h-3.5 w-3.5 text-emerald-600" /> 允许访客接入（覆盖组设置）
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => callAction(row.id, () => setUserGuestShareAllowedAction({ id: row.id, guestShareAllowed: null }))}>
+              <Undo2 className="mr-1.5 h-3.5 w-3.5" /> 恢复继承所属组（访客）
+            </DropdownMenuItem>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
         {(viewerRole === "SUPER_ADMIN" || viewerRole === "ADMIN") && (
           <DropdownMenuItem onClick={() => openEvictShare(row)}>
             <UserX className="mr-1.5 h-4 w-4 text-rose-600" /> 清退其收到的共享
           </DropdownMenuItem>
+        )}
+        {(viewerRole === "SUPER_ADMIN" || viewerRole === "ADMIN") && (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger className="gap-1.5">
+              <Ticket className="mr-1.5 h-4 w-4 text-sky-600" /> CDP 连接地址（强制管理）
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="w-64">
+              <p className="px-2 py-1 text-[11px] text-muted-foreground">
+                对该用户全部沙箱的公网持久连接地址执行批量操作（即时生效，网关实时校验）
+              </p>
+              <DropdownMenuItem onClick={() => callAction(row.id, () => adminBatchCdpTokensAction({ scope: "user", ids: [row.id], op: "revoke", reason: "管理员用户级批量吊销" }))}>
+                <Ban className="mr-1.5 h-3.5 w-3.5 text-rose-600" /> 全部吊销（地址立即失效）
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => callAction(row.id, () => adminBatchCdpTokensAction({ scope: "user", ids: [row.id], op: "rotate", reason: "管理员用户级批量轮换" }))}>
+                <Undo2 className="mr-1.5 h-3.5 w-3.5 text-sky-600" /> 全部轮换（换新地址）
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => callAction(row.id, () => adminBatchCdpTokensAction({ scope: "user", ids: [row.id], op: "expire-now" }))}>
+                <Timer className="mr-1.5 h-3.5 w-3.5 text-amber-600" /> 立即过期
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => callAction(row.id, () => adminBatchCdpTokensAction({ scope: "user", ids: [row.id], op: "extend", minutes: 1440 }))}>
+                <Gauge className="mr-1.5 h-3.5 w-3.5 text-emerald-600" /> 延长 24 小时
+              </DropdownMenuItem>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
         )}
         <DropdownMenuSub>
           <DropdownMenuSubTrigger className="gap-1.5">
@@ -699,6 +738,12 @@ export function UsersTable({ rows, total, page, pageSize, keyword, sortField, so
           options={rows.map((r) => ({ id: r.id, username: r.username, displayName: r.displayName }))}
           selected={(filters.ids || "").split(",").filter(Boolean)}
           onApply={(ids) => pushQuery({ ids: ids.length ? ids.join(",") : undefined, page: "1" })}
+        />
+        {/* r37：用户组筛选（多选组 → 服务端组员过滤；与多用户筛选取交集） */}
+        <GroupUserFilter
+          options={groupOptions}
+          selected={(filters.groups || "").split(",").filter(Boolean)}
+          onApply={(gs) => pushQuery({ groups: gs.length ? gs.join(",") : undefined, page: "1" })}
         />
         <Button size="sm" variant="outline" onClick={() => { setImportText(""); setImportReport(null); setImportOpen(true) }}>
           <FileUp className="mr-1 h-4 w-4" /> 导入CSV
@@ -1253,6 +1298,67 @@ function UserMultiFilter({
               应用筛选{draft.length > 0 ? `（${draft.length}）` : ""}
             </Button>
           </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+// ============================================================
+// r37：用户组筛选弹层（多选组 → 服务端组员过滤）
+// ============================================================
+function GroupUserFilter({
+  options,
+  selected,
+  onApply,
+}: {
+  options: GroupOption[]
+  selected: string[]
+  onApply: (ids: string[]) => void
+}) {
+  const [open, setOpen] = React.useState(false)
+  const [draft, setDraft] = React.useState<string[]>(selected)
+  const [search, setSearch] = React.useState("")
+
+  React.useEffect(() => {
+    if (open) {
+      setDraft(selected)
+      setSearch("")
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  const kw = search.trim().toLowerCase()
+  const filtered = kw ? options.filter((g) => g.name.toLowerCase().includes(kw)) : options
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" className="h-8 gap-1.5">
+          <FolderTree className="h-3.5 w-3.5" />
+          用户组：{selected.length ? `已选 ${selected.length} 组` : "全部"}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 p-3">
+        <div className="space-y-2">
+          <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索用户组名称…" className="h-8 text-xs" />
+          <div className="max-h-56 overflow-y-auto rounded-md border divide-y">
+            {filtered.length === 0 && <p className="p-3 text-xs text-muted-foreground text-center">未找到匹配的用户组</p>}
+            {filtered.map((g) => {
+              const checked = draft.includes(g.id)
+              return (
+                <label key={g.id} className="flex items-center gap-2 p-2 text-xs cursor-pointer hover:bg-muted/40">
+                  <input type="checkbox" checked={checked} onChange={() => setDraft((prev) => (checked ? prev.filter((x) => x !== g.id) : [...prev, g.id]))} className="h-3.5 w-3.5 accent-teal-600" />
+                  <span className="truncate">{g.name}</span>
+                </label>
+              )
+            })}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" className="h-7 flex-1 text-xs bg-teal-600 hover:bg-teal-700" onClick={() => { onApply(draft); setOpen(false) }}>应用（{draft.length}）</Button>
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => { setDraft([]); onApply([]); setOpen(false) }}>清空</Button>
+          </div>
+          <p className="text-[10px] text-muted-foreground">按组成员筛选用户（与多用户筛选取交集）</p>
         </div>
       </PopoverContent>
     </Popover>

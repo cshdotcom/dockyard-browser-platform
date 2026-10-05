@@ -8,7 +8,7 @@ import {
   Activity,
   ArrowLeft, Globe, MonitorPlay, Share2, FileJson, Terminal, Clipboard, MousePointer2, Hand,
   RefreshCw, ShieldCheck, Wifi, Loader2, Trash2, Lock, Play, StopCircle, Copy, Anchor, Ticket,
-  RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon, Network, FileLock2, Link2, Plus, Cable,
+  RotateCcw, LockKeyhole, FolderLock, Ban, Gauge, Infinity as InfinityIcon, Network, FileLock2, Link2, Plus, Cable, Users, Camera,
 } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -28,8 +28,12 @@ import {
   refreshVncKeyAction, updateWorkspaceAction, switchProxyAction, restartBrowserProcessAction,
   switchWorkspaceModeAction,
 } from "@/server/actions/workspaces"
+// r37：快照（工作区详情一键创建；双模式）
+import { createSnapshotAction } from "@/server/actions/snapshots"
 // r36：CDP 公网票据（网关直连地址一键获取）
 import { getCdpGatewayTicketAction } from "@/server/actions/cdp-gateway"
+import { CdpTokenManager } from "./cdp-token-manager"
+import { RemotePrintButton } from "./remote-print-button"
 import { WorkspaceShareDialog } from "../share-dialogs"
 import { setWorkspacePolicyOverrideAction, refreshWorkspacePolicyAction } from "@/server/actions/rules"
 import { HelmPortViewer } from "@/components/vnc/helmport-viewer"
@@ -77,6 +81,9 @@ interface ShareRow { id: string; targetName: string; permission: string; expireA
 interface ShareLinkRow {
   id: string; token: string; permission: string; expireAt: string | null; revokedAt: string | null
   maxUses: number; useCount: number; lastUsedAt: string | null; note: string | null; createdAt: string
+  // r37：访客/密码/名单
+  guestAllowed: boolean; guestCdp: boolean; hasPassword: boolean
+  guestUseCount: number; lastGuestAt: string | null
 }
 interface ScriptRow { id: string; name: string; description: string; scope: string }
 interface HarRow { id: string; size: string; createdAt: string }
@@ -310,7 +317,7 @@ export function WorkspaceDetail({
 // ================= NoVNC 远程桌面面板（HelmPort 品牌化查看器：自研 RFB 客户端） =================
 function VncPanel({ workspace, canOperate, vncBridge, allowWebKiosk, allowVncAudio }: { workspace: WorkspaceDetailData; canOperate: boolean; vncBridge: { mode: string; url: string }; allowWebKiosk?: boolean; allowVncAudio?: boolean }) {
   const router = useRouter()
-  const [busy, setBusy] = React.useState(false)
+  const [busy, setBusy] = React.useState<string | boolean>(false)
   const [confirmSwitchDown, setConfirmSwitchDown] = React.useState(false)
 
   const refreshKey = async () => {
@@ -340,6 +347,21 @@ function VncPanel({ workspace, canOperate, vncBridge, allowWebKiosk, allowVncAud
       const res = await switchWorkspaceModeAction({ id: workspace.id, targetMode: "cdp_light" })
       if (res.code === 0) {
         toast.success(`已切换为 CDP 轻量模式${res.data?.restarted ? "并已自动拉起" : ""}${"，浏览器 Profile 已归档迁移保留"}`)
+        router.refresh()
+      } else toast.error(res.msg)
+    } finally { setBusy(false) }
+  }
+
+  // r37：一键创建快照（双模式；Profile 磁盘持久化非销毁态可导）
+  const createSnapshotNow = async () => {
+    setBusy("snapshot")
+    try {
+      const res = await createSnapshotAction({
+        workspaceId: workspace.id,
+        name: `${workspace.name} 快照 ${new Date().toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}`,
+      })
+      if (res.code === 0) {
+        toast.success("快照已创建（可在「快照管理」页还原/下载）")
         router.refresh()
       } else toast.error(res.msg)
     } finally { setBusy(false) }
@@ -414,10 +436,10 @@ function VncPanel({ workspace, canOperate, vncBridge, allowWebKiosk, allowVncAud
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="outline" size="sm" onClick={refreshKey} disabled={!canOperate || busy}>
-              <RefreshCw className={cn("h-3.5 w-3.5 mr-1", busy && "animate-spin")} /> 刷新临时密钥
+            <Button variant="outline" size="sm" onClick={refreshKey} disabled={!canOperate || !!busy}>
+              <RefreshCw className={cn("h-3.5 w-3.5 mr-1", !!busy && "animate-spin")} /> 刷新临时密钥
             </Button>
-            <Button variant="outline" size="sm" onClick={restartBrowser} disabled={!canOperate || busy} title="容器内浏览器进程退出后由 supervisor 以同一 Profile 自动拉起；此按钮用于卡死时手动触发">
+            <Button variant="outline" size="sm" onClick={restartBrowser} disabled={!canOperate || !!busy} title="容器内浏览器进程退出后由 supervisor 以同一 Profile 自动拉起；此按钮用于卡死时手动触发">
               <RotateCcw className="h-3.5 w-3.5 mr-1" /> 重启浏览器进程
             </Button>
             <ConfirmDialog
@@ -428,8 +450,18 @@ function VncPanel({ workspace, canOperate, vncBridge, allowWebKiosk, allowVncAud
               description={`将「${workspace.name}」从 VNC 完整模式切换为 CDP 轻量模式：浏览器 Profile（登录态/书签/历史/插件配置）将归档迁移保留；运行中的远程桌面会话将断开并自动以 CDP 模式重新拉起。`}
               onConfirm={switchMode}
             />
-            <Button variant="outline" size="sm" onClick={() => setConfirmSwitchDown(true)} disabled={!canOperate || busy} title="保留浏览器数据切换为 CDP 轻量模式（Profile 归档迁移）">
+            <Button variant="outline" size="sm" onClick={() => setConfirmSwitchDown(true)} disabled={!canOperate || !!busy} title="保留浏览器数据切换为 CDP 轻量模式（Profile 归档迁移）">
               <Terminal className="h-3.5 w-3.5 mr-1" /> 降级为 CDP 轻量模式
+            </Button>
+            <RemotePrintButton workspaceId={workspace.id} disabled={!canOperate || workspace.status !== "RUNNING"} />
+            {/* r37：快照入口（VNC/CDP 双模式；此前只在快照管理页可建 → VNC 用户感知不到） */}
+            <Button
+              variant="outline" size="sm" disabled={busy === "snapshot" || workspace.status === "DESTROYED"}
+              onClick={() => void createSnapshotNow()}
+              title="归档当前浏览器 Profile（书签/历史/登录态/Cookie；CDP 与 VNC 模式均支持）"
+            >
+              {busy === "snapshot" ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Camera className="h-3.5 w-3.5 mr-1" />}
+              创建快照
             </Button>
             <span className="text-xs text-muted-foreground">
               防退出：浏览器进程退出后 1 秒内自动以同一 Profile 拉起（supervisor 循环 + RestartPolicy=always + 看门狗自动重建）
@@ -665,6 +697,7 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
 
   return (
     <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
+      <div className="space-y-4">
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base"><Terminal className="h-4 w-4 inline mr-1" />连接信息</CardTitle>
@@ -680,7 +713,7 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
               description={`将「${workspace.name}」从 CDP 轻量模式升级为 VNC 完整模式：浏览器 Profile 将归档迁移保留，升级后可获得完整远程桌面（软键盘/输入法/录屏/截图/剪贴板等全部能力）。`}
               onConfirm={switchUp}
             />
-            <Button variant="outline" size="sm" onClick={() => setConfirmSwitchUp(true)} disabled={!canOperate || busy} title="保留浏览器数据升级为 VNC 完整模式（Profile 归档迁移）">
+            <Button variant="outline" size="sm" onClick={() => setConfirmSwitchUp(true)} disabled={!canOperate || !!busy} title="保留浏览器数据升级为 VNC 完整模式（Profile 归档迁移）">
               <MonitorPlay className="h-3.5 w-3.5 mr-1" /> 升级为 VNC 完整模式
             </Button>
             <span className="text-xs text-muted-foreground">r35：VNC↔CDP 双向升降级均保留浏览器数据</span>
@@ -755,7 +788,10 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
           </div>
         </CardContent>
       </Card>
-
+      {/* r37：持久公网连接地址管理（轮换/有效期/次数/吊销） */}
+      <CdpTokenManager workspaceId={workspace.id} canOperate={canOperate} isRunning={workspace.status === "RUNNING"} />
+      </div>
+      <div className="space-y-4">
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">网络节流模拟</CardTitle>
@@ -790,6 +826,21 @@ function CdpPanel({ workspace, canOperate, publicCdpEndpoint }: { workspace: Wor
           </Button>
         </CardContent>
       </Card>
+
+      {/* r37：远程打印（沙箱页面 → 本地打印机） */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">远程打印</CardTitle>
+          <CardDescription>沙箱当前页面经 CDP printToPDF 渲染 → 你的本地打印机输出（不落盘中间文件）</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <RemotePrintButton workspaceId={workspace.id} disabled={!canOperate || workspace.status !== "RUNNING"} />
+          <p className="text-[11px] text-muted-foreground">
+            渲染在沙箱内完成（页面完整保真：字体/样式/背景），PDF 流直达你的浏览器并唤起系统打印对话框——选择本地或网络打印机即可。管理员可用 feature.remotePrint 开关与 blockRemotePrint 权限锁按人/组管控。
+          </p>
+        </CardContent>
+      </Card>
+      </div>
     </div>
   )
 }
@@ -1098,7 +1149,7 @@ function SharesPanel({ workspace, shares, shareLinks }: { workspace: WorkspaceDe
   }
   const [linkCreateOpen, setLinkCreateOpen] = React.useState(false)
   // 新建链接后立即展示完整 URL（一次展示，关闭后仅列表可见）
-  const [freshLink, setFreshLink] = React.useState<{ url: string; permission: string; expireAt: string | null; maxUses: number } | null>(null)
+  const [freshLink, setFreshLink] = React.useState<{ url: string; guestUrl: string | null; permission: string; expireAt: string | null; maxUses: number; guestAllowed: boolean; hasPassword: boolean } | null>(null)
 
   const revokeLink = async (linkId: string) => {
     const res = await revokeWorkspaceShareLinkAction({ linkId })
@@ -1112,6 +1163,17 @@ function SharesPanel({ workspace, shares, shareLinks }: { workspace: WorkspaceDe
       toast.success("链接已复制到剪贴板")
     } catch {
       toast.info(url) // 剪贴板不可用时展示完整链接供手动复制
+    }
+  }
+
+  // r37：复制访客链接（免登录接入）
+  const copyGuestLink = async (token: string) => {
+    const url = `${window.location.origin}/view/${token}`
+    try {
+      await navigator.clipboard.writeText(url)
+      toast.success("访客链接已复制（接收方无需登录即可打开）")
+    } catch {
+      toast.info(url)
     }
   }
 
@@ -1174,12 +1236,23 @@ function SharesPanel({ workspace, shares, shareLinks }: { workspace: WorkspaceDe
               <p className="text-xs text-muted-foreground">链接已创建（完整地址仅此一次展示，可随时在列表中复制）：</p>
               <div className="flex items-center gap-2">
                 <code className="flex-1 min-w-0 truncate rounded bg-muted px-2 py-1.5 text-xs font-mono">{freshLink.url}</code>
-                <Button size="sm" variant="outline" onClick={() => void navigator.clipboard.writeText(`${window.location.origin}${freshLink.url}`).then(() => toast.success("已复制")).catch(() => toast.info(`${window.location.origin}${freshLink.url}`))}>
+                <Button size="sm" variant="outline" onClick={() => void navigator.clipboard.writeText(`${window.location.origin}${freshLink.url}`).then(() => toast.success("已复制兑换链接（已登录用户用）")).catch(() => toast.info(`${window.location.origin}${freshLink.url}`))}>
                   <Copy className="h-3.5 w-3.5" />
                 </Button>
               </div>
+              {freshLink.guestUrl && (
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 min-w-0 space-y-0.5">
+                    <code className="block truncate rounded bg-muted px-2 py-1.5 text-xs font-mono">{freshLink.guestUrl}</code>
+                    <p className="text-[11px] text-muted-foreground">访客链接（免登录可直接接入{freshLink.hasPassword ? " · 需密码" : ""}）</p>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => void navigator.clipboard.writeText(`${window.location.origin}${freshLink.guestUrl}`).then(() => toast.success("已复制访客链接（免登录）")).catch(() => toast.info(`${window.location.origin}${freshLink.guestUrl}`))}>
+                    <Copy className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              )}
               <p className="text-xs text-muted-foreground">
-                权限 {freshLink.permission === "OPERATE" ? "可操作" : "只读"} · {freshLink.expireAt ? `有效期至 ${freshLink.expireAt}` : "永久有效"} · 次数 {freshLink.maxUses > 0 ? `限 ${freshLink.maxUses} 次` : "不限"}
+                权限 {freshLink.permission === "OPERATE" ? "可操作" : "只读"} · {freshLink.expireAt ? `有效期至 ${freshLink.expireAt}` : "永久有效"} · 次数 {freshLink.maxUses > 0 ? `限 ${freshLink.maxUses} 次` : "不限"}{freshLink.guestAllowed ? " · 访客可接入" : ""}
               </p>
             </div>
           )}
@@ -1197,6 +1270,15 @@ function SharesPanel({ workspace, shares, shareLinks }: { workspace: WorkspaceDe
                         <Badge variant={l.permission === "OPERATE" ? "default" : "outline"} className={cn("text-[10px]", l.permission === "OPERATE" && "bg-teal-600 hover:bg-teal-600")}>
                           {l.permission === "OPERATE" ? "可操作" : "只读"}
                         </Badge>
+                        {l.guestAllowed && (
+                          <Badge variant="outline" className="text-[10px] text-violet-600 border-violet-300" title="免登录接入">访客可接入</Badge>
+                        )}
+                        {l.guestCdp && (
+                          <Badge variant="outline" className="text-[10px] text-sky-600 border-sky-300" title="访客可获取 CDP 连接地址">访客CDP</Badge>
+                        )}
+                        {l.hasPassword && (
+                          <Badge variant="outline" className="text-[10px] text-amber-600 border-amber-300" title="设置了访问密码">密码</Badge>
+                        )}
                         {l.revokedAt ? (
                           <Badge variant="secondary" className="text-[10px] text-red-600">已撤销</Badge>
                         ) : dead ? (
@@ -1209,13 +1291,19 @@ function SharesPanel({ workspace, shares, shareLinks }: { workspace: WorkspaceDe
                         {l.expireAt ? `过期 ${l.expireAt}` : "永久"}
                         {` · 已用 ${l.useCount}${l.maxUses > 0 ? `/${l.maxUses}` : ""} 次`}
                         {l.lastUsedAt ? ` · 最近使用 ${l.lastUsedAt}` : ""}
+                        {l.guestAllowed ? ` · 访客 ${l.guestUseCount} 次${l.lastGuestAt ? `（最近 ${l.lastGuestAt}）` : ""}` : ""}
                       </p>
                       {l.note && <p className="text-xs text-muted-foreground/80 mt-0.5 truncate" title={l.note}>备注：{l.note}</p>}
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
                       {!l.revokedAt && (
                         <>
-                          <Button variant="ghost" size="sm" onClick={() => void copyLink(l.token)} aria-label="复制链接">
+                          {l.guestAllowed && (
+                            <Button variant="ghost" size="sm" onClick={() => void copyGuestLink(l.token)} aria-label="复制访客链接" title="复制免登录访客链接">
+                              <Users className="h-4 w-4 text-violet-500" />
+                            </Button>
+                          )}
+                          <Button variant="ghost" size="sm" onClick={() => void copyLink(l.token)} aria-label="复制链接" title="复制登录兑换链接">
                             <Copy className="h-4 w-4" />
                           </Button>
                           {workspace.isOwner && (
@@ -1235,42 +1323,51 @@ function SharesPanel({ workspace, shares, shareLinks }: { workspace: WorkspaceDe
       </Card>
 
       {/* 创建链接弹窗 */}
-      <ShareLinkCreateDialog workspace={workspace} open={linkCreateOpen} onOpenChange={(v) => { setLinkCreateOpen(v); if (!v) setFreshLink(null) }} onCreated={(r) => { setFreshLink(r); router.refresh() }} />
+      {/* r37 修复：关闭弹窗不再清空 freshLink（原 onCreated 置值后立即被 onOpenChange(false) 清空 →「仅此一次展示」从未显示）；freshLink 在下次打开弹窗时清理 */}
+      <ShareLinkCreateDialog workspace={workspace} open={linkCreateOpen} onOpenChange={setLinkCreateOpen} onCreated={(r) => { setFreshLink(r); router.refresh() }} />
     </div>
   )
 }
 
-// ---- 创建分享链接弹窗 ----
+// ---- 创建分享链接弹窗（r37：+ 访客/密码/名单） ----
 function ShareLinkCreateDialog({ workspace, open, onOpenChange, onCreated }: {
   workspace: WorkspaceDetailData
   open: boolean
   onOpenChange: (v: boolean) => void
-  onCreated: (r: { url: string; permission: string; expireAt: string | null; maxUses: number }) => void
+  onCreated: (r: { url: string; guestUrl: string | null; permission: string; expireAt: string | null; maxUses: number; guestAllowed: boolean; hasPassword: boolean }) => void
 }) {
   const [permission, setPermission] = React.useState("VIEW")
   const [hours, setHours] = React.useState(72)
   const [maxUses, setMaxUses] = React.useState(0)
   const [note, setNote] = React.useState("")
+  // r37：访客 + 密码
+  const [guestAllowed, setGuestAllowed] = React.useState(false)
+  const [guestCdp, setGuestCdp] = React.useState(false)
+  const [password, setPassword] = React.useState("")
   const [busy, setBusy] = React.useState(false)
   const submit = async () => {
     setBusy(true)
     try {
-      const res = await createWorkspaceShareLinkAction({ workspaceId: workspace.id, permission, expireHours: hours, maxUses, note })
+      const res = await createWorkspaceShareLinkAction({
+        workspaceId: workspace.id, permission, expireHours: hours, maxUses, note,
+        guestAllowed, guestCdp: guestCdp && permission === "OPERATE",
+        password: password || undefined,
+      })
       if (res.code === 0 && res.data) {
         toast.success("分享链接已创建")
-        onCreated({ url: res.data.url, permission: res.data.permission, expireAt: res.data.expireAt, maxUses: res.data.maxUses })
+        onCreated({ url: res.data.url, guestUrl: res.data.guestUrl, permission: res.data.permission, expireAt: res.data.expireAt, maxUses: res.data.maxUses, guestAllowed: res.data.guestAllowed, hasPassword: res.data.hasPassword })
         onOpenChange(false)
       } else toast.error(res.msg)
     } finally { setBusy(false) }
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
+      <DialogContent className="max-w-md">
         <DialogHeader><DialogTitle className="flex items-center gap-2"><Link2 className="h-4 w-4 text-violet-500" />创建临时分享链接</DialogTitle></DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5">
             <Label>链接权限</Label>
-            <Select value={permission} onValueChange={setPermission}>
+            <Select value={permission} onValueChange={(v) => { setPermission(v); if (v !== "OPERATE") setGuestCdp(false) }}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="VIEW">只读（仅查看画面/数据）</SelectItem>
@@ -1290,6 +1387,33 @@ function ShareLinkCreateDialog({ workspace, open, onOpenChange, onCreated }: {
             <Label>备注（可选，仅自己可见）</Label>
             <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="如：发给同事张三临时排查" maxLength={120} />
           </div>
+
+          {/* r37：访客访问（免登录） */}
+          <div className="rounded-md border p-3 space-y-2.5">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <p className="text-sm font-medium">访客访问（免登录）</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">未登录者打开链接即可观看/操作（受沙箱/用户组/用户/全局四级管控；管理员可随时禁用）</p>
+              </div>
+              <input type="checkbox" checked={guestAllowed} onChange={(e) => { setGuestAllowed(e.target.checked); if (!e.target.checked) setGuestCdp(false) }} className="mt-1 h-4 w-4 accent-teal-600" />
+            </div>
+            {guestAllowed && (
+              <>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-medium">允许访客使用 CDP（读写级）</p>
+                    <p className="text-[11px] text-muted-foreground">仅可操作级链接可开；访客可获取外网 CDP 连接地址用于自动化接入</p>
+                  </div>
+                  <input type="checkbox" checked={guestCdp} disabled={permission !== "OPERATE"} onChange={(e) => setGuestCdp(e.target.checked)} className="mt-1 h-4 w-4 accent-teal-600" />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">访问密码（可选，≥4 位；访客与兑换用户均需输入）</Label>
+                  <Input type="text" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="留空=无密码" maxLength={64} className="h-8" autoComplete="off" />
+                </div>
+              </>
+            )}
+          </div>
+
           <p className="text-xs text-muted-foreground">已登录用户打开链接后自动按上述权限绑定共享；到期/超次/撤销后立即失效</p>
         </div>
         <DialogFooter>

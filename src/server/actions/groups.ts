@@ -74,6 +74,7 @@ function groupBrief(g: {
   allowInternalNetwork?: boolean | null
   allowSecureLocationAccess?: boolean | null
   allowShare?: boolean | null
+  allowGuestShare?: boolean | null
   vncSessionMaxMinutes?: number | null
 }) {
   return {
@@ -91,6 +92,7 @@ function groupBrief(g: {
     allowInternalNetwork: g.allowInternalNetwork ?? null,
     allowSecureLocationAccess: g.allowSecureLocationAccess ?? null,
     allowShare: g.allowShare ?? null,
+    allowGuestShare: g.allowGuestShare ?? true,
     vncSessionMaxMinutes: g.vncSessionMaxMinutes ?? null,
   }
 }
@@ -111,6 +113,7 @@ const createGroupSchema = z.object({
   allowInternalNetwork: z.boolean().default(false), // 组级网络策略：允许访问内网
   allowSecureLocationAccess: z.boolean().default(false), // 组级网络策略：允许访问容器内安全位置
   allowShare: z.boolean().default(true), // r13c：组级共享开关（false=组内成员默认禁止共享工作区）
+  allowGuestShare: z.boolean().default(true), // r37：组级访客访问开关（false=组内成员的分享链接不允许访客免登录接入；用户级可覆盖）
   vncSessionMaxMinutes: z.number().int().min(0).max(43200).nullable().optional(), // 组级 VNC 连接总时长上限（分钟，null=继承全局，0=不限）
   // —— r33：组级存储配额与沙箱最大时长基线 ——
   storageQuotaMb: z.number().int().min(0).max(10_000_000).nullable().optional(), // null=继承全局
@@ -158,6 +161,7 @@ export async function createGroupAction(input: unknown): Promise<ActionResult<{ 
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
         allowShare: p.allowShare,
+        allowGuestShare: p.allowGuestShare,
         vncSessionMaxMinutes: p.vncSessionMaxMinutes ?? null,
         storageQuotaMb: p.storageQuotaMb ?? null,
         storagePolicy: p.storagePolicy ?? undefined,
@@ -227,6 +231,7 @@ export async function updateGroupAction(input: unknown): Promise<ActionResult<{ 
         allowInternalNetwork: p.allowInternalNetwork,
         allowSecureLocationAccess: p.allowSecureLocationAccess,
         allowShare: p.allowShare,
+        allowGuestShare: p.allowGuestShare,
         vncSessionMaxMinutes: p.vncSessionMaxMinutes ?? null,
         storageQuotaMb: p.storageQuotaMb ?? null,
         storagePolicy: p.storagePolicy ? (p.storagePolicy as Prisma.InputJsonValue) : Prisma.DbNull,
@@ -801,6 +806,40 @@ export async function setGroupAllowShareAction(
       severity: "WARN",
     })
     return { id: group.id, allowShare: p.allowShare, affectedMembers }
+  })
+}
+
+// ---- r37：组级访客访问开关（快捷切换；四级管控第3层） ----
+export async function setGroupAllowGuestShareAction(
+  input: unknown,
+): Promise<ActionResult<{ id: string; allowGuestShare: boolean; affectedMembers: number }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAuth()
+    const isAdmin = ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN"
+    const isGroupAdmin = ctx.role === "GROUP_ADMIN"
+    if (!isAdmin && !isGroupAdmin) throw new Error("无权设置组级访客访问开关（需要管理员或组管理员权限）")
+
+    const p = zodValidate(z.object({ id: zId, allowGuestShare: z.boolean() }), input)
+    const group = await db.group.findUnique({ where: { id: p.id } })
+    if (!group || group.deletedAt) throw new Error("用户组不存在或已删除")
+    if (isGroupAdmin && !isAdmin) {
+      const ga = await db.groupAdmin.findFirst({ where: { groupId: group.id, userId: ctx.userId } })
+      if (!ga) throw new Error("仅可为自己管理的用户组设置访客访问开关")
+    }
+
+    const before = group.allowGuestShare
+    await db.group.update({ where: { id: group.id }, data: { allowGuestShare: p.allowGuestShare } })
+    const affectedMembers = await db.groupUser.count({ where: { groupId: group.id } })
+
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "GROUP_GUEST_SHARE_SWITCH",
+      resourceType: "GROUP", resourceId: group.id, resourceName: group.name,
+      before: { allowGuestShare: before }, after: { allowGuestShare: p.allowGuestShare, affectedMembers },
+      severity: "WARN",
+    })
+    return { id: group.id, allowGuestShare: p.allowGuestShare, affectedMembers }
   })
 }
 

@@ -21,9 +21,11 @@ function loadDotEnv() {
 loadDotEnv()
 
 // ============================================================
-// Dockyard CDP 网关桥（mini-service）—— r36 安全加固版
+// Dockyard CDP 网关桥（mini-service）—— r36 安全加固版 + r37 持久票据
 //   - 端口 3006（CDP_GATEWAY_PORT）：WebSocket 反向代理
-//   - 路径 /t/<ticket>：HMAC 票据验签（单次防重放）→ 拨号容器内 CDP → 双向转发
+//   - 路径 /t/<ticket>：HMAC 票据验签（单次防重放，短窗口）→ 拨号容器内 CDP → 双向转发
+//   - 路径 /p/<tid>：r37 持久票据（公网连接地址）：实时回调主应用
+//     POST /api/cdp/resolve 校验（吊销/过期/次数即时生效）→ 获 tgt+dur → 同一转发通道
 //   - 用途：用户从外网（宿主机内网穿透域名 → 本端口）连接沙箱 CDP；
 //     内网容器地址永不暴露给终端用户；容器内不装任何穿透组件（host 网络约束）
 //   - /health：健康检查（daemon-services 守护探测）
@@ -38,11 +40,18 @@ loadDotEnv()
 //   4. 绑定地址可配置（CDP_GATEWAY_BIND，默认 0.0.0.0）—— 仅内网穿透
 //      场景需要 0.0.0.0，同机反代部署可改 127.0.0.1 缩小暴露面
 //   5. 启动密钥强度检查：生产使用默认密钥 → 显式 CRITICAL 日志告警
+// r37 持久票据语义（公网连接地址全生命周期）：
+//   · 地址泄露 → 用户/管理员在面板「重新创建」→ 旧 tid 即时拒连（resolve 403）
+//   · 有效期：永久（null）/ 自定义（expireAt）；次数上限 maxUses
+//   · 沙箱重建/重启 → tgt 自动跟随最新 cdpUrl（不存在陈旧地址问题）
+//   · fail-closed：主应用不可达 → 拒绝（fail-closed 安全语义）
 // ============================================================
 
 const PORT = Number(process.env.CDP_GATEWAY_PORT || 3006)
 const BIND = process.env.CDP_GATEWAY_BIND || "0.0.0.0"
 const SECRET = process.env.CDP_GATEWAY_SECRET || process.env.VNC_BRIDGE_SECRET || "dockyard-dev-cdp-secret"
+// r37：主应用基地址（持久票据实时校验通道；同机部署默认 127.0.0.1:PORT）
+const MASTER_BASE = (process.env.CDP_GATEWAY_MASTER_URL || `http://127.0.0.1:${process.env.PORT || 3000}`).replace(/\/$/, "")
 
 // ---- 公网加固参数（环境变量可调）----
 const FAIL_WINDOW_MS = Number(process.env.CDP_GATEWAY_FAIL_WINDOW_MS || 60_000) // 失败计数窗口
@@ -144,8 +153,39 @@ function isBanned(ip: string): boolean {
   return true
 }
 
+// ---- r37：持久票据（/p/<tid>）→ 主应用实时解析 ----
+// 返回 { tgt, durSec }；任何失败均返回 null（fail-closed）。
+// tid 白名单形态校验（hex 32-96）先行拒绝畸形值，不计失败次数以外的负担。
+interface ResolvedPersistent {
+  tgt: string
+  durSec: number
+  label: string
+}
+async function resolvePersistentToken(tid: string, ip: string): Promise<ResolvedPersistent | null> {
+  if (!/^[a-f0-9]{32,96}$/i.test(tid)) return null
+  try {
+    const res = await fetch(`${MASTER_BASE}/api/cdp/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Internal-Token": SECRET },
+      body: JSON.stringify({ tid, ip }),
+      signal: AbortSignal.timeout(4000),
+    })
+    if (!res.ok) {
+      const j = (await res.json().catch(() => null)) as { error?: string } | null
+      console.warn(`[cdp-gateway] 持久票据被拒 tid=${tid.slice(0, 8)}… reason=${j?.error || res.status}`)
+      return null
+    }
+    const j = (await res.json()) as { ok?: boolean; tgt?: string; durSec?: number; label?: string }
+    if (!j.ok || !j.tgt) return null
+    return { tgt: j.tgt, durSec: Number(j.durSec) || 0, label: j.label || "" }
+  } catch (e) {
+    console.error(`[cdp-gateway] 主应用解析不可达（fail-closed 拒绝连接）: ${(e as Error).message}`)
+    return null
+  }
+}
+
 // ---- 活跃会话统计（/health 暴露） ----
-const stats = { active: 0, total: 0, rejected: 0, banned: 0, originBlocked: 0, started: Date.now() }
+const stats = { active: 0, total: 0, rejected: 0, banned: 0, originBlocked: 0, persistentTotal: 0, persistentRejected: 0, started: Date.now() }
 
 // ---- r36：http 基址 → 浏览器级 ws 端点解析（Chromium 重启后 browser UUID 变化，
 //      每次建连时实时解析，天然自愈；Host 头=目标地址满足 DevTools HTTP 校验）----
@@ -261,8 +301,9 @@ wss.on("connection", (client: WebSocket, req: IncomingMessage, ticket: TicketPay
 
 httpServer.on("upgrade", (req: IncomingMessage, socket: import("net").Socket, head: Buffer) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`)
+  const mPersist = /^\/p\/([A-Za-z0-9_-]{24,96})$/.exec(url.pathname)
   const m = /^\/t\/([A-Za-z0-9_\-.]+)$/.exec(url.pathname)
-  if (!m) { socket.destroy(); return }
+  if (!m && !mPersist) { socket.destroy(); return }
   const ip = clientIp(req)
 
   // 加固 1：封禁检查（含重试提示）
@@ -273,23 +314,47 @@ httpServer.on("upgrade", (req: IncomingMessage, socket: import("net").Socket, he
     return
   }
 
-  const payload = verifyTicket(m[1])
-  if (!payload) {
-    stats.rejected++
-    recordFail(ip)
-    socket.write("HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{\"error\":\"invalid or expired ticket\"}")
-    socket.destroy()
-    return
-  }
-
   // 加固 2：Origin 校验（浏览器页面跨站 WS 劫持防护）
   // 正当客户端（Puppeteer/Playwright/node ws/自定义程序）不发送 Origin；
-  // 浏览器网页内的 JS 会携带 Origin → 直接拒绝，票据不消费（nonce 未入表）
+  // 浏览器网页内的 JS 会携带 Origin → 直接拒绝（票据不消费）
   const origin = req.headers.origin
   if (origin) {
     stats.originBlocked++
     console.warn(`[cdp-gateway] 拒绝携带 Origin 的连接（疑似浏览器跨站劫持尝试）ip=${ip} origin=${origin}`)
     socket.write("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{\"error\":\"browser cross-site connections are not allowed\"}")
+    socket.destroy()
+    return
+  }
+
+  // r37：持久票据路径 /p/<tid> —— 主应用实时校验（吊销/过期/次数即时生效）
+  if (mPersist) {
+    const tid = mPersist[1]
+    void resolvePersistentToken(tid, ip).then((resolved) => {
+      if (!resolved) {
+        stats.persistentRejected++
+        stats.rejected++
+        recordFail(ip)
+        socket.write("HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{\"error\":\"invalid, revoked or expired connection address (rotate it in panel)\"}")
+        socket.destroy()
+        return
+      }
+      stats.persistentTotal++
+      // 校验通过 → 走统一转发通道（与 HMAC 短票据同构）
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit("connection", ws, req, {
+          v: `p:${tid}`, u: "persistent", tgt: resolved.tgt,
+          exp: 0, dur: resolved.durSec, n: tid,
+        })
+      })
+    })
+    return
+  }
+
+  const payload = verifyTicket(m![1])
+  if (!payload) {
+    stats.rejected++
+    recordFail(ip)
+    socket.write("HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{\"error\":\"invalid or expired ticket\"}")
     socket.destroy()
     return
   }
@@ -301,6 +366,7 @@ httpServer.on("upgrade", (req: IncomingMessage, socket: import("net").Socket, he
 
 httpServer.listen(PORT, BIND, () => {
   console.log(`[cdp-gateway] listening on ${BIND}:${PORT} (ticket mode, HMAC verified; fail-ban ${FAIL_THRESHOLD}/${Math.round(FAIL_WINDOW_MS / 1000)}s → ${Math.round(BAN_MS / 1000)}s; origin-check on)`)
+  console.log(`[cdp-gateway] persistent token mode /p/<tid> enabled (master=${MASTER_BASE}, realtime revoke via /api/cdp/resolve)`)
 })
 
 process.on("SIGTERM", () => { httpServer.close(() => process.exit(0)); setTimeout(() => process.exit(0), 1500) })

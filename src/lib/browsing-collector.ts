@@ -14,6 +14,7 @@
 import { db } from "@/lib/db"
 import { ENV } from "@/lib/env"
 import { writeAudit } from "@/lib/audit"
+import { classifyEntry } from "@/lib/data-classification"
 import type { BrowserWorkspace } from "@prisma/client"
 
 // ---- 跳过的页面 URL 前缀（非用户浏览行为） ----
@@ -103,6 +104,8 @@ export async function collectWorkspaceHistory(ws: Pick<BrowserWorkspace, "id" | 
       })
       merged++
     } else {
+      // r37：写入时自动分类（明文数据识别解析：分类 + 敏感级别）
+      const cls = classifyEntry(url, p.title)
       await db.browseHistoryEntry.create({
         data: {
           workspaceId: ws.id,
@@ -111,6 +114,8 @@ export async function collectWorkspaceHistory(ws: Pick<BrowserWorkspace, "id" | 
           url: url.slice(0, 2048),
           title: (p.title || "").slice(0, 512) || null,
           domain,
+          category: cls.category,
+          sensitivity: cls.sensitivity,
           visitAt: now,
           dwellMs: 10_000,
           source: "CDP_POLL",
@@ -220,6 +225,8 @@ export async function collectWorkspaceBookmarks(ws: Pick<BrowserWorkspace, "id" 
 
   for (const b of flat) {
     seenGuids.add(b.guid)
+    // r37：写入时自动分类（书签明文数据识别解析）
+    const bCls = classifyEntry(b.url, b.name)
     await db.bookmarkEntry.upsert({
       where: { workspaceId_guid: { workspaceId: ws.id, guid: b.guid } },
       create: {
@@ -230,6 +237,8 @@ export async function collectWorkspaceBookmarks(ws: Pick<BrowserWorkspace, "id" 
         url: b.url,
         title: b.name || null,
         folder: b.folder || null,
+        category: bCls.category,
+        sensitivity: bCls.sensitivity,
         position: b.position,
         dateAdded: b.dateAdded,
         lastSyncAt: now,
@@ -238,6 +247,8 @@ export async function collectWorkspaceBookmarks(ws: Pick<BrowserWorkspace, "id" 
         url: b.url,
         title: b.name || null,
         folder: b.folder || null,
+        category: bCls.category,
+        sensitivity: bCls.sensitivity,
         position: b.position,
         dateAdded: b.dateAdded,
         lastSyncAt: now,

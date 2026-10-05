@@ -26,7 +26,7 @@ export interface BrowserControlContext {
   userId: string
   username: string
   isAdmin: boolean
-  via: "MCP" | "OPENAPI"
+  via: "MCP" | "OPENAPI" | "INTERNAL" // INTERNAL：平台内置通道（打印/Playground）
 }
 
 export interface BrowserActionDef {
@@ -442,17 +442,27 @@ function resolveSimTarget(s: SimState, params: Record<string, unknown>): { x: nu
 // 三、工作区解析与鉴权
 // ============================================================
 
-async function resolveControlledWorkspace(workspaceIdOrUuid: string, ctx: BrowserControlContext): Promise<BrowserWorkspace> {
+async function resolveControlledWorkspace(workspaceIdOrUuid: string, ctx: BrowserControlContext, opts?: { allowNovnc?: boolean }): Promise<BrowserWorkspace> {
   if (!workspaceIdOrUuid) throw new Error("缺少 workspaceId 参数")
   const ws = await db.browserWorkspace.findFirst({
     where: { OR: [{ id: workspaceIdOrUuid }, { uuid: workspaceIdOrUuid }], deletedAt: null },
   })
   if (!ws) throw new Error("工作区不存在")
-  // 归属强制：本人资源 或 ADMIN 权限位
-  if (ws.userId !== ctx.userId && !ctx.isAdmin) throw new Error("无权控制该工作区（仅资源所有者或管理员）")
+  // 归属强制：本人资源 或 ADMIN 权限位；被共享 OPERATE（VNC 观察者/操作者）同样放行
+  if (ws.userId !== ctx.userId && !ctx.isAdmin) {
+    const share = await db.workspaceShare.findFirst({
+      where: { workspaceId: ws.id, targetUserId: ctx.userId, revokedAt: null, permission: "OPERATE", OR: [{ expireAt: null }, { expireAt: { gt: new Date() } }] },
+      select: { id: true },
+    }).catch(() => null)
+    if (!share) throw new Error("无权控制该工作区（仅资源所有者、被共享可操作者或管理员）")
+  }
   if (ws.status === "FROZEN") throw new Error("工作区已被管理员离线冻结封存，冻结期间禁止浏览器控制")
   if (ws.status !== "RUNNING" && ws.status !== "IDLE") throw new Error(`工作区当前不可控制（${ws.status}）`)
-  if (ws.mode !== "cdp_light") throw new Error("仅 CDP 轻量会话支持浏览器控制 API（NoVNC 会话请使用远程桌面）")
+  // r37：打印/Playground 等只读页面级操作对两种模式开放（VNC 会话同样有 CDP 端点）；
+  // 传统自动化动作仍限 CDP 轻量会话（默认行为不变，避免语义扩散）
+  if (ws.mode !== "cdp_light" && !opts?.allowNovnc) {
+    throw new Error("仅 CDP 轻量会话支持浏览器控制 API（NoVNC 会话请使用远程桌面）")
+  }
   return ws
 }
 
@@ -622,6 +632,51 @@ export const BROWSER_ACTIONS: BrowserActionDef[] = [
       const res = await conn.send("Runtime.evaluate", { expression: expr, returnByValue: true }, sid)
       const val = ((res.result || {}) as { value?: unknown }).value
       return { mode, content: mode === "links" && typeof val === "string" ? JSON.parse(val) : val, url: null }
+    },
+  },
+  {
+    action: "print_pdf",
+    summary: "页面打印为 PDF（Page.printToPDF；远程打印通道：服务端渲染 → 客户端本地打印机）",
+    perm: TOKEN_PERM.READ,
+    params: { workspaceId: "string", landscape: "boolean?", printBackground: "boolean?（默认 true）", paperWidth: "number?（英寸，默认 8.27=A4）", paperHeight: "number?（英寸，默认 11.69=A4）", scale: "number?（0.1-2，默认 1）" },
+    async execute(ws, ctx, p) {
+      if (isSimulated(ws)) {
+        // 模拟形态：构造一个真实的最小 PDF（内容=当前页 URL），保持通道语义可测
+        const s = simOf(ws)
+        const url = (s.tabs[s.activeIdx]?.url || "about:blank").slice(0, 180)
+        const text = `Dockyard simulated print\n${url}\n${new Date().toISOString()}`
+        const stream = `BT /F1 10 Tf 40 700 Td (${text.replace(/([()\\])/g, "\\$1").replace(/\n/g, ") Tj 0 -14 Td (")}) Tj ET`
+        const objs = [
+          "<< /Type /Catalog /Pages 2 0 R >>",
+          "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+          "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+          "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+          `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+        ]
+        let pdf = "%PDF-1.4\n"
+        const offsets: number[] = []
+        objs.forEach((o, i) => {
+          offsets.push(pdf.length)
+          pdf += `${i + 1} 0 obj\n${o}\nendobj\n`
+        })
+        const xrefPos = pdf.length
+        pdf += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`
+        offsets.forEach((off) => { pdf += `${String(off).padStart(10, "0")} 00000 n \n` })
+        pdf += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF`
+        return { dataBase64: Buffer.from(pdf, "utf8").toString("base64"), bytes: pdf.length, simulated: true, url }
+      }
+      const conn = await getRealConnection(ws)
+      const sid = await attachPage(conn)
+      const print = await conn.send("Page.printToPDF", {
+        landscape: !!p.landscape,
+        printBackground: p.printBackground !== false,
+        paperWidth: Number(p.paperWidth || 8.27),
+        paperHeight: Number(p.paperHeight || 11.69),
+        scale: Math.min(Math.max(Number(p.scale || 1), 0.1), 2),
+      }, sid)
+      const data = String(print.data || "")
+      if (!data) throw new Error("打印渲染失败（页面可能无可打印内容）")
+      return { dataBase64: data, bytes: Math.floor((data.length * 3) / 4), simulated: false }
     },
   },
   {
@@ -1309,10 +1364,13 @@ export async function executeBrowserAction(input: {
   workspaceIdOrUuid: string
   ctx: BrowserControlContext
   params?: Record<string, unknown>
+  /** r37：页面级只读动作（print_pdf/screenshot/evaluate 等 Playground 与打印通道）
+   *  对 NoVNC 完整模式同样开放（VNC 会话经 r36 修复后同样有真实 CDP 端点） */
+  allowNovnc?: boolean
 }): Promise<BrowserControlResult> {
   const def = BROWSER_ACTIONS.find((a) => a.action === input.action)
   if (!def) throw new Error(`未知浏览器控制动作：${input.action}（可用动作见 GET /api/openapi/browser）`)
-  const ws = await resolveControlledWorkspace(input.workspaceIdOrUuid, input.ctx)
+  const ws = await resolveControlledWorkspace(input.workspaceIdOrUuid, input.ctx, { allowNovnc: !!input.allowNovnc })
 
   // 独立限流（按用户）：180 次/分钟
   if (!rateLimit(`browserControl:${input.ctx.userId}`, 180, 60_000).allowed) {

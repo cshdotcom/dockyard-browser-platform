@@ -192,6 +192,9 @@ export default async function AdminWorkspacesPage({
     where.userId = ctx.userId // 默认：仅显示管理员自己的工作区
   }
   if (f.proxy) where.proxyNodeId = f.proxy
+  // r37：用户组筛选（多选叠加；与用户/代理/状态筛选正交）
+  const groupsParam = (f.groups || "").split(",").map((s) => s.trim()).filter(Boolean)
+  if (groupsParam.length) where.groupId = { in: groupsParam }
   // 创建时间范围（YYYY-MM-DD → 当日边界）
   if (f.createdFrom || f.createdTo) {
     const range: Record<string, unknown> = {}
@@ -209,7 +212,7 @@ export default async function AdminWorkspacesPage({
   // 累计运行时长下限（分钟）——内存过滤（计算字段，SQL 无法直接表达）
   const runtimeMin = Number(f.runtimeMin) || 0
 
-  const [rowsRaw, total, statTotal, statRunning, statCdp, statNovnc, statAbnormal, statDeleted, statToday, userOptions, proxyOptions] =
+  const [rowsRaw, total, statTotal, statRunning, statCdp, statNovnc, statAbnormal, statDeleted, statToday, userOptions, proxyOptions, groupOptions] =
     await Promise.all([
       db.browserWorkspace.findMany({
         where,
@@ -232,6 +235,7 @@ export default async function AdminWorkspacesPage({
         take: 300,
       }),
       db.proxyNode.findMany({ where: { deletedAt: null }, select: { id: true, name: true }, orderBy: { name: "asc" }, take: 100 }),
+      db.group.findMany({ where: { deletedAt: null }, select: { id: true, name: true }, orderBy: { name: "asc" }, take: 200 }),
     ])
 
   // ---- 内存 join：所有者/创建人/组/代理节点（含出口地址）/SingBox/浏览器节点 ----
@@ -381,6 +385,7 @@ export default async function AdminWorkspacesPage({
         view={view}
         userOptions={userOptions.map((u) => ({ id: u.id, username: u.username, displayName: u.displayName, role: u.role }))}
         proxyOptions={proxyOptions}
+        groupOptions={groupOptions}
         transferTargets={transferTargets}
         currentAdmin={{ id: ctx.userId, username: ctx.username }}
       />

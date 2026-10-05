@@ -4,7 +4,7 @@
 // r14（22-c）：沙箱闲置超时策略（继承组/无限/自定义分钟 + 锁定开关；编辑时拉取当前策略回显）
 
 import * as React from "react"
-import { Loader2, ShieldAlert, Upload, UserCircle2 } from "lucide-react"
+import { Loader2, ShieldAlert, Upload, UserCircle2, Users } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { useRouter } from "next/navigation"
@@ -97,6 +97,9 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
   // r35：强制 2FA 三态（inherit=继承组/全局 / force=强制 / off=不强制）+ 管理员头像编辑
   const [force2fa, setForce2fa] = React.useState<"inherit" | "force" | "off">("inherit")
   const [force2faInitial, setForce2faInitial] = React.useState<"inherit" | "force" | "off">("inherit")
+  // r37：访客访问三态（inherit=继承组 / allow=强制允许 / deny=强制禁止）
+  const [guestShare, setGuestShare] = React.useState<"inherit" | "allow" | "deny">("inherit")
+  const [guestShareInitial, setGuestShareInitial] = React.useState<"inherit" | "allow" | "deny">("inherit")
   const avatarInputRef = React.useRef<HTMLInputElement>(null)
   const [avatarBusy, setAvatarBusy] = React.useState(false)
   // r35：用户级企业策略覆盖 JSON
@@ -152,6 +155,10 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
       const f2faInit: "inherit" | "force" | "off" = user.force2faSetup ? "force" : "off"
       setForce2fa(f2faInit)
       setForce2faInitial(f2faInit)
+      // r37：访客访问回显（三态）
+      const gsInit: "inherit" | "allow" | "deny" = user.guestShareAllowed == null ? "inherit" : user.guestShareAllowed ? "allow" : "deny"
+      setGuestShare(gsInit)
+      setGuestShareInitial(gsInit)
       // r35：策略覆盖回显
       setPolicyOverrides(user.managedPolicyOverrides ? (() => { try { return JSON.stringify(JSON.parse(user.managedPolicyOverrides), null, 2) } catch { return user.managedPolicyOverrides } })() : "")
       getUserIdlePolicyAction({ id: user.id })
@@ -274,6 +281,8 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
               password: password || undefined,
               // r35：强制 2FA 三态（变化才提交：force=true / off=false）
               force2faSetup: force2fa !== force2faInitial ? force2fa === "force" : undefined,
+              // r37：访客访问三态（变化才提交：allow=true / deny=false / inherit=null）
+              guestShareAllowed: guestShare !== guestShareInitial ? guestShare === "allow" ? true : guestShare === "deny" ? false : null : undefined,
               // r35：企业策略覆盖 JSON（变化才提交）
               ...(policyOverrides.trim() !== (user!.managedPolicyOverrides ? (() => { try { return JSON.stringify(JSON.parse(user!.managedPolicyOverrides!)) } catch { return "" } })() : "") ? { managedPolicyOverrides: policyOverrides.trim() } : {}),
             })
@@ -424,6 +433,30 @@ export function UserFormDialog({ open, onOpenChange, mode, user, groupOptions }:
                 当前实际绑定状态：{user?.twoFactorEnabled ? <span className="text-teal-600">已绑定 TOTP</span> : <span className="text-amber-600">未绑定</span>}
                 {force2fa === "force" && !user?.twoFactorEnabled && <span className="text-red-500"> · 强制后该用户将被限制访问直到完成绑定</span>}
               </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="flex items-center gap-1.5">
+                <Users className="h-3.5 w-3.5 text-violet-500" /> 访客访问（免登录接入分享链接）
+              </Label>
+              <div className="flex items-center gap-1.5">
+                {([
+                  { v: "inherit", t: "继承组" },
+                  { v: "allow", t: "允许" },
+                  { v: "deny", t: "禁止" },
+                ] as const).map((o) => (
+                  <button key={o.v} type="button"
+                    onClick={() => setGuestShare(o.v)}
+                    className={cn(
+                      "flex-1 rounded-md border px-2 py-1.5 text-xs transition-colors",
+                      guestShare === o.v ? "border-primary bg-primary text-primary-foreground" : "hover:bg-accent",
+                    )}
+                    title={o.v === "deny" ? "该用户创建的分享链接一律不允许访客免登录接入" : o.v === "allow" ? "强制允许（覆盖组级禁止）" : "跟随所属组开关"}
+                  >
+                    {o.t}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] text-muted-foreground">管控第2层：沙箱否决 {'>'} 用户（此处） {'>'} 用户组 {'>'} 全局开关（share.guestEnabled）</p>
             </div>
             <div className="space-y-1.5">
               <Label className="flex items-center gap-1.5"><UserCircle2 className="h-3.5 w-3.5" /> 用户头像</Label>

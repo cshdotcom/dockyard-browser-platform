@@ -1,6 +1,6 @@
 "use client"
 
-// 快照列表交互：创建快照（选 RUNNING cdp_light 工作区）/ 删除 / 设置过期时间 / 重命名
+// 快照列表交互：创建快照（CDP 轻量 / VNC 完整双模式工作区）/ 删除 / 设置过期时间 / 重命名
 
 import * as React from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
@@ -319,15 +319,15 @@ export function SnapshotsTable({ rows, total, page, pageSize, keyword, sortField
               <Camera className="h-5 w-5 text-teal-600" /> 创建配置快照
             </DialogTitle>
             <DialogDescription>
-              从运行中的 CDP 轻量工作区导出浏览器 Profile 归档（tar.gz），可用于新工作区还原
+              从工作区导出浏览器 Profile 归档（tar.gz）可用于新工作区还原（CDP 轻量与 VNC 完整模式均支持；Profile 磁盘持久化，非销毁态即可导）
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label>选择工作区（运行中的 cdp_light）</Label>
+              <Label>选择工作区（CDP/VNC 双模式）</Label>
               {runnableWorkspaces.length === 0 ? (
                 <div className="rounded-md border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 p-3 text-xs text-amber-700 dark:text-amber-300">
-                  当前没有运行中的 CDP 轻量工作区。请先在「浏览器工作区」页面创建并启动工作区。
+                  当前没有可导出的工作区。请先在「浏览器工作区」页面创建并启动工作区（CDP 轻量与 VNC 完整模式均可创建快照）。
                 </div>
               ) : (
                 <Select value={fWorkspaceId} onValueChange={setFWorkspaceId}>

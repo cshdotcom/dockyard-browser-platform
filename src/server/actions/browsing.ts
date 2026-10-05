@@ -27,6 +27,8 @@ export interface HistoryRow {
   url: string
   title: string | null
   domain: string | null
+  category: string | null // r37：数据自动分类
+  sensitivity: string | null // r37：敏感级别
   visitAt: string
   dwellMs: number
   incognitoHint: boolean
@@ -41,6 +43,8 @@ export interface BookmarkRow {
   url: string
   title: string | null
   folder: string | null
+  category: string | null // r37：数据自动分类
+  sensitivity: string | null
   dateAdded: string | null
   removedAt: string | null
 }
@@ -79,6 +83,9 @@ const listHistorySchema = z.object({
   userId: zId.optional(),
   username: z.string().max(60).optional(),
   domain: z.string().max(200).optional(),
+  // r37：分类筛选
+  category: z.string().max(20).optional(),
+  sensitivity: z.string().max(20).optional(),
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
   includeDeleted: z.boolean().optional(),
@@ -106,6 +113,8 @@ export async function listHistoryAction(input: unknown): Promise<ActionResult<{ 
       ...(p.workspaceIds && p.workspaceIds.length > 0 ? { workspaceId: { in: p.workspaceIds } } : {}),
       ...(p.includeDeleted ? {} : { deletedAt: null }),
       ...(p.domain ? { domain: { contains: p.domain } } : {}),
+      ...(p.category ? { category: p.category } : {}), // r37：分类筛选
+      ...(p.sensitivity ? { sensitivity: p.sensitivity } : {}), // r37：敏感级别筛选
       ...((p.from || p.to) ? { visitAt: { ...(p.from ? { gte: new Date(p.from) } : {}), ...(p.to ? { lte: new Date(p.to) } : {}) } } : {}),
       ...(p.keyword ? {
         OR: [
@@ -147,6 +156,8 @@ export async function listHistoryAction(input: unknown): Promise<ActionResult<{ 
       url: r.url,
       title: r.title,
       domain: r.domain,
+      category: r.category, // r37
+      sensitivity: r.sensitivity, // r37
       visitAt: r.visitAt.toISOString(),
       dwellMs: r.dwellMs,
       incognitoHint: r.incognitoHint,
@@ -162,6 +173,8 @@ const listBookmarksSchema = z.object({
   userId: zId.optional(),
   username: z.string().max(60).optional(),
   url: z.string().max(300).optional(),
+  category: z.string().max(20).optional(), // r37
+  sensitivity: z.string().max(20).optional(), // r37
   includeRemoved: z.boolean().optional(),
   page: z.number().int().min(1).max(10000).default(1),
   pageSize: z.number().int().min(10).max(200).default(20),
@@ -185,6 +198,8 @@ export async function listBookmarksAction(input: unknown): Promise<ActionResult<
       ...(p.workspaceIds && p.workspaceIds.length > 0 ? { workspaceId: { in: p.workspaceIds } } : {}),
       ...(p.includeRemoved ? {} : { removedAt: null }),
       ...(p.url ? { url: { contains: p.url } } : {}),
+      ...(p.category ? { category: p.category } : {}), // r37
+      ...(p.sensitivity ? { sensitivity: p.sensitivity } : {}), // r37
       ...(p.keyword ? {
         OR: [
           { url: { contains: p.keyword } },
@@ -224,6 +239,8 @@ export async function listBookmarksAction(input: unknown): Promise<ActionResult<
       url: r.url,
       title: r.title,
       folder: r.folder,
+      category: r.category, // r37
+      sensitivity: r.sensitivity, // r37
       dateAdded: r.dateAdded?.toISOString() || null,
       removedAt: r.removedAt?.toISOString() || null,
     }))
@@ -415,5 +432,155 @@ export async function exportBrowsingAction(input: unknown): Promise<ActionResult
         })),
       }
     }
+  })
+}
+
+// ============================================================
+// r37：明文数据自动分类 —— 统计 / 存量回填
+//   · 分类引擎：src/lib/data-classification.ts（16 类 + 三级敏感）
+//   · 采集入库时已写入；历史存量数据用 adminBackfillClassificationAction 补齐
+//   · 统计：管理端「数据分类」视图（分类分布 / 敏感分布 / 高敏用户榜 / 分组分布）
+// ============================================================
+
+export async function browsingClassificationStatsAction(input: unknown): Promise<ActionResult<{
+  historyByCategory: Array<{ category: string; count: number }>
+  historyBySensitivity: Array<{ sensitivity: string; count: number }>
+  bookmarkByCategory: Array<{ category: string; count: number }>
+  bookmarkBySensitivity: Array<{ sensitivity: string; count: number }>
+  highSensitivityUsers: Array<{ username: string; displayName: string | null; count: number; lastVisitAt: string | null }>
+  unclassified: { history: number; bookmark: number }
+  totalHistory: number
+  totalBookmark: number
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const isPrivileged = ctx.role === "ADMIN" || ctx.role === "SUPER_ADMIN" || ctx.role === "GROUP_ADMIN"
+    if (!isPrivileged) throw Object.assign(new Error("仅管理员可查看分类统计"), { code: 403 })
+    const p = zodValidate(z.object({
+      userId: zId.optional(), // 可选：单用户视角（管理员筛选）
+      groupId: zId.optional(), // 可选：用户组视角
+    }), input)
+
+    // 组视角 → 组成员 id 集
+    let userIds: string[] | undefined
+    if (p.groupId) {
+      const members = await db.groupUser.findMany({ where: { groupId: p.groupId }, select: { userId: true } })
+      userIds = members.map((m) => m.userId)
+    }
+    const scope: Prisma.BrowseHistoryEntryWhereInput = {
+      ...(p.userId ? { userId: p.userId } : {}),
+      ...(userIds ? { userId: { in: userIds } } : {}),
+    }
+    const bmScope: Prisma.BookmarkEntryWhereInput = {
+      ...(p.userId ? { userId: p.userId } : {}),
+      ...(userIds ? { userId: { in: userIds } } : {}),
+    }
+
+    const [hByCat, hBySens, bByCat, bBySens, hUnc, bUnc, hTotal, bTotal, highUsers] = await Promise.all([
+      db.browseHistoryEntry.groupBy({ by: ["category"], where: { ...scope, deletedAt: null }, _count: { _all: true } }),
+      db.browseHistoryEntry.groupBy({ by: ["sensitivity"], where: { ...scope, deletedAt: null }, _count: { _all: true } }),
+      db.bookmarkEntry.groupBy({ by: ["category"], where: { ...bmScope, removedAt: null }, _count: { _all: true } }),
+      db.bookmarkEntry.groupBy({ by: ["sensitivity"], where: { ...bmScope, removedAt: null }, _count: { _all: true } }),
+      db.browseHistoryEntry.count({ where: { ...scope, category: null, deletedAt: null } }),
+      db.bookmarkEntry.count({ where: { ...bmScope, category: null, removedAt: null } }),
+      db.browseHistoryEntry.count({ where: { ...scope, deletedAt: null } }),
+      db.bookmarkEntry.count({ where: { ...bmScope, removedAt: null } }),
+      // 高敏访问 Top 用户（银行/政府/凭据形态页面）
+      db.browseHistoryEntry.groupBy({
+        by: ["userId"],
+        where: { ...scope, sensitivity: "HIGH", deletedAt: null },
+        _count: { _all: true },
+        _max: { visitAt: true },
+        orderBy: { _count: { userId: "desc" } },
+        take: 10,
+      }),
+    ])
+
+    // 高敏用户名映射
+    const hiIds = highUsers.map((h) => h.userId).filter(Boolean) as string[]
+    const hiUsers = hiIds.length ? await db.user.findMany({ where: { id: { in: hiIds } }, select: { id: true, username: true, displayName: true } }) : []
+    const hiMap = new Map(hiUsers.map((u) => [u.id, u]))
+
+    return {
+      historyByCategory: hByCat.map((r) => ({ category: r.category || "(未分类)", count: r._count._all })),
+      historyBySensitivity: hBySens.map((r) => ({ sensitivity: r.sensitivity || "(未分级)", count: r._count._all })),
+      bookmarkByCategory: bByCat.map((r) => ({ category: r.category || "(未分类)", count: r._count._all })),
+      bookmarkBySensitivity: bBySens.map((r) => ({ sensitivity: r.sensitivity || "(未分级)", count: r._count._all })),
+      highSensitivityUsers: highUsers.map((h) => {
+        const u = h.userId ? hiMap.get(h.userId) : undefined
+        return {
+          username: u?.username || "(已删除用户)",
+          displayName: u?.displayName || null,
+          count: h._count._all,
+          lastVisitAt: h._max.visitAt?.toISOString() || null,
+        }
+      }),
+      unclassified: { history: hUnc, bookmark: bUnc },
+      totalHistory: hTotal,
+      totalBookmark: bTotal,
+    }
+  })
+}
+
+// ---- 存量回填（升级 r37 前的历史数据；分批 1000 条防长事务） ----
+export async function adminBackfillClassificationAction(input: unknown): Promise<ActionResult<{ historyUpdated: number; bookmarkUpdated: number; batches: number }>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    if (ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw Object.assign(new Error("仅管理员可执行回填"), { code: 403 })
+    const p = zodValidate(z.object({ maxRows: z.number().int().min(100).max(50000).optional().default(5000) }), input)
+
+    const { classifyEntry } = await import("@/lib/data-classification")
+    let hUpdated = 0
+    let bUpdated = 0
+    let batches = 0
+
+    // 历史：未分类记录逐批回填
+    for (let i = 0; i < 50; i++) {
+      const rows = await db.browseHistoryEntry.findMany({
+        where: { category: null },
+        select: { id: true, url: true, title: true },
+        take: 1000,
+      })
+      if (rows.length === 0) break
+      batches++
+      for (const r of rows) {
+        const c = classifyEntry(r.url, r.title)
+        await db.browseHistoryEntry.update({
+          where: { id: r.id },
+          data: { category: c.category, sensitivity: c.sensitivity },
+        }).catch(() => null)
+        hUpdated++
+      }
+      if (hUpdated >= p.maxRows!) break
+    }
+
+    // 书签：未分类记录逐批回填
+    for (let i = 0; i < 50; i++) {
+      const rows = await db.bookmarkEntry.findMany({
+        where: { category: null },
+        select: { id: true, url: true, title: true },
+        take: 1000,
+      })
+      if (rows.length === 0) break
+      batches++
+      for (const r of rows) {
+        const c = classifyEntry(r.url, r.title)
+        await db.bookmarkEntry.update({
+          where: { id: r.id },
+          data: { category: c.category, sensitivity: c.sensitivity },
+        }).catch(() => null)
+        bUpdated++
+      }
+      if (bUpdated >= p.maxRows!) break
+    }
+
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "BROWSING_CLASSIFICATION_BACKFILL",
+      resourceType: "SYSTEM", resourceId: "browsing",
+      after: { historyUpdated: hUpdated, bookmarkUpdated: bUpdated, batches },
+    }).catch(() => null)
+
+    return { historyUpdated: hUpdated, bookmarkUpdated: bUpdated, batches }
   })
 }

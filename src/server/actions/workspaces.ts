@@ -7,7 +7,7 @@ import { db } from "@/lib/db"
 import { requireAuth, checkSessionQuota, userGroupIds, requireWritableMode, requirePermission, requireAdmin, isPermissionLocked } from "@/lib/permissions"
 import { actionHandler, type ActionResult } from "@/lib/api"
 import { writeAudit } from "@/lib/audit"
-import { encrypt, decrypt, randomHex } from "@/lib/crypto"
+import { encrypt, decrypt, randomHex, hashPassword, verifyPassword } from "@/lib/crypto"
 import { rateLimit } from "@/lib/rate-limit"
 import { idempotencyCheck } from "@/lib/idempotency"
 import { trackBehavior, detectAbnormalBehavior } from "@/lib/risk"
@@ -22,7 +22,7 @@ import { resolveEndpointPolicyForUser } from "@/lib/endpoint-policy"
 import { ENV } from "@/lib/env"
 import { moveToRecycle } from "@/lib/recycle"
 import { getConfigBool, getConfig, getConfigNumber } from "@/lib/config"
-import { assertShareAllowed } from "@/lib/share-policy"
+import { assertShareAllowed, assertGuestShareAllowed } from "@/lib/share-policy"
 import { resolveIdlePolicyForUser, isAdminRole, fmtIdleBrief } from "@/lib/idle-policy"
 import { resolveTtlPolicyForUser, validateTtlAgainstPolicy } from "@/lib/ttl-policy"
 import { resolveRecordingPolicy, recordingTuning, registerWorkspaceRecording, type RecordingPolicy, type RecordingTuning } from "@/lib/recording"
@@ -589,13 +589,20 @@ export async function switchWorkspaceModeAction(input: unknown): Promise<ActionR
     const ctx = await requireAuth()
     await requireWritableMode()
     await requirePermission(ctx.userId, "blockRestartInstance", "实例操作已被权限锁禁止")
-    const p = zodValidate(z.object({ id: z.string(), targetMode: z.enum(["cdp_light", "novnc_full"]) }), input)
+    const p = zodValidate(z.object({ id: z.string(), targetMode: z.enum(["cdp_light", "novnc_full"]), preserveData: z.boolean().optional() }), input)
 
     const ws = await db.browserWorkspace.findFirst({ where: { id: p.id, deletedAt: null } })
     if (!ws) throw new Error("工作区不存在")
     if (ctx.userId !== ws.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作该工作区")
     if (ws.mode === p.targetMode) throw new Error(`工作区已处于 ${p.targetMode === "novnc_full" ? "VNC 完整模式" : "CDP 轻量模式"}`)
     if (ws.status === "FROZEN") throw new Error("工作区已被管理员离线冻结封存，冻结期间禁止切换模式")
+
+    // r37：数据保留开关（管理员可控制是否保留数据）
+    //   · 管理员强制不保留（workspace.modeSwitchForceFresh）→ 一律丢弃（最高优先）
+    //   · 用户传入 preserveData 显式选择（false=不迁移，新 Profile 干净启动）
+    //   · 缺省回退 workspace.modeSwitchPreserveData（默认 true=保留）
+    const forceFresh = await getConfigBool("workspace.modeSwitchForceFresh", false)
+    const preserveData = forceFresh ? false : (p.preserveData ?? (await getConfigBool("workspace.modeSwitchPreserveData", true)))
 
     // ①② 数据迁移：当前 Profile 归档 → 快照记录 → 解包到新 profileKey 目录
     const prevHardening = (ws.hardeningJson as Record<string, unknown> | null) || {}
@@ -608,8 +615,8 @@ export async function switchWorkspaceModeAction(input: unknown): Promise<ActionR
     const { access, mkdir, stat } = await import("fs/promises")
     const { join } = await import("path")
     try {
-      if (profileDir) await access(profileDir)
-      if (profileDir && ws.status !== "DESTROYED") {
+      if (profileDir && preserveData) await access(profileDir)
+      if (profileDir && preserveData && ws.status !== "DESTROYED") {
         // 归档（压缩级别速度优先 —— 升降级交互场景）
         const snapId = crypto.randomUUID().replace(/-/g, "").slice(0, 16)
         const archiveKey = `mig-${ws.uuid.slice(0, 8)}-${Date.now()}-${snapId}.tar.gz`
@@ -653,7 +660,7 @@ export async function switchWorkspaceModeAction(input: unknown): Promise<ActionR
         }
       }
     } catch {
-      // Profile 目录缺失（首次/演示形态）→ 无数据可迁移，直接切换（不阻断）
+      // Profile 目录缺失（首次/演示形态）或不保留数据 → 无数据可迁移，直接切换（不阻断）
     }
 
     // ③ 销毁旧会话 → 切 mode → 自动拉起
@@ -682,7 +689,7 @@ export async function switchWorkspaceModeAction(input: unknown): Promise<ActionR
       operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_MODE_SWITCH",
       resourceType: "WORKSPACE", resourceId: ws.id, resourceName: ws.name,
       ownerUserId: ws.userId, createdByUserId: ws.createdByUserId,
-      before: { mode: ws.mode }, after: { mode: p.targetMode, profileMigrated: migrated, snapshotKey: newProfileKey || null },
+      before: { mode: ws.mode }, after: { mode: p.targetMode, profileMigrated: migrated, preserveData, snapshotKey: newProfileKey || null },
       severity: "WARN",
     })
     await trackBehavior(ctx.userId, "CREATE").catch(() => {})
@@ -1061,48 +1068,129 @@ export async function batchRevokeShareRecipientsAction(input: unknown): Promise<
   })
 }
 
-// ---- 临时分享链接（带有效期 + 权限 + 次数上限；已登录用户访问即自动绑定共享） ----
+// ---- 临时分享链接（带有效期 + 权限 + 次数上限；已登录用户访问即自动绑定共享）
+// r37 扩展：访客访问（免登录）+ 密码保护 + 允许/禁止名单（用户/用户组） ----
 export async function createWorkspaceShareLinkAction(input: unknown): Promise<ActionResult<{
-  linkId: string; token: string; url: string; permission: string; expireAt: string | null; maxUses: number
+  linkId: string; token: string; url: string; guestUrl: string | null; permission: string; expireAt: string | null; maxUses: number
+  guestAllowed: boolean; guestCdp: boolean; hasPassword: boolean
 }>> {
   return actionHandler(async () => {
     const ctx = await requireAuth()
     await requirePermission(ctx.userId, "blockShareWorkspace", "管理员已禁止分享工作区")
-    const { workspaceId, permission, expireHours, maxUses, note } = zodValidate(
+    const { workspaceId, permission, expireHours, maxUses, note, password, guestAllowed, guestCdp, allowUserIds, denyUserIds, allowGroupIds, denyGroupIds } = zodValidate(
       z.object({
         workspaceId: z.string(),
         permission: z.enum(["VIEW", "OPERATE"]),
         expireHours: zPrecision("链接有效期", 0, 8760).optional().default(0), // 0=永久
         maxUses: zPrecision("最大使用次数", 0, 1000).optional().default(0), // 0=不限
         note: z.string().max(120).optional().or(z.literal("").transform(() => undefined)),
+        // r37：访客 + 密码 + 名单
+        password: z.string().min(4).max(64).optional().or(z.literal("").transform(() => undefined)), // ≥4 位
+        guestAllowed: z.boolean().optional().default(false),
+        guestCdp: z.boolean().optional().default(false),
+        allowUserIds: z.array(z.string().max(64)).max(100).optional(),
+        denyUserIds: z.array(z.string().max(64)).max(100).optional(),
+        allowGroupIds: z.array(z.string().max(64)).max(100).optional(),
+        denyGroupIds: z.array(z.string().max(64)).max(100).optional(),
       }),
       input
     )
     // r13c：四级共享管控门禁（临时链接与定向共享同一管控链）
     await assertShareAllowed({ userId: ctx.userId, workspaceId, role: ctx.role })
+    // r37：访客四级管控（开启访客时校验；全局默认关）
+    if (guestAllowed) {
+      await assertGuestShareAllowed({ userId: ctx.userId, workspaceId, role: ctx.role })
+    }
     const ws = await db.browserWorkspace.findFirst({ where: { id: workspaceId, deletedAt: null } })
     if (!ws) throw new Error("工作区不存在")
     if (ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN") throw new Error("只有所有者可以创建分享链接")
 
     const token = randomHex(32)
     const expireAt = expireHours > 0 ? new Date(Date.now() + expireHours * 3600_000) : null
+    const passwordHash = password ? await hashPassword(password) : null
+    // 访客 CDP 语义：仅 OPERATE 级可开（CDP 天然读写，不允许只读访客拿 CDP）
+    const guestCdpOn = guestCdp && permission === "OPERATE" ? true : false
     const link = await db.workspaceShareLink.create({
       data: {
         workspaceId, token, permission, expireAt, maxUses,
         note: note || null, createdByUserId: ctx.userId,
+        passwordHash,
+        guestAllowed: !!guestAllowed,
+        guestCdp: guestCdpOn,
+        allowUserIds: allowUserIds?.length ? (allowUserIds as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
+        denyUserIds: denyUserIds?.length ? (denyUserIds as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
+        allowGroupIds: allowGroupIds?.length ? (allowGroupIds as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
+        denyGroupIds: denyGroupIds?.length ? (denyGroupIds as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
       },
     })
     await writeAudit({
       operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_SHARE_LINK_CREATE",
       resourceType: "WORKSPACE", resourceId: workspaceId, resourceName: ws.name,
       ownerUserId: ws.userId,
-      after: { linkId: link.id, permission, expireHours, maxUses, note: note || null },
+      after: { linkId: link.id, permission, expireHours, maxUses, note: note || null, guestAllowed: !!guestAllowed, guestCdp: guestCdpOn, hasPassword: !!passwordHash },
     })
     return {
       linkId: link.id, token,
       url: `/workspaces/shared?token=${token}`,
+      guestUrl: guestAllowed ? `/view/${token}` : null,
       permission, expireAt: expireAt?.toISOString() ?? null, maxUses,
+      guestAllowed: !!guestAllowed, guestCdp: guestCdpOn, hasPassword: !!passwordHash,
     }
+  })
+}
+
+// ---- r37：分享链接设置修改（访客/密码/名单/权限/有效期） ----
+export async function updateWorkspaceShareLinkAction(input: unknown): Promise<ActionResult<{
+  linkId: string; guestAllowed: boolean; guestCdp: boolean; hasPassword: boolean; permission: string
+}>> {
+  return actionHandler(async () => {
+    const ctx = await requireAuth()
+    const p = zodValidate(z.object({
+      linkId: z.string(),
+      permission: z.enum(["VIEW", "OPERATE"]).optional(),
+      expireHours: zPrecision("链接有效期", 0, 8760).optional(), // 0=永久
+      guestAllowed: z.boolean().optional(),
+      guestCdp: z.boolean().optional(),
+      password: z.string().min(4).max(64).optional().or(z.literal("").transform(() => null)), // 传空串=清除密码
+      allowUserIds: z.array(z.string().max(64)).max(100).optional().nullable(),
+      denyUserIds: z.array(z.string().max(64)).max(100).optional().nullable(),
+      allowGroupIds: z.array(z.string().max(64)).max(100).optional().nullable(),
+      denyGroupIds: z.array(z.string().max(64)).max(100).optional().nullable(),
+      note: z.string().max(120).optional(),
+    }), input)
+    const link = await db.workspaceShareLink.findUnique({ where: { id: p.linkId } })
+    if (!link) throw new Error("分享链接不存在")
+    const ws = await db.browserWorkspace.findUnique({ where: { id: link.workspaceId } })
+    if (ws && ws.userId !== ctx.userId && ctx.role !== "SUPER_ADMIN" && ctx.role !== "ADMIN") throw new Error("无权操作")
+
+    // 开启访客需过访客管控链（管理员豁免）
+    const newGuestAllowed = p.guestAllowed ?? link.guestAllowed
+    if (newGuestAllowed && !link.guestAllowed) {
+      await assertGuestShareAllowed({ userId: link.createdByUserId || ws?.userId || ctx.userId, workspaceId: link.workspaceId, role: ctx.role })
+    }
+    const newPermission = p.permission || link.permission
+    const newGuestCdp = (p.guestCdp ?? link.guestCdp) && newPermission === "OPERATE"
+
+    const data: Record<string, unknown> = {}
+    if (p.permission !== undefined) data.permission = p.permission
+    if (p.expireHours !== undefined) data.expireAt = p.expireHours > 0 ? new Date(Date.now() + p.expireHours * 3600_000) : null
+    if (p.guestAllowed !== undefined) data.guestAllowed = p.guestAllowed
+    if (p.guestCdp !== undefined) data.guestCdp = newGuestCdp
+    if (p.password !== undefined) data.passwordHash = p.password ? await hashPassword(p.password) : null
+    if (p.allowUserIds !== undefined) data.allowUserIds = p.allowUserIds?.length ? (p.allowUserIds as unknown as Prisma.InputJsonValue) : Prisma.DbNull
+    if (p.denyUserIds !== undefined) data.denyUserIds = p.denyUserIds?.length ? (p.denyUserIds as unknown as Prisma.InputJsonValue) : Prisma.DbNull
+    if (p.allowGroupIds !== undefined) data.allowGroupIds = p.allowGroupIds?.length ? (p.allowGroupIds as unknown as Prisma.InputJsonValue) : Prisma.DbNull
+    if (p.denyGroupIds !== undefined) data.denyGroupIds = p.denyGroupIds?.length ? (p.denyGroupIds as unknown as Prisma.InputJsonValue) : Prisma.DbNull
+    if (p.note !== undefined) data.note = p.note || null
+
+    await db.workspaceShareLink.update({ where: { id: link.id }, data })
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username, operationType: "WORKSPACE_SHARE_LINK_UPDATE",
+      resourceType: "WORKSPACE", resourceId: link.workspaceId, resourceName: ws?.name,
+      ownerUserId: ws?.userId,
+      after: { linkId: link.id, changed: Object.keys(data) },
+    })
+    return { linkId: link.id, guestAllowed: newGuestAllowed, guestCdp: newGuestCdp, hasPassword: !!(p.password !== undefined ? p.password : link.passwordHash), permission: newPermission }
   })
 }
 
@@ -1124,22 +1212,57 @@ export async function revokeWorkspaceShareLinkAction(input: unknown): Promise<Ac
   })
 }
 
-// ---- 链接兑换（已登录用户访问分享链接 → 校验 → 自动绑定 WorkspaceShare） ----
+// ---- 链接兑换（已登录用户访问分享链接 → 校验 → 自动绑定 WorkspaceShare）
+// r37：密码 + 允许/禁止名单（deny 优先；组名单任一命中即生效） ----
 export async function redeemWorkspaceShareLinkAction(input: unknown): Promise<ActionResult<{
   workspaceId: string; workspaceName: string; permission: string; already: boolean
 }>> {
   return actionHandler(async () => {
     const ctx = await requireAuth()
-    const { token } = zodValidate(z.object({ token: z.string().min(16).max(128) }), input)
+    const { token, password } = zodValidate(z.object({
+      token: z.string().min(16).max(128),
+      password: z.string().max(64).optional(), // r37：链接密码（设置了则必填）
+    }), input)
+    if (!rateLimit(`shareRedeem:${ctx.userId}`, 20, 60_000).allowed) throw new Error("兑换尝试过于频繁，请稍后再试")
     const link = await db.workspaceShareLink.findUnique({ where: { token } })
     if (!link) throw new Error("分享链接不存在（可能已失效或被撤销）")
     if (link.revokedAt) throw new Error("该分享链接已被撤销")
     if (link.expireAt && link.expireAt.getTime() < Date.now()) throw new Error("该分享链接已过期")
     if (link.maxUses > 0 && link.useCount >= link.maxUses) throw new Error("该分享链接使用次数已达上限")
 
+    // r37：密码校验（设置了 passwordHash 则必填；恒定失败语义不区分错误密码/无密码）
+    if (link.passwordHash) {
+      if (!password) throw Object.assign(new Error("该分享链接设置了访问密码"), { code: 401 })
+      const ok = await verifyPassword(password, link.passwordHash)
+      if (!ok) throw Object.assign(new Error("访问密码不正确"), { code: 401 })
+    }
+
     const ws = await db.browserWorkspace.findFirst({ where: { id: link.workspaceId, deletedAt: null } })
     if (!ws) throw new Error("链接指向的工作区已不存在")
     if (ws.userId === ctx.userId) throw new Error("这是你自己的工作区，无需兑换分享链接")
+
+    // r37：允许/禁止名单（deny 优先：用户黑 > 用户白 > 组黑 > 组白）
+    const denyUsers = (link.denyUserIds as string[] | null) || []
+    const allowUsers = (link.allowUserIds as string[] | null) || []
+    const denyGroups = (link.denyGroupIds as string[] | null) || []
+    const allowGroups = (link.allowGroupIds as string[] | null) || []
+    const myGroupIds = await userGroupIds(ctx.userId)
+    if (denyUsers.includes(ctx.userId)) {
+      throw Object.assign(new Error("该分享链接不向你开放（链接黑名单）"), { code: 403 })
+    }
+    if (myGroupIds.some((g) => denyGroups.includes(g))) {
+      throw Object.assign(new Error("该分享链接不向你所在的用户组开放（组黑名单）"), { code: 403 })
+    }
+    // 白名单语义：任一白名单存在 → 用户须命中用户白 或 组白（任一组命中即可）
+    const hasUserAllow = allowUsers.length > 0
+    const hasGroupAllow = allowGroups.length > 0
+    if (hasUserAllow || hasGroupAllow) {
+      const inUserAllow = allowUsers.includes(ctx.userId)
+      const inGroupAllow = myGroupIds.some((g) => allowGroups.includes(g))
+      if (!inUserAllow && !inGroupAllow) {
+        throw Object.assign(new Error("该分享链接仅向指定用户/用户组开放"), { code: 403 })
+      }
+    }
 
     // r13c：兑换时同步校验发起人四级管控 + 沙箱否决（链接创建后策略可能收紧，
     // 收紧后旧链接不得继续绑定新共享；管理员撤销的共享不会被链接复活）

@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import type { HistoryRow, BookmarkRow } from "@/server/actions/browsing"
 import { listHistoryAction, listBookmarksAction, myBrowsingWorkspacesAction, localDeleteBrowsingAction } from "@/server/actions/browsing"
+import { CATEGORY_LABELS, SENSITIVITY_LABELS, type DataCategory } from "@/lib/data-classification"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -44,6 +45,9 @@ export function MyBrowsingPanel({ initialTab }: { initialTab: string }) {
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [deletedShown, setDeletedShown] = useState(false)
+  // r37：数据分类筛选（明文数据自动分类：16 类 + 敏感三级）
+  const [category, setCategory] = useState<string>("")
+  const [sensitivity, setSensitivity] = useState<string>("")
 
   useEffect(() => {
     ;(async () => {
@@ -67,6 +71,8 @@ export function MyBrowsingPanel({ initialTab }: { initialTab: string }) {
           keyword: debouncedKw || undefined,
           ...(wsFilter && wsFilter.length === 1 ? { workspaceId: wsFilter[0] } : {}),
           ...(wsFilter && wsFilter.length > 1 ? { workspaceIds: wsFilter } : {}),
+          ...(category ? { category } : {}),
+          ...(sensitivity ? { sensitivity } : {}),
           page, pageSize,
         })
         setRows((res.data?.rows as HistoryRow[]) || [])
@@ -76,6 +82,8 @@ export function MyBrowsingPanel({ initialTab }: { initialTab: string }) {
           keyword: debouncedKw || undefined,
           ...(wsFilter && wsFilter.length === 1 ? { workspaceId: wsFilter[0] } : {}),
           ...(wsFilter && wsFilter.length > 1 ? { workspaceIds: wsFilter } : {}),
+          ...(category ? { category } : {}),
+          ...(sensitivity ? { sensitivity } : {}),
           page, pageSize,
           includeRemoved: deletedShown,
         })
@@ -86,7 +94,7 @@ export function MyBrowsingPanel({ initialTab }: { initialTab: string }) {
     } finally {
       setLoading(false)
     }
-  }, [tab, debouncedKw, activeWs, multiWs, page, pageSize, deletedShown])
+  }, [tab, debouncedKw, activeWs, multiWs, page, pageSize, deletedShown, category, sensitivity])
 
   useEffect(() => {
     void reload()
@@ -175,6 +183,27 @@ export function MyBrowsingPanel({ initialTab }: { initialTab: string }) {
         <span className="text-xs text-muted-foreground">共 {total} 条</span>
       </div>
 
+      {/* r37：数据分类筛选（明文数据自动分类：16 类 + 敏感三级） */}
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-xs text-muted-foreground shrink-0">分类</span>
+          <button onClick={() => { setCategory(""); setPage(1) }} className={`px-2 py-0.5 rounded-full text-[11px] border transition-colors ${!category ? "bg-primary text-primary-foreground border-primary" : "hover:bg-accent"}`}>全部</button>
+          {(Object.keys(CATEGORY_LABELS) as DataCategory[]).map((c) => (
+            <button key={c} onClick={() => { setCategory(category === c ? "" : c); setPage(1) }} className={`px-2 py-0.5 rounded-full text-[11px] border transition-colors ${category === c ? "bg-primary text-primary-foreground border-primary" : "hover:bg-accent"}`}>
+              {CATEGORY_LABELS[c]}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-xs text-muted-foreground shrink-0">敏感级</span>
+          {["", "NORMAL", "SENSITIVE", "HIGH"].map((s) => (
+            <button key={s || "all"} onClick={() => { setSensitivity(s); setPage(1) }} className={`px-2 py-0.5 rounded-full text-[11px] border transition-colors ${sensitivity === s ? "bg-primary text-primary-foreground border-primary" : "hover:bg-accent"}`}>
+              {s ? SENSITIVITY_LABELS[s as "NORMAL" | "SENSITIVE" | "HIGH"] : "全部"}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* 工具栏 */}
       <div className="flex flex-wrap items-center gap-2">
         <Tabs value={tab} onValueChange={(v) => { setTab(v as "history" | "bookmark"); setPage(1) }}>
@@ -228,6 +257,11 @@ export function MyBrowsingPanel({ initialTab }: { initialTab: string }) {
                       <td className="p-2 max-w-0">
                         <div className="truncate font-medium" title={r.title || r.url}>{r.title || "(无标题)"}</div>
                         <div className="truncate text-xs text-muted-foreground" title={r.url}>{r.url}</div>
+                        <div className="mt-0.5 flex items-center gap-1">
+                          {r.category && <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">{CATEGORY_LABELS[r.category as DataCategory] || r.category}</span>}
+                          {r.sensitivity === "HIGH" && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300">高敏</span>}
+                          {r.sensitivity === "SENSITIVE" && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300">敏感</span>}
+                        </div>
                       </td>
                       <td className="p-2 text-xs text-muted-foreground hidden md:table-cell">{r.domain || "-"}</td>
                       <td className="p-2 text-xs hidden sm:table-cell">{fmtDwell(r.dwellMs)}</td>

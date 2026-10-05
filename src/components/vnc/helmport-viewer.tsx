@@ -52,6 +52,15 @@ export interface HelmPortWorkspace {
   isAdmin: boolean
 }
 
+/** r37：票据供给抽象（默认=登录态 server action；访客页注入公共 API 取票器） */
+export interface HelmPortTicketData {
+  wsUrlQuery: string
+  bridge: { mode: string; port: number; url: string }
+  readonly: boolean
+  sessionMaxSec?: number
+  limitSource?: string
+}
+
 type Phase = "idle" | "connecting" | "live" | "reconnecting" | "error"
 
 const QUALITY_MAP: Record<string, number> = { low: 2, mid: 5, high: 9 }
@@ -194,7 +203,7 @@ export interface HelmPortServerPolicy {
   autoQuality: boolean // 服务端自适应画质（workspace.vncAutoQuality；false=手动画质）
 }
 
-export function HelmPortViewer({ workspace, serverPolicy, allowWebKiosk, allowVncAudio = true }: { workspace: HelmPortWorkspace; serverPolicy?: HelmPortServerPolicy; allowWebKiosk?: boolean; allowVncAudio?: boolean }) {
+export function HelmPortViewer({ workspace, serverPolicy, allowWebKiosk, allowVncAudio = true, fetchTicket }: { workspace: HelmPortWorkspace; serverPolicy?: HelmPortServerPolicy; allowWebKiosk?: boolean; allowVncAudio?: boolean; fetchTicket?: (workspaceId: string) => Promise<HelmPortTicketData | null> }) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
   const stageRef = React.useRef<HTMLDivElement | null>(null)
   // r35：根容器 ref（全屏容器化 —— 全屏/沉浸后顶部功能栏与控制坞依然可见可用）
@@ -414,9 +423,17 @@ export function HelmPortViewer({ workspace, serverPolicy, allowWebKiosk, allowVn
     setPhase("connecting")
     setErrMsg("")
     try {
-      const res = await getVncTicketAction({ id: workspace.id })
-      if (res.code !== 0 || !res.data) throw new Error(res.msg || "取票失败")
-      const { wsUrlQuery, bridge, readonly: ticketReadonly, sessionMaxSec = 0, limitSource = "无限制（默认）" } = res.data
+      // r37：票据来源抽象（访客模式注入公共 API；默认登录态 server action）
+      let ticketData: HelmPortTicketData | null = null
+      if (fetchTicket) {
+        ticketData = await fetchTicket(workspace.id)
+        if (!ticketData) throw new Error("取票失败（链接可能已失效或密码错误）")
+      } else {
+        const res = await getVncTicketAction({ id: workspace.id })
+        if (res.code !== 0 || !res.data) throw new Error(res.msg || "取票失败")
+        ticketData = res.data
+      }
+      const { wsUrlQuery, bridge, readonly: ticketReadonly, sessionMaxSec = 0, limitSource = "无限制（默认）" } = ticketData
 
       // 会话时长策略记录（倒计时 + 到期断开）
       sessionLimitRef.current = { maxSec: sessionMaxSec, source: limitSource, connectedAt: Date.now() }

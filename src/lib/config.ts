@@ -202,6 +202,20 @@ export const CONFIG_DEFAULTS: SystemDefaults = {
   "cdp.gatewayTls": { value: false, category: "CDP", type: "boolean", description: "网关地址是否走 TLS（true=票据地址用 wss://；需穿透/反代侧提供证书）" },
   "cdp.ticketWindowSec": { value: 300, category: "CDP", type: "number", description: "CDP 连接票据有效窗口（秒，取票→建连；单次防重放）" },
   "session.cdpMaxMinutes": { value: 0, category: "CDP", type: "number", description: "单次 CDP 外网连接最长时长全局默认（分钟，0=不限；用户>组>全局三级可覆盖）" },
+  "cdp.allowPersistentTokens": { value: true, category: "CDP", type: "boolean", description: "CDP 持久连接地址（/p/<tid> 公网地址）全局开关（false=用户侧禁建禁轮换，管理员仍可强制；地址支持永久/自定义有效期与轮换重建）" },
+  "cdp.persistentTokenMaxPerWorkspace": { value: 20, category: "CDP", type: "number", description: "每沙箱活跃持久地址数量上限（防滥用；含管理员强制创建）" },
+
+  // —— r37：访客访问（VNC/CDP 免登录接入；四级管控：沙箱>用户>用户组>全局）——
+  "share.guestEnabled": { value: false, category: "GENERAL", type: "boolean", description: "访客访问全局开关（免登录接入分享链接；默认关闭——管理员显式开启。组级 allowGuestShare / 用户级 guestShareAllowed / 沙箱级 shareDisabled 逐级覆盖）" },
+  "share.guestMaxSessionMinutes": { value: 120, category: "GENERAL", type: "number", description: "访客会话时长上限（分钟，0=不限；VNC 连接与 CDP 票据共用）" },
+
+  // —— r37：Playground（沙箱 CDP 试验场）+ 远程打印 ——
+  "feature.playground": { value: true, category: "GENERAL", type: "boolean", description: "Playground 试验场开关（用户侧 CDP 控制台：连接测试/JS 执行/截图/打印 PDF；权限锁 blockPlayground 可按用户/组禁用）" },
+  "feature.remotePrint": { value: true, category: "GENERAL", type: "boolean", description: "远程打印开关（沙箱页面经 CDP printToPDF 渲染 → 客户端本地打印机打印；权限锁 blockRemotePrint 可按用户/组禁用）" },
+
+  // —— r37：VNC↔CDP 升降级数据保留策略 ——
+  "workspace.modeSwitchPreserveData": { value: true, category: "GENERAL", type: "boolean", description: "升降级默认是否保留浏览器数据（书签/历史/Cookie 等 Profile；用户切换时可显式选择）" },
+  "workspace.modeSwitchForceFresh": { value: false, category: "GENERAL", type: "boolean", description: "管理员强制升降级不保留数据（true=所有模式切换一律丢弃旧 Profile 干净启动；最高优先级）" },
 
   // —— r36：Worker 节点注册（Master API 地址可配置；修复注册凭证显示 localhost）——
   "worknode.masterApiUrl": { value: "", category: "WORKNODE", type: "string", description: "Worker 节点注册凭证的 MASTER_API_URL 推荐值（如 https://master.example.com；空=按环境变量 NODE_PUBLIC_URL/PUBLIC_BASE_URL → 请求地址推导。Worker 实际连接地址，跨主机部署必填公网可达地址）" },
@@ -224,8 +238,12 @@ function cache(): CacheShape {
 }
 
 // 启动/按需加载全部配置到内存
+// r37：30s TTL —— 多实例/外部写库（Worker 推送、运维直改）场景下配置传播不再依赖进程重启；
+//      单机 setConfig 路径仍走 force 即时刷新（无延迟）
+const CONFIG_CACHE_TTL_MS = 30_000
 export async function ensureConfigLoaded(force = false) {
-  if (!force && g.__dockyardConfig && g.__dockyardConfig.size > 0) return
+  const cacheFresh = g.__dockyardConfigLoadedAt !== undefined && Date.now() - g.__dockyardConfigLoadedAt < CONFIG_CACHE_TTL_MS
+  if (!force && cacheFresh && g.__dockyardConfig && g.__dockyardConfig.size > 0) return
   const rows = await db.systemConfig.findMany()
   const m: CacheShape = new Map()
   for (const row of rows) {

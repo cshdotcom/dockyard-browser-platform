@@ -163,6 +163,12 @@ export default async function WorkspaceDetailPage({ params }: { params: Promise<
         lastUsedAt: l.lastUsedAt ? fmtDate(l.lastUsedAt) : null,
         note: l.note,
         createdAt: fmtDate(l.createdAt),
+        // r37：访客/密码
+        guestAllowed: l.guestAllowed,
+        guestCdp: l.guestCdp,
+        hasPassword: !!l.passwordHash,
+        guestUseCount: l.guestUseCount,
+        lastGuestAt: l.lastGuestAt ? fmtDate(l.lastGuestAt) : null,
       }))}
       scripts={scripts.map((s) => ({ id: s.id, name: s.name, description: s.description ?? "", scope: s.scope }))}
       harRecords={harRecords.map((h) => ({ id: h.id, size: fmtBytes(h.sizeBytes), createdAt: fmtDate(h.createdAt) }))}

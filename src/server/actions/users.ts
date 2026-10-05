@@ -127,6 +127,7 @@ const updateUserSchema = z.object({
   quota: zQuota.optional(),
   password: z.string().min(6).max(128).optional().or(z.literal("").transform(() => undefined)),
   force2faSetup: z.boolean().nullable().optional(), // r35：用户级强制 2FA（null=继承组/全局）
+  guestShareAllowed: z.boolean().nullable().optional(), // r37：用户级访客访问开关（null=继承组；true=强制允许/false=强制禁止）
   managedPolicyOverrides: z.string().max(64 * 1024).optional().or(z.literal("").transform(() => undefined)), // r35：企业策略覆盖 JSON（空=清除）
 })
 
@@ -154,6 +155,8 @@ export async function updateUserAction(input: unknown): Promise<ActionResult<{ i
     if (p.quota) data.quota = { ...p.quota }
     // r35：强制 2FA 用户级覆盖（三态：不传=不改 / true=强制 / false=解除 / null=继承）
     if (p.force2faSetup !== undefined) data.force2faSetup = p.force2faSetup === null ? false : p.force2faSetup
+    // r37：访客访问开关（三态：不传=不改）
+    if (p.guestShareAllowed !== undefined) data.guestShareAllowed = p.guestShareAllowed
     // r35：企业策略覆盖（JSON 校验：空串=清除，非空必须可解析为对象且键合法）
     if (p.managedPolicyOverrides !== undefined) {
       const raw = p.managedPolicyOverrides.trim()
@@ -1193,6 +1196,45 @@ export async function setUserShareAllowedAction(
       severity: "WARN",
     })
     return { id: user.id, shareAllowed: p.shareAllowed }
+  })
+}
+
+// ---- r37：用户级访客访问开关（三态：null=继承组 / true=强制允许 / false=强制禁止）----
+// 语义：false=该用户创建的分享链接一律不允许访客免登录接入（四级管控第2层）
+export async function setUserGuestShareAllowedAction(
+  input: unknown,
+): Promise<ActionResult<{ id: string; guestShareAllowed: boolean | null }>> {
+  return actionHandler(async () => {
+    await requireWritableMode()
+    const ctx = await requireAuth()
+    const isAdmin = ctx.role === "SUPER_ADMIN" || ctx.role === "ADMIN"
+    const isGroupAdmin = ctx.role === "GROUP_ADMIN"
+    if (!isAdmin && !isGroupAdmin) throw new Error("无权设置用户访客访问开关（需要管理员或组管理员权限）")
+
+    const p = zodValidate(z.object({
+      id: zId,
+      guestShareAllowed: z.boolean().nullable(), // null=继承所属组
+    }), input)
+
+    const user = await db.user.findUnique({ where: { id: p.id } })
+    if (!user || user.deletedAt) throw new Error("用户不存在或已删除")
+    if (isGroupAdmin && !isAdmin) {
+      const { isGroupAdminOf } = await import("@/lib/permissions")
+      if (!(await isGroupAdminOf(ctx.userId, user.id))) throw new Error("仅可为本组成员设置访客访问开关")
+    }
+
+    const before = user.guestShareAllowed
+    await db.user.update({ where: { id: user.id }, data: { guestShareAllowed: p.guestShareAllowed } })
+
+    await writeAudit({
+      operatorUserId: ctx.userId, operatorName: ctx.username,
+      operationType: "USER_GUEST_SHARE_SWITCH",
+      resourceType: "USER", resourceId: user.id, resourceName: user.username, ownerUserId: user.id,
+      before: { guestShareAllowed: before },
+      after: { guestShareAllowed: p.guestShareAllowed, note: `管理员 ${ctx.username} 调整用户 ${user.username} 访客访问开关（${before === null ? "继承组" : before ? "允许" : "禁止"} → ${p.guestShareAllowed === null ? "继承组" : p.guestShareAllowed ? "允许" : "禁止"}）` },
+      severity: "WARN",
+    })
+    return { id: user.id, guestShareAllowed: p.guestShareAllowed }
   })
 }
 

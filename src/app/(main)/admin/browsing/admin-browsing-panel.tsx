@@ -7,12 +7,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import type { HistoryRow, BookmarkRow } from "@/server/actions/browsing"
-import { listHistoryAction, listBookmarksAction, exportBrowsingAction, localDeleteBrowsingAction, triggerBrowsingCollectAction } from "@/server/actions/browsing"
+import { listHistoryAction, listBookmarksAction, exportBrowsingAction, localDeleteBrowsingAction, triggerBrowsingCollectAction, browsingClassificationStatsAction, adminBackfillClassificationAction } from "@/server/actions/browsing"
+import { CATEGORY_LABELS, SENSITIVITY_LABELS, type DataCategory } from "@/lib/data-classification"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Search, Trash2, RotateCcw, History, Bookmark, ChevronLeft, ChevronRight, Download, Gauge, Users, X } from "lucide-react"
+import { Search, Trash2, RotateCcw, History, Bookmark, ChevronLeft, ChevronRight, Download, Gauge, Users, X, PieChart, Wand2 } from "lucide-react"
 import { toast } from "sonner"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 
@@ -189,8 +190,136 @@ export function AdminBrowsingPanel({
 
   const userFilterLabel = userFilter === "MINE" ? "我的沙箱" : userFilter === "ALL" ? "全部用户" : `已选 ${selectedUserIds.size} 用户`
 
+  // r37：数据分类统计 + 存量回填（明文数据自动分类识别解析）
+  const [statsOpen, setStatsOpen] = useState(false)
+  const [statsLoading, setStatsLoading] = useState(false)
+  const [backfillBusy, setBackfillBusy] = useState(false)
+  const [stats, setStats] = useState<{
+    historyByCategory: Array<{ category: string; count: number }>
+    historyBySensitivity: Array<{ sensitivity: string; count: number }>
+    bookmarkByCategory: Array<{ category: string; count: number }>
+    bookmarkBySensitivity: Array<{ sensitivity: string; count: number }>
+    highSensitivityUsers: Array<{ username: string; displayName: string | null; count: number; lastVisitAt: string | null }>
+    unclassified: { history: number; bookmark: number }
+    totalHistory: number
+    totalBookmark: number
+  } | null>(null)
+
+  const loadStats = useCallback(async () => {
+    setStatsLoading(true)
+    try {
+      const res = await browsingClassificationStatsAction({})
+      if (res.code === 0 && res.data) setStats(res.data)
+      else toast.error(res.msg)
+    } finally { setStatsLoading(false) }
+  }, [])
+
+  useEffect(() => {
+    if (statsOpen && !stats) void loadStats()
+  }, [statsOpen, stats, loadStats])
+
+  const runBackfill = async () => {
+    setBackfillBusy(true)
+    try {
+      const res = await adminBackfillClassificationAction({ maxRows: 10000 })
+      if (res.code === 0 && res.data) {
+        toast.success(`回填完成：历史 ${res.data.historyUpdated} 条 / 书签 ${res.data.bookmarkUpdated} 条（${res.data.batches} 批）`)
+        void loadStats()
+      } else toast.error(res.msg)
+    } finally { setBackfillBusy(false) }
+  }
+
   return (
     <div className="space-y-4">
+      {/* r37：数据分类总览（明文数据自动分类识别解析；16 类 + 三级敏感 + 高敏用户榜 + 存量回填） */}
+      <div className="rounded-lg border bg-card">
+        <button className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-sm" onClick={() => setStatsOpen(!statsOpen)}>
+          <span className="flex items-center gap-2 font-medium">
+            <PieChart className="h-4 w-4 text-indigo-600" /> 数据分类总览（浏览/书签自动识别解析）
+            {stats && <span className="text-xs font-normal text-muted-foreground">历史 {stats.totalHistory} · 书签 {stats.totalBookmark} · 高敏 {stats.historyBySensitivity.find((s) => s.sensitivity === "HIGH")?.count || 0}</span>}
+          </span>
+          <span className="text-xs text-muted-foreground">{statsOpen ? "收起" : "展开"}</span>
+        </button>
+        {statsOpen && (
+          <div className="px-3 pb-3 space-y-4 border-t pt-3">
+            {statsLoading && !stats && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground py-4"><Gauge className="h-4 w-4 animate-spin" /> 统计加载中…</div>
+            )}
+            {stats && (
+              <>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-muted-foreground">浏览历史分类分布</p>
+                    <div className="space-y-1">
+                      {stats.historyByCategory.sort((a, b) => b.count - a.count).slice(0, 10).map((c) => (
+                        <div key={c.category} className="flex items-center gap-2 text-xs">
+                          <span className="w-20 shrink-0 truncate">{CATEGORY_LABELS[c.category as DataCategory] || c.category}</span>
+                          <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
+                            <div className="h-full bg-indigo-500" style={{ width: `${Math.min(100, (c.count / Math.max(1, stats.historyByCategory[0]?.count || 1)) * 100)}%` }} />
+                          </div>
+                          <span className="tabular-nums text-muted-foreground w-12 text-right">{c.count}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-muted-foreground">书签分类分布</p>
+                    <div className="space-y-1">
+                      {stats.bookmarkByCategory.sort((a, b) => b.count - a.count).slice(0, 10).map((c) => (
+                        <div key={c.category} className="flex items-center gap-2 text-xs">
+                          <span className="w-20 shrink-0 truncate">{CATEGORY_LABELS[c.category as DataCategory] || c.category}</span>
+                          <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
+                            <div className="h-full bg-teal-500" style={{ width: `${Math.min(100, (c.count / Math.max(1, stats.bookmarkByCategory[0]?.count || 1)) * 100)}%` }} />
+                          </div>
+                          <span className="tabular-nums text-muted-foreground w-12 text-right">{c.count}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-muted-foreground">敏感级别分布（历史）</p>
+                    <div className="flex gap-2 flex-wrap">
+                      {stats.historyBySensitivity.map((s) => (
+                        <span key={s.sensitivity} className={`text-xs px-2 py-1 rounded-md border ${s.sensitivity === "HIGH" ? "border-red-300 bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-300" : s.sensitivity === "SENSITIVE" ? "border-amber-300 bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300" : ""}`}>
+                          {SENSITIVITY_LABELS[s.sensitivity as "NORMAL" | "SENSITIVE" | "HIGH"] || s.sensitivity}：{s.count}
+                        </span>
+                      ))}
+                    </div>
+                    {stats.highSensitivityUsers.length > 0 && (
+                      <div className="space-y-1 mt-2">
+                        <p className="text-xs font-medium text-muted-foreground">高敏访问 Top 用户（银行/政务/凭据页）</p>
+                        {stats.highSensitivityUsers.map((u) => (
+                          <div key={u.username} className="flex items-center justify-between text-xs border rounded px-2 py-1">
+                            <span className="truncate">{u.username}{u.displayName ? `（${u.displayName}）` : ""}</span>
+                            <span className="text-red-600 tabular-nums shrink-0">{u.count} 次{u.lastVisitAt ? ` · 最近 ${fmtTime(u.lastVisitAt)}` : ""}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-muted-foreground">存量回填（升级前历史数据补分类）</p>
+                    <p className="text-xs text-muted-foreground">未分类：历史 {stats.unclassified.history} 条 · 书签 {stats.unclassified.bookmark} 条</p>
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" variant="outline" onClick={() => void runBackfill()} disabled={backfillBusy || (stats.unclassified.history + stats.unclassified.bookmark) === 0}>
+                        {backfillBusy ? <Gauge className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Wand2 className="h-3.5 w-3.5 mr-1" />}
+                        一键回填分类
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => void loadStats()} disabled={statsLoading}>
+                        <RotateCcw className="h-3.5 w-3.5 mr-1" /> 刷新统计
+                      </Button>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">采集入库时已自动分类；回填仅用于升级 r37 前的存量数据（分批 1000 条防长事务）</p>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* 筛选栏 */}
       <div className="flex flex-wrap items-center gap-2">
         <Tabs value={tab} onValueChange={(v) => { setTab(v as "history" | "bookmark"); setPage(1) }}>
